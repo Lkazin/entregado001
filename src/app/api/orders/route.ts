@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/server';
 import crypto from 'crypto';
 
+export const dynamic = 'force-dynamic';
+
 // Armazenamento em memória com sincronização bidirecional no Supabase
 // Garante persistência instantânea mesmo se o banco estiver aplicando migrations
 let liveOrders: any[] = [];
