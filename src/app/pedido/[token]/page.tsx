@@ -9,38 +9,72 @@ export default function OrderTrackingPage() {
   const params = useParams();
   const token = params?.token as string;
 
-  const [order, setOrder] = useState<any>({
-    orderNumber: 1042,
-    status: 'preparando', // recebido, preparando, pronto, em_entrega, concluido
-    customer: { name: 'Cliente Fictício Teste', phone: '(11) 98765-4321' },
-    address: {
-      street: 'Rua das Pizzas',
-      number: '100',
-      region: 'Jardins / Cerqueira César',
-      complement: 'Apto 42'
-    },
-    items: [
-      {
-        name: 'Pizza Grande (8 fatias)',
-        details: '1/3 Calabresa Artesanal + 1/3 Quatro Queijos + 1/3 Frango c/ Catupiry • Borda Catupiry Original',
-        price: 82.00,
-        qty: 1
-      },
-      {
-        name: 'Coca-Cola Original 2L',
-        details: 'Garrafa PET 2 Litros bem gelada',
-        price: 15.00,
-        qty: 1
+  const [order, setOrder] = useState<any>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    async function loadOrder() {
+      try {
+        // 1. Tentar ler do localStorage do cliente
+        if (typeof window !== 'undefined') {
+          const cached = localStorage.getItem('novaesweb_orders');
+          if (cached) {
+            const list = JSON.parse(cached);
+            const found = list.find((o: any) => o.trackingToken === token || o.id === token || String(o.orderNumber) === token);
+            if (found) {
+              setOrder({
+                orderNumber: found.orderNumber,
+                status: found.status,
+                customer: { name: found.customerName, phone: found.phone },
+                address: { street: found.address, number: '', region: found.region },
+                items: [{ name: found.itemsSummary || 'Pizza Artesanal Selecionada', details: 'Item do pedido', price: found.total, qty: 1 }],
+                subtotal: found.total - 6,
+                deliveryFee: 6.00,
+                total: found.total,
+                paymentMethod: found.paymentMethod === 'pix_manual' ? 'Pix Manual' : found.paymentMethod === 'card_terminal' ? 'Cartão na Entrega' : 'Dinheiro na Entrega',
+                deliveryPin: found.deliveryPin || '****',
+                estimatedMinutes: 30,
+                createdAt: found.createdAt
+              });
+              setIsLoading(false);
+            }
+          }
+        }
+
+        // 2. Buscar da API de pedidos
+        const res = await fetch('/api/orders');
+        const data = await res.json();
+        if (data.orders) {
+          const found = data.orders.find((o: any) => o.trackingToken === token || o.id === token || String(o.orderNumber) === token);
+          if (found) {
+            setOrder({
+              orderNumber: found.orderNumber,
+              status: found.status,
+              customer: { name: found.customerName, phone: found.phone },
+              address: { street: found.address, number: '', region: found.region },
+              items: [{ name: found.itemsSummary || 'Pizza Artesanal Selecionada', details: 'Item do pedido', price: found.total, qty: 1 }],
+              subtotal: found.total - 6,
+              deliveryFee: 6.00,
+              total: found.total,
+              paymentMethod: found.paymentMethod === 'pix_manual' ? 'Pix Manual' : found.paymentMethod === 'card_terminal' ? 'Cartão na Entrega' : 'Dinheiro na Entrega',
+              deliveryPin: found.deliveryPin || '****',
+              estimatedMinutes: 30,
+              createdAt: found.createdAt
+            });
+          }
+        }
+      } catch (e) {
+      } finally {
+        setIsLoading(false);
       }
-    ],
-    subtotal: 97.00,
-    deliveryFee: 7.00,
-    total: 104.00,
-    paymentMethod: 'Pix Manual (Conferido)',
-    deliveryPin: '7391',
-    estimatedMinutes: 25,
-    createdAt: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
-  });
+    }
+
+    if (token) {
+      loadOrder();
+      const interval = setInterval(loadOrder, 3000);
+      return () => clearInterval(interval);
+    }
+  }, [token]);
 
   const steps = [
     { key: 'recebido', label: 'Pedido Recebido', desc: 'Recebido pelo sistema' },
@@ -49,6 +83,35 @@ export default function OrderTrackingPage() {
     { key: 'em_entrega', label: 'Em Rota', desc: 'A caminho da sua casa' },
     { key: 'concluido', label: 'Entregue', desc: 'Bom apetite!' },
   ];
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-zinc-950 text-white flex flex-col items-center justify-center p-4">
+        <div className="w-8 h-8 border-4 border-red-600 border-t-transparent rounded-full animate-spin mb-4" />
+        <p className="text-zinc-400 text-xs">Carregando dados do pedido...</p>
+      </div>
+    );
+  }
+
+  if (!order) {
+    return (
+      <div className="min-h-screen bg-zinc-950 text-white flex flex-col items-center justify-center p-4 text-center">
+        <div className="w-12 h-12 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-500 mb-3">
+          <AlertCircle className="w-6 h-6" />
+        </div>
+        <h1 className="text-lg font-bold">Pedido Não Encontrado</h1>
+        <p className="text-xs text-zinc-400 mt-1 max-w-sm">
+          Não localizamos o pedido correspondente ao link informado.
+        </p>
+        <Link
+          href="/"
+          className="mt-4 px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold transition"
+        >
+          Voltar ao Cardápio
+        </Link>
+      </div>
+    );
+  }
 
   const currentStepIdx = steps.findIndex(s => s.key === order.status);
 
@@ -183,51 +246,48 @@ export default function OrderTrackingPage() {
                 <span>Taxa de Entrega:</span>
                 <span>R$ {order.deliveryFee.toFixed(2).replace('.', ',')}</span>
               </div>
-              <div className="flex justify-between text-base font-extrabold text-white pt-2 border-t border-zinc-800">
-                <span>Total Pago/A Pagar:</span>
+              <div className="flex justify-between text-base font-bold text-white pt-2 border-t border-zinc-800">
+                <span>Total:</span>
                 <span className="text-red-500">R$ {order.total.toFixed(2).replace('.', ',')}</span>
               </div>
             </div>
           </div>
 
-          {/* Endereço de Entrega e Pagamento */}
-          <div className="p-6 rounded-2xl bg-zinc-900 border border-zinc-800 space-y-4">
-            <h3 className="font-bold text-white text-base">Dados de Entrega</h3>
+          {/* Dados de Entrega e Suporte */}
+          <div className="p-6 rounded-2xl bg-zinc-900 border border-zinc-800 space-y-4 text-xs">
+            <h3 className="font-bold text-white text-base">Destino & Pagamento</h3>
             
-            <div className="space-y-3 text-xs">
-              <div className="flex items-start gap-3 p-3 rounded-xl bg-zinc-950 border border-zinc-800">
-                <MapPin className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
-                <div>
-                  <span className="font-bold text-white block">Endereço de Destino</span>
-                  <p className="text-zinc-400 mt-0.5">
-                    {order.address.street}, {order.address.number} - {order.address.complement}
-                  </p>
-                  <p className="text-zinc-500 text-[11px]">{order.address.region} - São Paulo / SP</p>
-                </div>
-              </div>
-
-              <div className="p-3 rounded-xl bg-zinc-950 border border-zinc-800">
-                <span className="font-semibold text-zinc-400 block text-[11px]">Forma de Pagamento</span>
-                <p className="font-bold text-white mt-0.5">{order.paymentMethod}</p>
-              </div>
-
-              <div className="p-3 rounded-xl bg-zinc-950 border border-zinc-800 flex items-center justify-between">
-                <div>
-                  <span className="font-semibold text-zinc-400 block text-[11px]">Precisa de ajuda com o pedido?</span>
-                  <span className="text-xs text-zinc-300">Fale com a nossa equipe de atendimento</span>
-                </div>
-                <a
-                  href="https://wa.me/5511987654321"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-1.5 transition"
-                >
-                  <Phone className="w-3.5 h-3.5" />
-                  WhatsApp
-                </a>
+            <div className="p-3 rounded-xl bg-zinc-950 border border-zinc-800 flex items-start gap-3">
+              <MapPin className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
+              <div>
+                <span className="font-bold text-white block">Endereço de Destino</span>
+                <p className="text-zinc-400 mt-0.5">
+                  {order.address.street} {order.address.number}
+                </p>
+                <p className="text-zinc-500 text-[11px]">{order.address.region} - São Paulo / SP</p>
               </div>
             </div>
 
+            <div className="p-3 rounded-xl bg-zinc-950 border border-zinc-800">
+              <span className="font-semibold text-zinc-400 block text-[11px]">Forma de Pagamento</span>
+              <p className="font-bold text-white mt-0.5">{order.paymentMethod}</p>
+            </div>
+
+            <div className="p-3 rounded-xl bg-zinc-950 border border-zinc-800 flex items-center justify-between">
+              <div>
+                <span className="font-semibold text-zinc-400 block text-[11px]">Precisa de ajuda com o pedido?</span>
+                <span className="text-xs text-zinc-300">Fale com a nossa equipe de atendimento</span>
+              </div>
+              <a
+                href="https://wa.me/5511987654321"
+                target="_blank"
+                rel="noreferrer"
+                className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-1.5 transition"
+              >
+                <Phone className="w-3.5 h-3.5" />
+                WhatsApp
+              </a>
+            </div>
           </div>
 
         </div>

@@ -1269,18 +1269,7 @@ BEGIN
     VALUES (v_store_a_id, 60, 3)
     ON CONFLICT (store_id) DO NOTHING;
 
-    -- Entregador Teste e Vínculo com a Loja A
-    INSERT INTO public.delivery_drivers (id, identity_subject, display_name, optional_phone)
-    VALUES (v_driver_id, 'driver_rodrigo_silva_test', 'Rodrigo Silva (Motoboy 01)', '(11) 97777-8888')
-    ON CONFLICT DO NOTHING;
 
-    INSERT INTO public.delivery_store_memberships (id, driver_id, store_id, status, valid_from, expires_at)
-    VALUES (v_membership_id, v_driver_id, v_store_a_id, 'ativo', timezone('utc'::text, now()), timezone('utc'::text, now()) + INTERVAL '30 days')
-    ON CONFLICT DO NOTHING;
-
-    INSERT INTO public.delivery_presence (driver_id, active_store_id, manual_enabled, last_heartbeat_at)
-    VALUES (v_driver_id, v_store_a_id, true, timezone('utc'::text, now()))
-    ON CONFLICT (driver_id) DO NOTHING;
 
     -- 2. LOJA B: PIZZARIA NAPOLI (Demonstração e Prova de Isolamento Multi-lojas)
     INSERT INTO public.stores (id, name, slug, phone, address, active, timezone)

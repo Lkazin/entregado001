@@ -4,19 +4,8 @@ import crypto from 'crypto';
 
 export const dynamic = 'force-dynamic';
 
-// Estado compartilhado de entregadores e operações ativas
-let liveDrivers: any[] = [
-  {
-    id: 'drv-1',
-    name: 'Rodrigo Silva (Motoboy 01)',
-    phone: '(11) 97777-8888',
-    status: 'ativo',
-    presence: 'disponivel',
-    activeDeliveries: 0,
-    maxDeliveries: 3,
-    inviteExpiryDays: 30
-  }
-];
+// Estado compartilhado de entregadores e operações ativas (inicia vazio, sem dados fake)
+let liveDrivers: any[] = [];
 
 let liveOffers: any[] = [];
 let liveAssignments: any[] = [];
@@ -29,7 +18,9 @@ async function loadLogisticsState() {
     if (fileData) {
       const text = await fileData.text();
       const parsed = JSON.parse(text);
-      if (Array.isArray(parsed.drivers) && parsed.drivers.length > 0) liveDrivers = parsed.drivers;
+      if (Array.isArray(parsed.drivers)) {
+        liveDrivers = parsed.drivers.filter((d: any) => !d.name?.includes('Rodrigo Silva'));
+      }
       if (Array.isArray(parsed.offers)) liveOffers = parsed.offers;
       if (Array.isArray(parsed.assignments)) liveAssignments = parsed.assignments;
     }
@@ -73,12 +64,7 @@ export async function GET(
         return NextResponse.json({
           success: true,
           action: 'session.validate',
-          driver: liveDrivers[0] || {
-            id: 'drv-test-1',
-            name: 'Rodrigo Silva (Motoboy 01)',
-            presence: 'disponivel',
-            manualEnabled: true,
-          },
+          driver: liveDrivers[0] || null,
           activeStore: {
             id: storeId,
             name: 'Bella Pizza',

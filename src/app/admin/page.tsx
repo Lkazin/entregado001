@@ -62,8 +62,16 @@ export default function AdminDashboardPage() {
         const cached = localStorage.getItem('novaesweb_orders');
         if (cached) {
           const parsed = JSON.parse(cached);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            setOrders(parsed);
+          if (Array.isArray(parsed)) {
+            // Filtrar pedidos de demonstração antigos
+            const realOnly = parsed.filter((o: any) => 
+              !o.customerName?.includes('Teste') && 
+              !o.customerName?.includes('Fictício') &&
+              !o.customerName?.includes('João') &&
+              !o.customerName?.includes('Maria')
+            );
+            setOrders(realOnly);
+            localStorage.setItem('novaesweb_orders', JSON.stringify(realOnly));
           }
         }
       } catch (e) {}
@@ -103,7 +111,13 @@ export default function AdminDashboardPage() {
       const dataOrders = await resOrders.json();
       if (dataOrders.success && Array.isArray(dataOrders.orders)) {
         setOrders(prevOrders => {
-          const incoming: AdminOrder[] = dataOrders.orders;
+          // Filtrar quaisquer pedidos de demonstração remanescentes
+          const incoming: AdminOrder[] = dataOrders.orders.filter((o: any) => 
+            !o.customerName?.includes('Teste') && 
+            !o.customerName?.includes('Fictício') &&
+            !o.customerName?.includes('João') &&
+            !o.customerName?.includes('Maria')
+          );
           
           // Se a API retornou vazia mas temos pedidos locais, mantemos os locais
           if (incoming.length === 0 && prevOrders.length > 0) {
@@ -154,9 +168,10 @@ export default function AdminDashboardPage() {
       const resDrivers = await fetch('/api/v1/logistics/drivers');
       const dataDrivers = await resDrivers.json();
       if (dataDrivers.success && Array.isArray(dataDrivers.drivers)) {
-        setDrivers(dataDrivers.drivers);
-        if (!selectedDriverId && dataDrivers.drivers.length > 0) {
-          setSelectedDriverId(dataDrivers.drivers[0].id);
+        const realDrivers = dataDrivers.drivers.filter((d: any) => !d.name?.includes('Rodrigo Silva'));
+        setDrivers(realDrivers);
+        if (!selectedDriverId && realDrivers.length > 0) {
+          setSelectedDriverId(realDrivers[0].id);
         }
       }
     } catch (err) {
@@ -324,26 +339,7 @@ export default function AdminDashboardPage() {
     fetchData(true);
   };
 
-  // Criar Pedido Real Rápido para Testar o Fluxo
-  const handleQuickCreateOrder = async () => {
-    const res = await fetch('/api/orders', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        customer: { name: 'Cliente Real Teste', phone: '(11) 98765-4321' },
-        address: { street: 'Av. Paulista', number: '1000', complement: 'Apto 101', region: 'Bela Vista', fee: 6.00 },
-        items: [{ type: 'pizza', name: 'Pizza Grande', quantity: 1, unitPrice: 78.00, totalPrice: 78.00, flavors: [{ name: 'Calabresa Artesanal' }, { name: 'Quatro Queijos' }] }],
-        subtotal: 78.00,
-        deliveryFee: 6.00,
-        total: 84.00,
-        payment: { method: 'pix_manual' }
-      })
-    });
-    const data = await res.json();
-    if (data.success) {
-      fetchData(true);
-    }
-  };
+
 
   if (isAuthenticated === false) {
     return <AdminPinAuth onSuccess={() => setIsAuthenticated(true)} />;
@@ -498,14 +494,6 @@ export default function AdminDashboardPage() {
                   Os pedidos caem aqui em tempo real conforme os clientes compram no site.
                 </p>
               </div>
-
-              <button
-                onClick={handleQuickCreateOrder}
-                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold flex items-center gap-2 border border-zinc-700 transition"
-              >
-                <PlusCircle className="w-4 h-4 text-emerald-400" />
-                <span>Simular Novo Pedido</span>
-              </button>
             </div>
 
             {/* As 5 Colunas do Kanban */}
@@ -691,11 +679,15 @@ export default function AdminDashboardPage() {
                       onChange={(e) => setSelectedDriverId(e.target.value)}
                       className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2 text-white font-semibold"
                     >
-                      {drivers.filter(d => d.status === 'ativo').map((drv) => (
-                        <option key={drv.id} value={drv.id}>
-                          {drv.name} — {drv.activeDeliveries}/{drv.maxDeliveries} corridas ({drv.presence === 'disponivel' ? 'Online' : 'Offline'})
-                        </option>
-                      ))}
+                      {drivers.filter(d => d.status === 'ativo').length === 0 ? (
+                        <option value="">Nenhum entregador cadastrado ou ativo</option>
+                      ) : (
+                        drivers.filter(d => d.status === 'ativo').map((drv) => (
+                          <option key={drv.id} value={drv.id}>
+                            {drv.name} — {drv.activeDeliveries}/{drv.maxDeliveries} corridas ({drv.presence === 'disponivel' ? 'Online' : 'Offline'})
+                          </option>
+                        ))
+                      )}
                     </select>
                   </div>
 
@@ -766,49 +758,57 @@ export default function AdminDashboardPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-800/60">
-                    {drivers.map((drv) => (
-                      <tr key={drv.id} className="hover:bg-zinc-800/20">
-                        <td className="p-4">
-                          <p className="font-bold text-white">{drv.name}</p>
-                          <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold mt-1 ${
-                            drv.status === 'ativo' ? 'bg-emerald-950 text-emerald-400' : 'bg-red-950 text-red-400'
-                          }`}>
-                            {drv.status === 'ativo' ? 'Ativo' : 'Bloqueado'}
-                          </span>
-                        </td>
-                        <td className="p-4 text-zinc-300 font-mono">
-                          {drv.phone || 'Não informado'}
-                        </td>
-                        <td className="p-4">
-                          <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                            drv.presence === 'disponivel'
-                              ? 'bg-emerald-950 text-emerald-400 border border-emerald-800/40'
-                              : 'bg-zinc-800 text-zinc-400'
-                          }`}>
-                            <span className={`w-1.5 h-1.5 rounded-full ${drv.presence === 'disponivel' ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-500'}`} />
-                            {drv.presence === 'disponivel' ? 'Ligado / Disponível' : 'Desligado / Offline'}
-                          </span>
-                        </td>
-                        <td className="p-4 font-semibold text-zinc-200">
-                          {drv.activeDeliveries} de {drv.maxDeliveries} pedidos
-                        </td>
-                        <td className="p-4 text-zinc-400">
-                          {drv.status === 'ativo' ? `${drv.inviteExpiryDays} dias restantes` : 'Acesso revogado'}
-                        </td>
-                        <td className="p-4 text-right space-x-2">
-                          <button
-                            onClick={() => handleToggleBlockDriver(drv.id)}
-                            className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition ${
-                              drv.status === 'ativo'
-                                ? 'bg-zinc-800 hover:bg-red-950 hover:text-red-300 text-zinc-300'
-                                : 'bg-emerald-900/60 hover:bg-emerald-800 text-emerald-300'
-                            }`}
-                          >
-                            {drv.status === 'ativo' ? 'Bloquear Novas Ofertas' : 'Desbloquear'}
-                          </button>
+                    {drivers.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="p-8 text-center text-zinc-500 text-xs">
+                          Nenhum entregador cadastrado. Cadastre o primeiro entregador no formulário abaixo para gerar o convite de uso único.
                         </td>
                       </tr>
-                    ))}
+                    ) : (
+                      drivers.map((drv) => (
+                        <tr key={drv.id} className="hover:bg-zinc-800/20">
+                          <td className="p-4">
+                            <p className="font-bold text-white">{drv.name}</p>
+                            <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold mt-1 ${
+                              drv.status === 'ativo' ? 'bg-emerald-950 text-emerald-400' : 'bg-red-950 text-red-400'
+                            }`}>
+                              {drv.status === 'ativo' ? 'Ativo' : 'Bloqueado'}
+                            </span>
+                          </td>
+                          <td className="p-4 text-zinc-300 font-mono">
+                            {drv.phone || 'Não informado'}
+                          </td>
+                          <td className="p-4">
+                            <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                              drv.presence === 'disponivel'
+                                ? 'bg-emerald-950 text-emerald-400 border border-emerald-800/40'
+                                : 'bg-zinc-800 text-zinc-400'
+                            }`}>
+                              <span className={`w-1.5 h-1.5 rounded-full ${drv.presence === 'disponivel' ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-500'}`} />
+                              {drv.presence === 'disponivel' ? 'Ligado / Disponível' : 'Desligado / Offline'}
+                            </span>
+                          </td>
+                          <td className="p-4 font-semibold text-zinc-200">
+                            {drv.activeDeliveries} de {drv.maxDeliveries} pedidos
+                          </td>
+                          <td className="p-4 text-zinc-400">
+                            {drv.status === 'ativo' ? `${drv.inviteExpiryDays} dias restantes` : 'Acesso revogado'}
+                          </td>
+                          <td className="p-4 text-right space-x-2">
+                            <button
+                              onClick={() => handleToggleBlockDriver(drv.id)}
+                              className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition ${
+                                drv.status === 'ativo'
+                                  ? 'bg-zinc-800 hover:bg-red-950 hover:text-red-300 text-zinc-300'
+                                  : 'bg-emerald-900/60 hover:bg-emerald-800 text-emerald-300'
+                              }`}
+                            >
+                              {drv.status === 'ativo' ? 'Bloquear Novas Ofertas' : 'Desbloquear'}
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
                   </tbody>
                 </table>
               </div>
