@@ -1,0 +1,909 @@
+'use client';
+
+import React, { useState, useEffect } from 'react';
+import Link from 'next/link';
+import { 
+  Flame, LayoutDashboard, ShoppingCart, UtensilsCrossed, Bike, Settings, 
+  CheckCircle2, Clock, AlertTriangle, ArrowRight, Printer, XCircle, Search, 
+  UserPlus, ShieldAlert, KeyRound, Check, RefreshCw, Send, Lock, PlusCircle
+} from 'lucide-react';
+import { PIZZA_FLAVORS } from '@/lib/constants';
+
+import AdminPinAuth from '@/components/AdminPinAuth';
+
+interface AdminOrder {
+  id: string;
+  orderNumber: number;
+  customerName: string;
+  phone: string;
+  address: string;
+  region: string;
+  itemsSummary: string;
+  total: number;
+  status: 'recebido' | 'preparando' | 'pronto' | 'em_entrega' | 'concluido' | 'cancelado';
+  paymentMethod: 'pix_manual' | 'cash_delivery' | 'card_terminal';
+  paymentStatus: 'aguardando_conferencia' | 'confirmado_manual' | 'recebido_entrega';
+  deliveryPin: string;
+  driverName?: string | null;
+  createdAt: string;
+}
+
+interface AdminDriver {
+  id: string;
+  name: string;
+  phone: string | null;
+  status: 'ativo' | 'bloqueado';
+  presence: 'disponivel' | 'indisponivel';
+  activeDeliveries: number;
+  maxDeliveries: number;
+  inviteExpiryDays: number;
+}
+
+export default function AdminDashboardPage() {
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+  const [activeTab, setActiveTab] = useState<'overview' | 'kanban' | 'menu' | 'logistics' | 'settings'>('kanban');
+
+  // Estado REAL sem dados fakes (carregados da API e do banco)
+  const [orders, setOrders] = useState<AdminOrder[]>([]);
+  const [drivers, setDrivers] = useState<AdminDriver[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // Checar autenticação via PIN 615210
+  useEffect(() => {
+    const auth = typeof window !== 'undefined' ? sessionStorage.getItem('novaesweb_admin_auth') : null;
+    setIsAuthenticated(auth === 'authenticated');
+  }, []);
+
+  // Estados de Despacho
+  const [selectedOrderToDispatch, setSelectedOrderToDispatch] = useState<AdminOrder | null>(null);
+  const [selectedDriverId, setSelectedDriverId] = useState<string>('');
+  const [deliveryFeeOffered, setDeliveryFeeOffered] = useState<string>('12,00');
+  const [dispatchAlert, setDispatchAlert] = useState<string | null>(null);
+
+  // Estados para Novo Entregador
+  const [newDriverName, setNewDriverName] = useState('');
+  const [newDriverPhone, setNewDriverPhone] = useState('');
+  const [newDriverValidity, setNewDriverValidity] = useState('30');
+  const [generatedInviteCode, setGeneratedInviteCode] = useState<string | null>(null);
+
+  // FUNÇÃO DE BUSCA DOS DADOS REAIS
+  const fetchData = async (silent = false) => {
+    if (!silent) setIsRefreshing(true);
+    try {
+      // 1. Buscar Pedidos Reais
+      const resOrders = await fetch('/api/orders');
+      const dataOrders = await resOrders.json();
+      if (dataOrders.success) {
+        setOrders(dataOrders.orders || []);
+      }
+
+      // 2. Buscar Entregadores Reais e Status de Presença
+      const resDrivers = await fetch('/api/v1/logistics/drivers');
+      const dataDrivers = await resDrivers.json();
+      if (dataDrivers.success && Array.isArray(dataDrivers.drivers)) {
+        setDrivers(dataDrivers.drivers);
+        if (!selectedDriverId && dataDrivers.drivers.length > 0) {
+          setSelectedDriverId(dataDrivers.drivers[0].id);
+        }
+      }
+    } catch (err) {
+      console.error('Erro ao sincronizar dados:', err);
+    } finally {
+      setIsLoading(false);
+      setIsRefreshing(false);
+    }
+  };
+
+  // POLLING AUTOMÁTICO A CADA 3 SEGUNDOS (Tempo Real Conectado ao App do Entregador)
+  useEffect(() => {
+    fetchData();
+    const interval = setInterval(() => {
+      fetchData(true);
+    }, 3000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Transições do Kanban Conectadas à API
+  const handleAdvanceStatus = async (orderId: string, currentStatus: AdminOrder['status']) => {
+    const sequence: AdminOrder['status'][] = ['recebido', 'preparando', 'pronto', 'em_entrega', 'concluido'];
+    const currentIdx = sequence.indexOf(currentStatus);
+    if (currentIdx < sequence.length - 1) {
+      const nextStatus = sequence[currentIdx + 1];
+      
+      // Otimista
+      setOrders(orders.map(o => o.id === orderId ? { ...o, status: nextStatus } : o));
+
+      await fetch('/api/orders', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderId, status: nextStatus })
+      });
+      fetchData(true);
+    }
+  };
+
+  // Confirmar Pix Manual Conectado à API
+  const handleConfirmPix = async (orderId: string) => {
+    setOrders(orders.map(o => o.id === orderId ? { ...o, paymentStatus: 'confirmado_manual' } : o));
+    await fetch('/api/orders', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orderId, paymentStatus: 'confirmado_manual' })
+    });
+    fetchData(true);
+  };
+
+  // Cancelar com Justificativa Conectado à API
+  const handleCancelOrder = async (orderId: string) => {
+    const reason = prompt('Informe a justificativa do cancelamento:');
+    if (reason && reason.trim()) {
+      setOrders(orders.map(o => o.id === orderId ? { ...o, status: 'cancelado' } : o));
+      await fetch('/api/orders', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderId, status: 'cancelado' })
+      });
+      fetchData(true);
+    }
+  };
+
+  // Disparar Oferta de Despacho Conectado à API
+  const handleSendDispatchOffer = async () => {
+    if (!selectedOrderToDispatch) return;
+    const driver = drivers.find(d => d.id === selectedDriverId);
+    if (!driver) return;
+
+    if (driver.activeDeliveries >= driver.maxDeliveries) {
+      alert(`O entregador ${driver.name} atingiu a capacidade máxima de ${driver.maxDeliveries} entregas simultâneas!`);
+      return;
+    }
+
+    const feeNum = parseFloat(deliveryFeeOffered.replace(',', '.')) || 12.00;
+
+    await fetch('/api/v1/logistics/offer-create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        orderId: selectedOrderToDispatch.id,
+        orderNumber: selectedOrderToDispatch.orderNumber,
+        customerAddress: selectedOrderToDispatch.address,
+        driverId: driver.id,
+        feeOffered: feeNum
+      })
+    });
+
+    await fetch('/api/orders', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        orderId: selectedOrderToDispatch.id,
+        status: 'em_entrega',
+        driverName: driver.name
+      })
+    });
+
+    setDispatchAlert(`Oferta enviada em tempo real para ${driver.name}! Pedido movido para "Em Entrega".`);
+    setSelectedOrderToDispatch(null);
+    fetchData(true);
+    setTimeout(() => setDispatchAlert(null), 5000);
+  };
+
+  // Cadastrar Novo Entregador e Gerar Código Seguro de Uso Único
+  const handleCreateDriver = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newDriverName.trim()) return;
+
+    const res = await fetch('/api/v1/logistics/invite-issue', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        driverName: newDriverName,
+        phone: newDriverPhone || null,
+        validityDays: parseInt(newDriverValidity) || 30
+      })
+    });
+
+    const data = await res.json();
+    if (data.success) {
+      setGeneratedInviteCode(data.inviteCode);
+      setNewDriverName('');
+      setNewDriverPhone('');
+      fetchData(true);
+    }
+  };
+
+  // Alternar Bloqueio do Entregador
+  const handleToggleBlockDriver = async (driverId: string) => {
+    await fetch('/api/v1/logistics/driver-toggle-block', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ driverId })
+    });
+    fetchData(true);
+  };
+
+  // Criar Pedido Real Rápido para Testar o Fluxo
+  const handleQuickCreateOrder = async () => {
+    const res = await fetch('/api/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        customer: { name: 'Cliente Real Teste', phone: '(11) 98765-4321' },
+        address: { street: 'Av. Paulista', number: '1000', complement: 'Apto 101', region: 'Bela Vista', fee: 6.00 },
+        items: [{ type: 'pizza', name: 'Pizza Grande', quantity: 1, unitPrice: 78.00, totalPrice: 78.00, flavors: [{ name: 'Calabresa Artesanal' }, { name: 'Quatro Queijos' }] }],
+        subtotal: 78.00,
+        deliveryFee: 6.00,
+        total: 84.00,
+        payment: { method: 'pix_manual' }
+      })
+    });
+    const data = await res.json();
+    if (data.success) {
+      fetchData(true);
+    }
+  };
+
+  if (isAuthenticated === false) {
+    return <AdminPinAuth onSuccess={() => setIsAuthenticated(true)} />;
+  }
+
+  if (isAuthenticated === null) {
+    return (
+      <div className="min-h-screen bg-zinc-950 flex items-center justify-center">
+        <div className="w-8 h-8 border-4 border-red-600 border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-zinc-950 text-white flex flex-col">
+      
+      {/* Topo do Painel Administrativo */}
+      <header className="border-b border-zinc-800 bg-zinc-900/90 backdrop-blur-md px-6 py-4 sticky top-0 z-30">
+        <div className="flex items-center justify-between">
+          
+          <div className="flex items-center gap-3">
+            <Link href="/" className="flex items-center gap-2 group">
+              <div className="w-8 h-8 rounded-xl bg-red-600 flex items-center justify-center text-white">
+                <Flame className="w-5 h-5 text-amber-300" />
+              </div>
+              <span className="font-extrabold text-base tracking-tight text-white">
+                BELLA <span className="text-red-500">PIZZA</span>
+              </span>
+            </Link>
+            <span className="text-zinc-600">/</span>
+            <span className="text-xs font-bold px-2 py-0.5 rounded bg-zinc-800 text-zinc-300">
+              Painel do Lojista
+            </span>
+            <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800/40 text-[11px] font-semibold">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span>Sincronização em Tempo Real Ativa</span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => fetchData()}
+              disabled={isRefreshing}
+              className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition"
+              title="Atualizar agora"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-red-500' : ''}`} />
+            </button>
+            <Link
+              href="/"
+              className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-zinc-300 hover:text-white transition"
+            >
+              Ver Site Público
+            </Link>
+            <button
+              onClick={() => {
+                sessionStorage.removeItem('novaesweb_admin_auth');
+                setIsAuthenticated(false);
+              }}
+              className="px-3 py-1.5 rounded-lg bg-red-950/60 hover:bg-red-900 border border-red-800 text-xs font-semibold text-red-300 transition flex items-center gap-1.5"
+              title="Bloquear Painel"
+            >
+              <Lock className="w-3 h-3" />
+              <span>Bloquear</span>
+            </button>
+          </div>
+
+        </div>
+
+        {/* Abas Principais de Navegação */}
+        <div className="flex gap-2 mt-4 pt-3 border-t border-zinc-800/80 overflow-x-auto text-xs font-bold">
+          <button
+            onClick={() => setActiveTab('kanban')}
+            className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
+              activeTab === 'kanban'
+                ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
+                : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60'
+            }`}
+          >
+            <ShoppingCart className="w-4 h-4" />
+            <span>Kanban de Pedidos ({orders.filter(o => o.status !== 'concluido' && o.status !== 'cancelado').length})</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('logistics')}
+            className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
+              activeTab === 'logistics'
+                ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
+                : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60'
+            }`}
+          >
+            <Bike className="w-4 h-4" />
+            <span>Módulo de Logística ({drivers.filter(d => d.presence === 'disponivel').length} Online)</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('overview')}
+            className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
+              activeTab === 'overview'
+                ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
+                : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60'
+            }`}
+          >
+            <LayoutDashboard className="w-4 h-4" />
+            <span>Visão Geral</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('menu')}
+            className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
+              activeTab === 'menu'
+                ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
+                : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60'
+            }`}
+          >
+            <UtensilsCrossed className="w-4 h-4" />
+            <span>Cardápio & Preços</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('settings')}
+            className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
+              activeTab === 'settings'
+                ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
+                : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60'
+            }`}
+          >
+            <Settings className="w-4 h-4" />
+            <span>Configurações</span>
+          </button>
+        </div>
+      </header>
+
+      {/* Alerta de Despacho */}
+      {dispatchAlert && (
+        <div className="bg-emerald-950/80 border-b border-emerald-800 p-3 text-center text-xs font-bold text-emerald-300 flex items-center justify-center gap-2 animate-pulse">
+          <CheckCircle2 className="w-4 h-4" />
+          <span>{dispatchAlert}</span>
+        </div>
+      )}
+
+      {/* Conteúdo Dinâmico por Aba */}
+      <main className="flex-1 p-6 max-w-7xl w-full mx-auto">
+        
+        {/* ABA 1: KANBAN DE PEDIDOS */}
+        {activeTab === 'kanban' && (
+          <div className="space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <h2 className="text-xl font-black text-white">Kanban Operacional de Pedidos</h2>
+                <p className="text-xs text-zinc-400">
+                  Os pedidos caem aqui em tempo real conforme os clientes compram no site.
+                </p>
+              </div>
+
+              <button
+                onClick={handleQuickCreateOrder}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold flex items-center gap-2 border border-zinc-700 transition"
+              >
+                <PlusCircle className="w-4 h-4 text-emerald-400" />
+                <span>Simular Novo Pedido</span>
+              </button>
+            </div>
+
+            {/* As 5 Colunas do Kanban */}
+            <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+              
+              {[
+                { key: 'recebido', label: '1. Recebido', color: 'border-blue-500/40 text-blue-400' },
+                { key: 'preparando', label: '2. Preparando', color: 'border-amber-500/40 text-amber-400' },
+                { key: 'pronto', label: '3. Pronto / Despacho', color: 'border-purple-500/40 text-purple-400' },
+                { key: 'em_entrega', label: '4. Em Entrega', color: 'border-orange-500/40 text-orange-400' },
+                { key: 'concluido', label: '5. Concluído', color: 'border-emerald-500/40 text-emerald-400' },
+              ].map((col) => {
+                const colOrders = orders.filter(o => o.status === col.key);
+
+                return (
+                  <div key={col.key} className="bg-zinc-900/50 border border-zinc-800/80 rounded-2xl p-4 flex flex-col h-[700px]">
+                    <div className="flex items-center justify-between pb-3 border-b border-zinc-800 mb-3">
+                      <span className={`text-xs font-black uppercase tracking-wider ${col.color}`}>
+                        {col.label}
+                      </span>
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-300 font-bold">
+                        {colOrders.length}
+                      </span>
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto space-y-3 pr-1">
+                      {colOrders.length === 0 ? (
+                        <div className="text-center py-12 text-zinc-600 text-xs">
+                          Nenhum pedido nesta etapa
+                        </div>
+                      ) : (
+                        colOrders.map((order) => (
+                          <div
+                            key={order.id}
+                            className="p-3.5 rounded-xl bg-zinc-900 border border-zinc-800 hover:border-zinc-700 transition shadow-md space-y-2 text-xs"
+                          >
+                            <div className="flex justify-between items-center">
+                              <span className="font-black text-white text-sm">#{order.orderNumber}</span>
+                              <span className="text-[10px] text-zinc-500 font-mono">{order.createdAt}</span>
+                            </div>
+
+                            <div>
+                              <p className="font-bold text-zinc-200">{order.customerName}</p>
+                              <p className="text-[11px] text-zinc-400 truncate">{order.address}</p>
+                              <p className="text-[10px] text-zinc-500">{order.region}</p>
+                            </div>
+
+                            <div className="p-2 bg-zinc-950 rounded-lg border border-zinc-800/80 text-[11px] text-zinc-300">
+                              {order.itemsSummary}
+                            </div>
+
+                            {/* Informações de Pagamento */}
+                            <div className="flex items-center justify-between pt-1">
+                              <span className="font-black text-white">
+                                R$ {order.total.toFixed(2).replace('.', ',')}
+                              </span>
+                              
+                              {order.paymentMethod === 'pix_manual' && (
+                                order.paymentStatus === 'aguardando_conferencia' ? (
+                                  <button
+                                    onClick={() => handleConfirmPix(order.id)}
+                                    className="px-2 py-1 rounded bg-amber-950 text-amber-400 border border-amber-800 text-[10px] font-bold hover:bg-amber-900 transition"
+                                    title="Clique para confirmar o recebimento do Pix"
+                                  >
+                                    Conferir Pix
+                                  </button>
+                                ) : (
+                                  <span className="px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 text-[10px] font-bold">
+                                    Pix Pago ✓
+                                  </span>
+                                )
+                              )}
+
+                              {order.paymentMethod === 'cash_delivery' && (
+                                <span className="px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 text-[10px]">
+                                  Dinheiro na entrega
+                                </span>
+                              )}
+
+                              {order.paymentMethod === 'card_terminal' && (
+                                <span className="px-2 py-0.5 rounded bg-blue-950 text-blue-400 border border-blue-900 text-[10px]">
+                                  Maquininha
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Entregador atribuído (se houver) */}
+                            {order.driverName && (
+                              <div className="p-1.5 bg-orange-950/40 border border-orange-800/50 rounded text-[10px] text-orange-300 font-semibold flex items-center gap-1">
+                                <Bike className="w-3 h-3" />
+                                <span>{order.driverName}</span>
+                              </div>
+                            )}
+
+                            {/* Ações Operacionais */}
+                            <div className="pt-2 border-t border-zinc-800/80 flex items-center justify-between gap-1">
+                              <button
+                                onClick={() => handleCancelOrder(order.id)}
+                                className="text-zinc-500 hover:text-red-400 p-1 text-[10px]"
+                                title="Cancelar Pedido"
+                              >
+                                Cancelar
+                              </button>
+
+                              {col.key === 'pronto' ? (
+                                <button
+                                  onClick={() => {
+                                    setSelectedOrderToDispatch(order);
+                                    setActiveTab('logistics');
+                                  }}
+                                  className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold text-[11px] flex items-center gap-1 transition shadow-md"
+                                >
+                                  <Send className="w-3 h-3" />
+                                  <span>Despachar</span>
+                                </button>
+                              ) : col.key !== 'concluido' ? (
+                                <button
+                                  onClick={() => handleAdvanceStatus(order.id, order.status)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 hover:text-white font-bold text-[10px] flex items-center gap-1 transition"
+                                >
+                                  <span>Avançar</span>
+                                  <ArrowRight className="w-3 h-3" />
+                                </button>
+                              ) : null}
+                            </div>
+
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+
+            </div>
+          </div>
+        )}
+
+        {/* ABA 2: MÓDULO DE LOGÍSTICA */}
+        {activeTab === 'logistics' && (
+          <div className="space-y-8">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-xl font-black text-white">Módulo Integrado de Logística</h2>
+                <p className="text-xs text-zinc-400">
+                  Gerencie os motoboys e envie ofertas de corrida diretamente para o aplicativo do entregador.
+                </p>
+              </div>
+
+              <div className="text-xs font-semibold text-zinc-400">
+                Entregadores conectados: <strong className="text-emerald-400">{drivers.length}</strong>
+              </div>
+            </div>
+
+            {/* ÁREA DE DESPACHO MANUAL DE PEDIDO */}
+            {selectedOrderToDispatch ? (
+              <div className="p-6 rounded-2xl bg-red-950/30 border border-red-800/60 shadow-xl space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-extrabold text-base text-white flex items-center gap-2">
+                    <Send className="w-4 h-4 text-red-400" />
+                    <span>Despachar Pedido #{selectedOrderToDispatch.orderNumber}</span>
+                  </h3>
+                  <button
+                    onClick={() => setSelectedOrderToDispatch(null)}
+                    className="text-xs text-zinc-400 hover:text-white"
+                  >
+                    Fechar
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+                  <div className="p-3 bg-zinc-900 rounded-xl border border-zinc-800">
+                    <span className="text-zinc-500 block mb-1">Cliente & Destino:</span>
+                    <p className="font-bold text-white">{selectedOrderToDispatch.customerName}</p>
+                    <p className="text-zinc-300">{selectedOrderToDispatch.address}</p>
+                    <p className="text-zinc-400">{selectedOrderToDispatch.region}</p>
+                  </div>
+
+                  <div className="p-3 bg-zinc-900 rounded-xl border border-zinc-800">
+                    <label className="text-zinc-400 block mb-1">Selecione o Entregador Elegível:</label>
+                    <select
+                      value={selectedDriverId}
+                      onChange={(e) => setSelectedDriverId(e.target.value)}
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2 text-white font-semibold"
+                    >
+                      {drivers.filter(d => d.status === 'ativo').map((drv) => (
+                        <option key={drv.id} value={drv.id}>
+                          {drv.name} — {drv.activeDeliveries}/{drv.maxDeliveries} corridas ({drv.presence === 'disponivel' ? 'Online' : 'Offline'})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="p-3 bg-zinc-900 rounded-xl border border-zinc-800">
+                    <label className="text-zinc-400 block mb-1">Valor da Corrida (Opcional):</label>
+                    <input
+                      type="text"
+                      value={deliveryFeeOffered}
+                      onChange={(e) => setDeliveryFeeOffered(e.target.value)}
+                      placeholder="Ex: 12,00"
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2 text-white font-bold"
+                    />
+                    <span className="text-[10px] text-zinc-500 mt-1 block">
+                      Enviado na notificação da oferta ao motoboy.
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-3 pt-2">
+                  <button
+                    onClick={() => setSelectedOrderToDispatch(null)}
+                    className="px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-zinc-300"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    onClick={handleSendDispatchOffer}
+                    className="px-6 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs flex items-center gap-2 shadow-lg shadow-red-600/30"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    Enviar Oferta em Tempo Real (Timeout 60s)
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="p-4 rounded-xl bg-zinc-900/60 border border-zinc-800 flex items-center justify-between text-xs">
+                <span className="text-zinc-400">
+                  Para despachar um pedido, selecione o botão <strong>"Despachar"</strong> na coluna "Pronto / Despacho" do Kanban.
+                </span>
+                <button
+                  onClick={() => setActiveTab('kanban')}
+                  className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-white font-bold"
+                >
+                  Ir para o Kanban
+                </button>
+              </div>
+            )}
+
+            {/* TABELA DE ENTREGADORES CONECTADOS EM TEMPO REAL */}
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <h3 className="font-extrabold text-base text-white">Equipe de Entregadores</h3>
+                <span className="text-xs text-zinc-400">
+                  Atualizado em tempo real com o app do entregador
+                </span>
+              </div>
+
+              <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-hidden shadow-xl">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-zinc-950/80 border-b border-zinc-800 text-zinc-400 uppercase text-[10px] font-bold">
+                    <tr>
+                      <th className="p-4">Entregador</th>
+                      <th className="p-4">WhatsApp / Tel</th>
+                      <th className="p-4">Presença no App</th>
+                      <th className="p-4">Carga Atual</th>
+                      <th className="p-4">Validade do Acesso</th>
+                      <th className="p-4 text-right">Ações</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-800/60">
+                    {drivers.map((drv) => (
+                      <tr key={drv.id} className="hover:bg-zinc-800/20">
+                        <td className="p-4">
+                          <p className="font-bold text-white">{drv.name}</p>
+                          <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold mt-1 ${
+                            drv.status === 'ativo' ? 'bg-emerald-950 text-emerald-400' : 'bg-red-950 text-red-400'
+                          }`}>
+                            {drv.status === 'ativo' ? 'Ativo' : 'Bloqueado'}
+                          </span>
+                        </td>
+                        <td className="p-4 text-zinc-300 font-mono">
+                          {drv.phone || 'Não informado'}
+                        </td>
+                        <td className="p-4">
+                          <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                            drv.presence === 'disponivel'
+                              ? 'bg-emerald-950 text-emerald-400 border border-emerald-800/40'
+                              : 'bg-zinc-800 text-zinc-400'
+                          }`}>
+                            <span className={`w-1.5 h-1.5 rounded-full ${drv.presence === 'disponivel' ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-500'}`} />
+                            {drv.presence === 'disponivel' ? 'Ligado / Disponível' : 'Desligado / Offline'}
+                          </span>
+                        </td>
+                        <td className="p-4 font-semibold text-zinc-200">
+                          {drv.activeDeliveries} de {drv.maxDeliveries} pedidos
+                        </td>
+                        <td className="p-4 text-zinc-400">
+                          {drv.status === 'ativo' ? `${drv.inviteExpiryDays} dias restantes` : 'Acesso revogado'}
+                        </td>
+                        <td className="p-4 text-right space-x-2">
+                          <button
+                            onClick={() => handleToggleBlockDriver(drv.id)}
+                            className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition ${
+                              drv.status === 'ativo'
+                                ? 'bg-zinc-800 hover:bg-red-950 hover:text-red-300 text-zinc-300'
+                                : 'bg-emerald-900/60 hover:bg-emerald-800 text-emerald-300'
+                            }`}
+                          >
+                            {drv.status === 'ativo' ? 'Bloquear Novas Ofertas' : 'Desbloquear'}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* FORMULÁRIO DE CADASTRO DE NOVO ENTREGADOR */}
+            <div className="p-6 rounded-2xl bg-zinc-900/60 border border-zinc-800 shadow-xl space-y-4">
+              <h3 className="font-extrabold text-base text-white flex items-center gap-2">
+                <UserPlus className="w-4 h-4 text-red-500" />
+                <span>Cadastrar Novo Entregador & Gerar Convite de Uso Único</span>
+              </h3>
+
+              <form onSubmit={handleCreateDriver} className="grid grid-cols-1 sm:grid-cols-4 gap-4 text-xs">
+                <div>
+                  <label className="text-zinc-400 block mb-1">Nome Completo *</label>
+                  <input
+                    type="text"
+                    required
+                    value={newDriverName}
+                    onChange={(e) => setNewDriverName(e.target.value)}
+                    placeholder="Ex: Carlos Santana"
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2.5 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-zinc-400 block mb-1">Telefone WhatsApp (Opcional)</label>
+                  <input
+                    type="tel"
+                    value={newDriverPhone}
+                    onChange={(e) => setNewDriverPhone(e.target.value)}
+                    placeholder="(11) 98888-7777"
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2.5 text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-zinc-400 block mb-1">Validade do Acesso</label>
+                  <select
+                    value={newDriverValidity}
+                    onChange={(e) => setNewDriverValidity(e.target.value)}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2.5 text-white"
+                  >
+                    <option value="3">3 dias (Temporário)</option>
+                    <option value="10">10 dias (Experimental)</option>
+                    <option value="30">30 dias (Mensal)</option>
+                  </select>
+                </div>
+
+                <div className="flex items-end">
+                  <button
+                    type="submit"
+                    className="w-full py-2.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-red-600/30"
+                  >
+                    <KeyRound className="w-4 h-4" />
+                    Gerar Código de Convite
+                  </button>
+                </div>
+              </form>
+
+              {/* Exibição do Código Gerado com Hash de Alta Entropia */}
+              {generatedInviteCode && (
+                <div className="mt-4 p-4 rounded-xl bg-zinc-950 border border-amber-800/60 text-xs space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-amber-300">Código de Ativação Gerado:</span>
+                    <span className="text-[10px] text-zinc-500">Uso Único • Expira em {newDriverValidity} dias</span>
+                  </div>
+                  <div className="text-2xl font-mono font-black text-white bg-zinc-900 p-3 rounded-lg border border-zinc-800 tracking-widest text-center select-all">
+                    {generatedInviteCode}
+                  </div>
+                  <p className="text-[11px] text-zinc-400 leading-tight">
+                    Forneça este código ao entregador para que ele digite no aplicativo <strong>NovaesWeb Entregador</strong>. O código só pode ser usado uma vez e vincula o aparelho exclusivamente à sua loja.
+                  </p>
+                </div>
+              )}
+            </div>
+
+          </div>
+        )}
+
+        {/* ABA 3: VISÃO GERAL */}
+        {activeTab === 'overview' && (
+          <div className="space-y-6">
+            <h2 className="text-xl font-black text-white">Indicadores Operacionais</h2>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="p-5 rounded-2xl bg-zinc-900/60 border border-zinc-800">
+                <span className="text-xs text-zinc-500 uppercase font-bold">Faturamento Total</span>
+                <p className="text-2xl font-black text-white mt-1">
+                  R$ {orders.filter(o => o.status === 'concluido').reduce((acc, curr) => acc + curr.total, 0).toFixed(2).replace('.', ',')}
+                </p>
+                <span className="text-[10px] text-emerald-400 mt-1 block">
+                  {orders.filter(o => o.status === 'concluido').length} pedidos concluídos
+                </span>
+              </div>
+
+              <div className="p-5 rounded-2xl bg-zinc-900/60 border border-zinc-800">
+                <span className="text-xs text-zinc-500 uppercase font-bold">Pedidos em Andamento</span>
+                <p className="text-2xl font-black text-amber-400 mt-1">
+                  {orders.filter(o => o.status !== 'concluido' && o.status !== 'cancelado').length}
+                </p>
+                <span className="text-[10px] text-zinc-400 mt-1 block">Na fila de preparo e entrega</span>
+              </div>
+
+              <div className="p-5 rounded-2xl bg-zinc-900/60 border border-zinc-800">
+                <span className="text-xs text-zinc-500 uppercase font-bold">Entregas em Rota</span>
+                <p className="text-2xl font-black text-orange-400 mt-1">
+                  {orders.filter(o => o.status === 'em_entrega').length}
+                </p>
+                <span className="text-[10px] text-zinc-400 mt-1 block">Motoboys em trânsito</span>
+              </div>
+
+              <div className="p-5 rounded-2xl bg-zinc-900/60 border border-zinc-800">
+                <span className="text-xs text-zinc-500 uppercase font-bold">Pix a Conferir</span>
+                <p className="text-2xl font-black text-blue-400 mt-1">
+                  {orders.filter(o => o.paymentMethod === 'pix_manual' && o.paymentStatus === 'aguardando_conferencia').length}
+                </p>
+                <span className="text-[10px] text-blue-400 mt-1 block">Requer ação do operador</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ABA 4: CARDÁPIO */}
+        {activeTab === 'menu' && (
+          <div className="space-y-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-xl font-black text-white">Cardápio & Ativação de Sabores</h2>
+                <p className="text-xs text-zinc-400">
+                  Ative ou desative produtos e sabores instantaneamente sem controle de estoque.
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+              {PIZZA_FLAVORS.map((flv) => (
+                <div key={flv.id} className="p-4 rounded-xl bg-zinc-900/60 border border-zinc-800 flex items-center justify-between text-xs">
+                  <div>
+                    <h4 className="font-bold text-white">{flv.name}</h4>
+                    <span className="text-zinc-500 text-[10px] uppercase">{flv.category}</span>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" defaultChecked className="sr-only peer" />
+                    <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-600"></div>
+                  </label>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ABA 5: CONFIGURAÇÕES */}
+        {activeTab === 'settings' && (
+          <div className="space-y-6 text-xs max-w-3xl">
+            <h2 className="text-xl font-black text-white">Parâmetros Operacionais da Pizzaria</h2>
+            
+            <div className="p-6 bg-zinc-900/60 border border-zinc-800 rounded-2xl space-y-4">
+              <h3 className="font-bold text-sm text-white">Regras de Negócio e Entrega</h3>
+              
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-zinc-400 block mb-1">Regra de Preço Pizza Multissabor</label>
+                  <select className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2.5 text-white font-semibold">
+                    <option value="maior_valor">Maior Valor entre os sabores (Padrão)</option>
+                    <option value="media">Média dos sabores</option>
+                    <option value="soma_proporcional">Soma Proporcional das frações</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-zinc-400 block mb-1">Timeout de Oferta de Entrega</label>
+                  <select className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2.5 text-white font-semibold">
+                    <option value="45">45 segundos</option>
+                    <option value="60">60 segundos (Recomendado)</option>
+                    <option value="90">90 segundos</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-zinc-400 block mb-1">Limite Máximo de Pedidos Simultâneos por Motoboy</label>
+                <input
+                  type="number"
+                  defaultValue={3}
+                  min={1}
+                  max={6}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2.5 text-white font-bold"
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
+      </main>
+
+    </div>
+  );
+}
