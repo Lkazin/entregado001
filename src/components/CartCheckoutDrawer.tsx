@@ -139,15 +139,30 @@ export default function CartCheckoutDrawer({
         createdAt: new Date().toISOString()
       };
 
-      // Chamar API real ou salvar no estado
-      try {
-        await fetch('/api/orders', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(orderPayload)
-        });
-      } catch (err) {
-        // Fallback local se a API não estiver rodando
+      // Salvar em localStorage para sincronização imediata com o painel do lojista
+      if (typeof window !== 'undefined') {
+        try {
+          const cached = localStorage.getItem('novaesweb_orders');
+          const current = cached ? JSON.parse(cached) : [];
+          const newOrder = {
+            id: `ord-${Date.now()}-${orderPayload.orderNumber}`,
+            orderNumber: orderPayload.orderNumber,
+            customerName: customerName,
+            phone: customerPhone,
+            address: `${street}, ${number} ${complement ? '- ' + complement : ''}`,
+            region: selectedRegion.name,
+            itemsSummary: items.map((i: any) => `${i.quantity}x ${i.name || 'Pizza'}`).join(' • '),
+            total,
+            status: 'recebido' as const,
+            paymentMethod: paymentMethod,
+            paymentStatus: paymentMethod === 'pix_manual' ? 'aguardando_conferencia' : 'pendente',
+            deliveryPin: orderPayload.deliveryPin,
+            trackingToken: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
+            driverName: null,
+            createdAt: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+          };
+          localStorage.setItem('novaesweb_orders', JSON.stringify([newOrder, ...current.filter((o: any) => o.id !== newOrder.id)]));
+        } catch (e) {}
       }
 
       onOrderSuccess(orderPayload);

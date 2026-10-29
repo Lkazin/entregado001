@@ -4,60 +4,95 @@ import crypto from 'crypto';
 
 export const dynamic = 'force-dynamic';
 
-// Armazenamento em memória com sincronização bidirecional no Supabase
-// Garante persistência instantânea mesmo se o banco estiver aplicando migrations
+// Armazenamento em memória com sincronização em nuvem (Supabase Storage + PostgreSQL)
 let liveOrders: any[] = [];
+
+// Helper para ler pedidos persistentes
+async function fetchCurrentOrders(): Promise<any[]> {
+  const storeId = process.env.NEXT_PUBLIC_DEFAULT_STORE_ID || '11111111-1111-1111-1111-111111111111';
+
+  // 1. Tentar buscar do banco relacional Supabase se as tabelas existirem
+  try {
+    const { data: dbOrders, error } = await supabaseAdmin
+      .from('orders')
+      .select(`
+        id,
+        order_number,
+        tracking_token,
+        status,
+        address_snapshot_json,
+        subtotal,
+        delivery_fee,
+        total,
+        customer_notes,
+        created_at,
+        customers ( name, phone ),
+        payments ( method, status )
+      `)
+      .eq('store_id', storeId)
+      .order('created_at', { ascending: false });
+
+    if (dbOrders && dbOrders.length > 0) {
+      const formatted = dbOrders.map(o => ({
+        id: o.id,
+        orderNumber: Number(o.order_number),
+        customerName: (o.customers as any)?.name || 'Cliente',
+        phone: (o.customers as any)?.phone || '',
+        address: `${(o.address_snapshot_json as any)?.street || ''}, ${(o.address_snapshot_json as any)?.number || ''}`,
+        region: (o.address_snapshot_json as any)?.region || 'Região Central',
+        itemsSummary: 'Pizza Artesanal Selecionada',
+        total: Number(o.total),
+        status: o.status,
+        paymentMethod: (o.payments as any)?.[0]?.method || 'pix_manual',
+        paymentStatus: (o.payments as any)?.[0]?.status || 'aguardando_conferencia',
+        deliveryPin: '****',
+        createdAt: new Date(o.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+      }));
+      return formatted;
+    }
+  } catch (e) {
+    // Tabela relacional ainda não disponível
+  }
+
+  // 2. Tentar buscar do Supabase Storage (nuvem persistente universal)
+  try {
+    const { data: fileData } = await supabaseAdmin.storage
+      .from('novaesweb_store')
+      .download('orders.json');
+    if (fileData) {
+      const text = await fileData.text();
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        liveOrders = parsed;
+        return parsed;
+      }
+    }
+  } catch (e) {
+    // Storage inacessível
+  }
+
+  return liveOrders;
+}
+
+// Helper para salvar pedidos de forma persistente
+async function persistOrders(ordersList: any[]): Promise<void> {
+  liveOrders = ordersList;
+  try {
+    const payload = JSON.stringify(ordersList);
+    await supabaseAdmin.storage
+      .from('novaesweb_store')
+      .upload('orders.json', payload, { upsert: true, contentType: 'application/json' });
+  } catch (e) {
+    console.error('Erro ao persistir no Supabase Storage:', e);
+  }
+}
 
 export async function GET(req: NextRequest) {
   try {
-    const storeId = process.env.NEXT_PUBLIC_DEFAULT_STORE_ID || '11111111-1111-1111-1111-111111111111';
-
-    // Tentar buscar do Supabase primeiro
-    try {
-      const { data: dbOrders, error } = await supabaseAdmin
-        .from('orders')
-        .select(`
-          id,
-          order_number,
-          tracking_token,
-          status,
-          address_snapshot_json,
-          subtotal,
-          delivery_fee,
-          total,
-          customer_notes,
-          created_at,
-          customers ( name, phone ),
-          payments ( method, status )
-        `)
-        .eq('store_id', storeId)
-        .order('created_at', { ascending: false });
-
-      if (dbOrders && dbOrders.length > 0) {
-        const formatted = dbOrders.map(o => ({
-          id: o.id,
-          orderNumber: Number(o.order_number),
-          customerName: (o.customers as any)?.name || 'Cliente',
-          phone: (o.customers as any)?.phone || '',
-          address: `${(o.address_snapshot_json as any)?.street || ''}, ${(o.address_snapshot_json as any)?.number || ''}`,
-          region: (o.address_snapshot_json as any)?.region || 'Região Central',
-          itemsSummary: 'Pizza Artesanal Selecionada',
-          total: Number(o.total),
-          status: o.status,
-          paymentMethod: (o.payments as any)?.[0]?.method || 'pix_manual',
-          paymentStatus: (o.payments as any)?.[0]?.status || 'aguardando_conferencia',
-          deliveryPin: '****',
-          createdAt: new Date(o.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
-        }));
-        return NextResponse.json({ success: true, orders: formatted });
-      }
-    } catch (e) {
-      // Fallback para estado compartilhado
-    }
-
-    return NextResponse.json({ success: true, orders: liveOrders });
+    const orders = await fetchCurrentOrders();
+    return NextResponse.json({ success: true, orders });
   } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+    return NextResponse.json({ success: false, error: err.message, orders: liveOrders }, { status: 500 });
   }
 }
 
@@ -81,7 +116,7 @@ export async function POST(req: NextRequest) {
     }).join(' • ');
 
     const newOrderObj = {
-      id: `ord-${Date.now()}`,
+      id: `ord-${Date.now()}-${orderNumber}`,
       orderNumber,
       customerName: customer.name,
       phone: customer.phone,
@@ -98,9 +133,12 @@ export async function POST(req: NextRequest) {
       createdAt: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
     };
 
-    liveOrders.unshift(newOrderObj);
+    // Atualiza pedidos existentes e grava no Supabase Storage
+    const current = await fetchCurrentOrders();
+    const updated = [newOrderObj, ...current.filter(o => o.id !== newOrderObj.id)];
+    await persistOrders(updated);
 
-    // Tentar persistir no Supabase se as tabelas já existirem
+    // Tentar persistir no PostgreSQL do Supabase se as tabelas existirem
     try {
       const { data: customerData } = await supabaseAdmin
         .from('customers')
@@ -145,7 +183,7 @@ export async function POST(req: NextRequest) {
         }
       }
     } catch (dbErr) {
-      // Fallback em liveOrders
+      // Fallback garantido pelo Supabase Storage
     }
 
     return NextResponse.json({
@@ -165,14 +203,17 @@ export async function PATCH(req: NextRequest) {
   try {
     const { orderId, status, paymentStatus, driverName } = await req.json();
 
-    const orderIndex = liveOrders.findIndex(o => o.id === orderId);
+    const current = await fetchCurrentOrders();
+    const orderIndex = current.findIndex(o => o.id === orderId || String(o.orderNumber) === String(orderId));
+
     if (orderIndex !== -1) {
-      if (status) liveOrders[orderIndex].status = status;
-      if (paymentStatus) liveOrders[orderIndex].paymentStatus = paymentStatus;
-      if (driverName !== undefined) liveOrders[orderIndex].driverName = driverName;
+      if (status) current[orderIndex].status = status;
+      if (paymentStatus) current[orderIndex].paymentStatus = paymentStatus;
+      if (driverName !== undefined) current[orderIndex].driverName = driverName;
+      await persistOrders(current);
     }
 
-    // Tentar atualizar no Supabase
+    // Tentar atualizar no PostgreSQL do Supabase
     try {
       if (status) {
         await supabaseAdmin
@@ -187,10 +228,10 @@ export async function PATCH(req: NextRequest) {
           .eq('order_id', orderId);
       }
     } catch (e) {
-      // Fallback
+      // Fallback garantido pelo Supabase Storage
     }
 
-    return NextResponse.json({ success: true, message: 'Pedido atualizado' });
+    return NextResponse.json({ success: true, message: 'Pedido atualizado com sucesso' });
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });
   }

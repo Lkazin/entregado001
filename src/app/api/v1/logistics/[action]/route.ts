@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { supabaseAdmin } from '@/lib/supabase/server';
 import crypto from 'crypto';
 
 export const dynamic = 'force-dynamic';
@@ -20,12 +21,41 @@ let liveDrivers: any[] = [
 let liveOffers: any[] = [];
 let liveAssignments: any[] = [];
 
+async function loadLogisticsState() {
+  try {
+    const { data: fileData } = await supabaseAdmin.storage
+      .from('novaesweb_store')
+      .download('logistics.json');
+    if (fileData) {
+      const text = await fileData.text();
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed.drivers) && parsed.drivers.length > 0) liveDrivers = parsed.drivers;
+      if (Array.isArray(parsed.offers)) liveOffers = parsed.offers;
+      if (Array.isArray(parsed.assignments)) liveAssignments = parsed.assignments;
+    }
+  } catch (e) {}
+}
+
+async function persistLogisticsState() {
+  try {
+    const payload = JSON.stringify({
+      drivers: liveDrivers,
+      offers: liveOffers,
+      assignments: liveAssignments
+    });
+    await supabaseAdmin.storage
+      .from('novaesweb_store')
+      .upload('logistics.json', payload, { upsert: true, contentType: 'application/json' });
+  } catch (e) {}
+}
+
 // 1. TRATAMENTO DE REQUISIÇÕES GET
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ action: string }> }
 ) {
   try {
+    await loadLogisticsState();
     const { action } = await params;
     const storeId = req.headers.get('x-store-id') || '11111111-1111-1111-1111-111111111111';
 
@@ -136,6 +166,7 @@ export async function POST(
   { params }: { params: Promise<{ action: string }> }
 ) {
   try {
+    await loadLogisticsState();
     const { action } = await params;
     const body = await req.json().catch(() => ({}));
     const idempotencyKey = req.headers.get('x-idempotency-key') || crypto.randomUUID();
@@ -161,6 +192,7 @@ export async function POST(
           inviteCode: rawToken
         };
         liveDrivers.push(newDriver);
+        await persistLogisticsState();
 
         return NextResponse.json({
           success: true,
@@ -186,6 +218,7 @@ export async function POST(
         const driver = liveDrivers.find(d => d.inviteCode === inviteCode || inviteCode.startsWith('NW-'));
         if (driver) {
           driver.presence = 'disponivel';
+          await persistLogisticsState();
         }
 
         return NextResponse.json({
@@ -208,6 +241,7 @@ export async function POST(
         const drv = liveDrivers.find(d => d.id === driverId) || liveDrivers[0];
         if (drv) {
           drv.presence = manualEnabled ? 'disponivel' : 'indisponivel';
+          await persistLogisticsState();
         }
 
         return NextResponse.json({
@@ -227,6 +261,7 @@ export async function POST(
         if (drv) {
           drv.status = drv.status === 'ativo' ? 'bloqueado' : 'ativo';
           if (drv.status === 'bloqueado') drv.presence = 'indisponivel';
+          await persistLogisticsState();
         }
         return NextResponse.json({ success: true, status: drv?.status });
       }
@@ -250,6 +285,7 @@ export async function POST(
           timeoutSeconds
         };
         liveOffers.unshift(offerObj);
+        await persistLogisticsState();
 
         return NextResponse.json({
           success: true,
@@ -282,6 +318,8 @@ export async function POST(
             const drv = liveDrivers.find(d => d.id === offer.driverId) || liveDrivers[0];
             if (drv) drv.activeDeliveries = (drv.activeDeliveries || 0) + 1;
 
+            await persistLogisticsState();
+
             return NextResponse.json({
               success: true,
               action: 'offer.respond',
@@ -309,6 +347,7 @@ export async function POST(
         if (asg) {
           asg.status = 'em_rota';
           asg.pickedUpAt = new Date().toISOString();
+          await persistLogisticsState();
         }
 
         return NextResponse.json({
@@ -339,6 +378,7 @@ export async function POST(
           if (liveDrivers[0] && liveDrivers[0].activeDeliveries > 0) {
             liveDrivers[0].activeDeliveries -= 1;
           }
+          await persistLogisticsState();
         }
 
         return NextResponse.json({

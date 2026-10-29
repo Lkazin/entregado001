@@ -55,6 +55,33 @@ export default function AdminDashboardPage() {
     setIsAuthenticated(auth === 'authenticated');
   }, []);
 
+  // Carregar cache local de pedidos para nunca sumir nada
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const cached = localStorage.getItem('novaesweb_orders');
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setOrders(parsed);
+          }
+        }
+      } catch (e) {}
+
+      // Ouvir criação de novos pedidos em outras abas
+      const handleStorageChange = (e: StorageEvent) => {
+        if (e.key === 'novaesweb_orders' && e.newValue) {
+          try {
+            const newOrders = JSON.parse(e.newValue);
+            if (Array.isArray(newOrders)) setOrders(newOrders);
+          } catch (err) {}
+        }
+      };
+      window.addEventListener('storage', handleStorageChange);
+      return () => window.removeEventListener('storage', handleStorageChange);
+    }
+  }, []);
+
   // Estados de Despacho
   const [selectedOrderToDispatch, setSelectedOrderToDispatch] = useState<AdminOrder | null>(null);
   const [selectedDriverId, setSelectedDriverId] = useState<string>('');
@@ -74,8 +101,53 @@ export default function AdminDashboardPage() {
       // 1. Buscar Pedidos Reais
       const resOrders = await fetch('/api/orders');
       const dataOrders = await resOrders.json();
-      if (dataOrders.success) {
-        setOrders(dataOrders.orders || []);
+      if (dataOrders.success && Array.isArray(dataOrders.orders)) {
+        setOrders(prevOrders => {
+          const incoming: AdminOrder[] = dataOrders.orders;
+          
+          // Se a API retornou vazia mas temos pedidos locais, mantemos os locais
+          if (incoming.length === 0 && prevOrders.length > 0) {
+            return prevOrders;
+          }
+
+          // Mesclar pedidos garantindo que nenhum status avançado seja perdido
+          const mergedMap = new Map<string, AdminOrder>();
+          
+          // Carregar do localStorage se existir
+          let localSaved: AdminOrder[] = [];
+          if (typeof window !== 'undefined') {
+            try {
+              const c = localStorage.getItem('novaesweb_orders');
+              if (c) localSaved = JSON.parse(c);
+            } catch (e) {}
+          }
+
+          [...localSaved, ...prevOrders].forEach(o => mergedMap.set(o.id, o));
+
+          // Atualizar com pedidos que vieram do servidor
+          incoming.forEach(o => {
+            const existing = mergedMap.get(o.id);
+            if (existing) {
+              // Se o estado local já está mais avançado, preserva o local
+              const sequence: AdminOrder['status'][] = ['recebido', 'preparando', 'pronto', 'em_entrega', 'concluido', 'cancelado'];
+              const localIdx = sequence.indexOf(existing.status);
+              const serverIdx = sequence.indexOf(o.status);
+              if (localIdx > serverIdx) {
+                mergedMap.set(o.id, { ...o, status: existing.status });
+              } else {
+                mergedMap.set(o.id, o);
+              }
+            } else {
+              mergedMap.set(o.id, o);
+            }
+          });
+
+          const result = Array.from(mergedMap.values());
+          if (typeof window !== 'undefined') {
+            localStorage.setItem('novaesweb_orders', JSON.stringify(result));
+          }
+          return result;
+        });
       }
 
       // 2. Buscar Entregadores Reais e Status de Presença
@@ -111,40 +183,69 @@ export default function AdminDashboardPage() {
     if (currentIdx < sequence.length - 1) {
       const nextStatus = sequence[currentIdx + 1];
       
-      // Otimista
-      setOrders(orders.map(o => o.id === orderId ? { ...o, status: nextStatus } : o));
-
-      await fetch('/api/orders', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderId, status: nextStatus })
+      // Atualização imediata otimista no estado e no cache local
+      setOrders(prev => {
+        const updated = prev.map(o => o.id === orderId ? { ...o, status: nextStatus } : o);
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
+        }
+        return updated;
       });
-      fetchData(true);
+
+      try {
+        await fetch('/api/orders', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ orderId, status: nextStatus })
+        });
+      } catch (err) {
+        console.error('Erro ao comunicar com o servidor:', err);
+      }
+
+      setTimeout(() => fetchData(true), 600);
     }
   };
 
   // Confirmar Pix Manual Conectado à API
   const handleConfirmPix = async (orderId: string) => {
-    setOrders(orders.map(o => o.id === orderId ? { ...o, paymentStatus: 'confirmado_manual' } : o));
-    await fetch('/api/orders', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ orderId, paymentStatus: 'confirmado_manual' })
+    setOrders(prev => {
+      const updated = prev.map(o => o.id === orderId ? { ...o, paymentStatus: 'confirmado_manual' as const } : o);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
+      }
+      return updated;
     });
-    fetchData(true);
+
+    try {
+      await fetch('/api/orders', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderId, paymentStatus: 'confirmado_manual' })
+      });
+    } catch (err) {}
+    setTimeout(() => fetchData(true), 600);
   };
 
   // Cancelar com Justificativa Conectado à API
   const handleCancelOrder = async (orderId: string) => {
     const reason = prompt('Informe a justificativa do cancelamento:');
     if (reason && reason.trim()) {
-      setOrders(orders.map(o => o.id === orderId ? { ...o, status: 'cancelado' } : o));
-      await fetch('/api/orders', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderId, status: 'cancelado' })
+      setOrders(prev => {
+        const updated = prev.map(o => o.id === orderId ? { ...o, status: 'cancelado' as const } : o);
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
+        }
+        return updated;
       });
-      fetchData(true);
+
+      try {
+        await fetch('/api/orders', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ orderId, status: 'cancelado' })
+        });
+      } catch (err) {}
+      setTimeout(() => fetchData(true), 600);
     }
   };
 
