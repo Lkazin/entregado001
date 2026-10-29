@@ -157,10 +157,30 @@ export interface PixPaymentSettings {
 
 export interface DeliveryDriver {
   id: string
-  identity_subject: string
-  display_name: string
+  identity_subject?: string
+  display_name?: string
+  driver_name?: string | null
   optional_phone?: string | null
+  phone?: string | null
+  vehicle_plate?: string | null
+  created_at?: string
+}
+
+export interface DeliveryShift {
+  id: string
+  invite_code: string
+  driver_id?: string | null
+  driver_name?: string | null
+  phone?: string | null
+  vehicle_plate?: string | null
+  device_fingerprint?: string | null
+  status: 'aguardando_motoboy' | 'ativo' | 'bloqueado'
+  shift_status: 'aguardando_motoboy' | 'em_plantao' | 'plantao_encerrado'
+  presence: 'disponivel' | 'indisponivel'
+  validity_days: number
+  expires_at: string
   created_at: string
+  activated_at?: string | null
 }
 
 export interface DeliveryStoreMembership {

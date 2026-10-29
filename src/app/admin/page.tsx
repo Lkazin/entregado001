@@ -5,7 +5,8 @@ import Link from 'next/link';
 import { 
   Flame, LayoutDashboard, ShoppingCart, UtensilsCrossed, Bike, Settings, 
   CheckCircle2, Clock, AlertTriangle, ArrowRight, Printer, XCircle, Search, 
-  UserPlus, ShieldAlert, KeyRound, Check, RefreshCw, Send, Lock, PlusCircle
+  UserPlus, ShieldAlert, KeyRound, Check, RefreshCw, Send, Lock, PlusCircle,
+  Copy, MessageSquare, Trash2
 } from 'lucide-react';
 import { PIZZA_FLAVORS } from '@/lib/constants';
 
@@ -30,13 +31,21 @@ interface AdminOrder {
 
 interface AdminDriver {
   id: string;
-  name: string;
+  inviteCode: string;
+  driverName: string | null;
+  name: string | null;
   phone: string | null;
-  status: 'ativo' | 'bloqueado';
+  vehiclePlate: string | null;
+  driverId?: string | null;
+  status: 'aguardando_motoboy' | 'ativo' | 'bloqueado';
+  shiftStatus?: 'aguardando_motoboy' | 'em_plantao' | 'plantao_encerrado';
   presence: 'disponivel' | 'indisponivel';
   activeDeliveries: number;
   maxDeliveries: number;
-  inviteExpiryDays: number;
+  validityDays: number;
+  inviteExpiryDays?: number;
+  expiresAt?: string;
+  createdAt?: string;
 }
 
 export default function AdminDashboardPage() {
@@ -96,11 +105,11 @@ export default function AdminDashboardPage() {
   const [deliveryFeeOffered, setDeliveryFeeOffered] = useState<string>('12,00');
   const [dispatchAlert, setDispatchAlert] = useState<string | null>(null);
 
-  // Estados para Novo Entregador
-  const [newDriverName, setNewDriverName] = useState('');
-  const [newDriverPhone, setNewDriverPhone] = useState('');
-  const [newDriverValidity, setNewDriverValidity] = useState('30');
-  const [generatedInviteCode, setGeneratedInviteCode] = useState<string | null>(null);
+  // Estados para Código de Plantão Dinâmico
+  const [shiftValidity, setShiftValidity] = useState<string>('1');
+  const [generatedShiftCode, setGeneratedShiftCode] = useState<string | null>(null);
+  const [isGeneratingShiftCode, setIsGeneratingShiftCode] = useState(false);
+  const [codeCopied, setCodeCopied] = useState(false);
 
   // FUNÇÃO DE BUSCA DOS DADOS REAIS
   const fetchData = async (silent = false) => {
@@ -270,8 +279,18 @@ export default function AdminDashboardPage() {
     const driver = drivers.find(d => d.id === selectedDriverId);
     if (!driver) return;
 
+    if (!driver.driverName) {
+      alert('Aguarde o motoboy conectar seu aplicativo através do código de plantão antes de despachar.');
+      return;
+    }
+
+    if (driver.presence !== 'disponivel') {
+      alert(`O entregador ${driver.driverName || driver.name} está offline no aplicativo. Oferta não despachada.`);
+      return;
+    }
+
     if (driver.activeDeliveries >= driver.maxDeliveries) {
-      alert(`O entregador ${driver.name} atingiu a capacidade máxima de ${driver.maxDeliveries} entregas simultâneas!`);
+      alert(`O entregador ${driver.driverName || driver.name} atingiu a capacidade máxima de ${driver.maxDeliveries} entregas simultâneas!`);
       return;
     }
 
@@ -284,7 +303,7 @@ export default function AdminDashboardPage() {
         orderId: selectedOrderToDispatch.id,
         orderNumber: selectedOrderToDispatch.orderNumber,
         customerAddress: selectedOrderToDispatch.address,
-        driverId: driver.id,
+        driverId: driver.driverId || driver.id,
         feeOffered: feeNum
       })
     });
@@ -295,38 +314,51 @@ export default function AdminDashboardPage() {
       body: JSON.stringify({
         orderId: selectedOrderToDispatch.id,
         status: 'em_entrega',
-        driverName: driver.name
+        driverName: driver.driverName || driver.name
       })
     });
 
-    setDispatchAlert(`Oferta enviada em tempo real para ${driver.name}! Pedido movido para "Em Entrega".`);
+    setDispatchAlert(`Oferta enviada em tempo real para ${driver.driverName || driver.name}! Pedido movido para "Em Entrega".`);
     setSelectedOrderToDispatch(null);
     fetchData(true);
     setTimeout(() => setDispatchAlert(null), 5000);
   };
 
-  // Cadastrar Novo Entregador e Gerar Código Seguro de Uso Único
-  const handleCreateDriver = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newDriverName.trim()) return;
-
-    const res = await fetch('/api/v1/logistics/invite-issue', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        driverName: newDriverName,
-        phone: newDriverPhone || null,
-        validityDays: parseInt(newDriverValidity) || 30
-      })
-    });
-
-    const data = await res.json();
-    if (data.success) {
-      setGeneratedInviteCode(data.inviteCode);
-      setNewDriverName('');
-      setNewDriverPhone('');
-      fetchData(true);
+  // Gerar Código de Plantão Dinâmico (Uso Único no App do Motoboy)
+  const handleGenerateShiftCode = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setIsGeneratingShiftCode(true);
+    try {
+      const res = await fetch('/api/v1/logistics/invite-issue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          validityDays: parseInt(shiftValidity) || 1
+        })
+      });
+      const data = await res.json();
+      if (data.success && data.inviteCode) {
+        setGeneratedShiftCode(data.inviteCode);
+        fetchData(true);
+      }
+    } catch (err) {
+      console.error('Erro ao gerar código de plantão:', err);
+    } finally {
+      setIsGeneratingShiftCode(false);
     }
+  };
+
+  const handleCopyCode = (code: string) => {
+    if (typeof navigator !== 'undefined' && navigator.clipboard) {
+      navigator.clipboard.writeText(code);
+      setCodeCopied(true);
+      setTimeout(() => setCodeCopied(false), 2500);
+    }
+  };
+
+  const getWhatsAppShareUrl = (code: string) => {
+    const text = `Olá! Seu código de plantão para hoje na Bella Pizza é: ${code}. Abra seu app NovaesWeb Entregador e insira o código para iniciar.`;
+    return `https://wa.me/?text=${encodeURIComponent(text)}`;
   };
 
   // Alternar Bloqueio do Entregador
@@ -337,6 +369,19 @@ export default function AdminDashboardPage() {
       body: JSON.stringify({ driverId })
     });
     fetchData(true);
+  };
+
+  // Remover Código de Plantão
+  const handleDeleteDriverShift = async (driverId: string) => {
+    if (confirm('Deseja realmente remover este código de plantão / entregador?')) {
+      await fetch('/api/v1/logistics/driver-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ driverId })
+      });
+      if (generatedShiftCode === driverId) setGeneratedShiftCode(null);
+      fetchData(true);
+    }
   };
 
 
@@ -679,12 +724,12 @@ export default function AdminDashboardPage() {
                       onChange={(e) => setSelectedDriverId(e.target.value)}
                       className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2 text-white font-semibold"
                     >
-                      {drivers.filter(d => d.status === 'ativo').length === 0 ? (
-                        <option value="">Nenhum entregador cadastrado ou ativo</option>
+                      {drivers.filter(d => d.driverName && d.status === 'ativo').length === 0 ? (
+                        <option value="">Nenhum motoboy com app conectado ativo</option>
                       ) : (
-                        drivers.filter(d => d.status === 'ativo').map((drv) => (
+                        drivers.filter(d => d.driverName && d.status === 'ativo').map((drv) => (
                           <option key={drv.id} value={drv.id}>
-                            {drv.name} — {drv.activeDeliveries}/{drv.maxDeliveries} corridas ({drv.presence === 'disponivel' ? 'Online' : 'Offline'})
+                            {drv.driverName || drv.name} ({drv.vehiclePlate || 'Sem placa'}) — {drv.activeDeliveries}/{drv.maxDeliveries} corridas ({drv.presence === 'disponivel' ? '🟢 Online' : '⚪ Offline'})
                           </option>
                         ))
                       )}
@@ -739,148 +784,267 @@ export default function AdminDashboardPage() {
             {/* TABELA DE ENTREGADORES CONECTADOS EM TEMPO REAL */}
             <div className="space-y-4">
               <div className="flex items-center justify-between">
-                <h3 className="font-extrabold text-base text-white">Equipe de Entregadores</h3>
-                <span className="text-xs text-zinc-400">
-                  Atualizado em tempo real com o app do entregador
-                </span>
+                <div>
+                  <h3 className="font-extrabold text-base text-white">Equipe de Entregadores & Códigos de Plantão</h3>
+                  <span className="text-xs text-zinc-400">
+                    Sincronizado em tempo real com o aplicativo do entregador
+                  </span>
+                </div>
               </div>
 
               <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-hidden shadow-xl">
                 <table className="w-full text-left text-xs">
                   <thead className="bg-zinc-950/80 border-b border-zinc-800 text-zinc-400 uppercase text-[10px] font-bold">
                     <tr>
-                      <th className="p-4">Entregador</th>
+                      <th className="p-4">Código do Plantão</th>
+                      <th className="p-4">Entregador (Nome)</th>
                       <th className="p-4">WhatsApp / Tel</th>
-                      <th className="p-4">Presença no App</th>
+                      <th className="p-4">Placa do Veículo</th>
+                      <th className="p-4">Status do Plantão</th>
                       <th className="p-4">Carga Atual</th>
-                      <th className="p-4">Validade do Acesso</th>
+                      <th className="p-4">Validade</th>
                       <th className="p-4 text-right">Ações</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-800/60">
                     {drivers.length === 0 ? (
                       <tr>
-                        <td colSpan={6} className="p-8 text-center text-zinc-500 text-xs">
-                          Nenhum entregador cadastrado. Cadastre o primeiro entregador no formulário abaixo para gerar o convite de uso único.
+                        <td colSpan={8} className="p-8 text-center text-zinc-500 text-xs">
+                          Nenhum código de plantão gerado. Use o botão abaixo para gerar o primeiro código e compartilhar com o motoboy.
                         </td>
                       </tr>
                     ) : (
-                      drivers.map((drv) => (
-                        <tr key={drv.id} className="hover:bg-zinc-800/20">
-                          <td className="p-4">
-                            <p className="font-bold text-white">{drv.name}</p>
-                            <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold mt-1 ${
-                              drv.status === 'ativo' ? 'bg-emerald-950 text-emerald-400' : 'bg-red-950 text-red-400'
-                            }`}>
-                              {drv.status === 'ativo' ? 'Ativo' : 'Bloqueado'}
-                            </span>
-                          </td>
-                          <td className="p-4 text-zinc-300 font-mono">
-                            {drv.phone || 'Não informado'}
-                          </td>
-                          <td className="p-4">
-                            <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                              drv.presence === 'disponivel'
-                                ? 'bg-emerald-950 text-emerald-400 border border-emerald-800/40'
-                                : 'bg-zinc-800 text-zinc-400'
-                            }`}>
-                              <span className={`w-1.5 h-1.5 rounded-full ${drv.presence === 'disponivel' ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-500'}`} />
-                              {drv.presence === 'disponivel' ? 'Ligado / Disponível' : 'Desligado / Offline'}
-                            </span>
-                          </td>
-                          <td className="p-4 font-semibold text-zinc-200">
-                            {drv.activeDeliveries} de {drv.maxDeliveries} pedidos
-                          </td>
-                          <td className="p-4 text-zinc-400">
-                            {drv.status === 'ativo' ? `${drv.inviteExpiryDays} dias restantes` : 'Acesso revogado'}
-                          </td>
-                          <td className="p-4 text-right space-x-2">
-                            <button
-                              onClick={() => handleToggleBlockDriver(drv.id)}
-                              className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition ${
-                                drv.status === 'ativo'
-                                  ? 'bg-zinc-800 hover:bg-red-950 hover:text-red-300 text-zinc-300'
-                                  : 'bg-emerald-900/60 hover:bg-emerald-800 text-emerald-300'
-                              }`}
-                            >
-                              {drv.status === 'ativo' ? 'Bloquear Novas Ofertas' : 'Desbloquear'}
-                            </button>
-                          </td>
-                        </tr>
-                      ))
+                      drivers.map((drv) => {
+                        const isWaiting = !drv.driverName || drv.status === 'aguardando_motoboy';
+                        const isBlocked = drv.status === 'bloqueado';
+                        const isOnline = drv.presence === 'disponivel';
+
+                        return (
+                          <tr key={drv.id} className="hover:bg-zinc-800/30 transition">
+                            {/* Código do Plantão */}
+                            <td className="p-4">
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono font-black text-amber-400 bg-zinc-950 px-2.5 py-1 rounded-lg border border-amber-500/30 text-xs tracking-wider">
+                                  {drv.inviteCode}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleCopyCode(drv.inviteCode)}
+                                  className="p-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition"
+                                  title="Copiar Código"
+                                >
+                                  <Copy className="w-3 h-3" />
+                                </button>
+                              </div>
+                            </td>
+
+                            {/* Nome do Entregador */}
+                            <td className="p-4">
+                              {isWaiting ? (
+                                <span className="text-zinc-600 font-mono text-xs">—</span>
+                              ) : (
+                                <p className="font-bold text-white text-xs">{drv.driverName || drv.name}</p>
+                              )}
+                            </td>
+
+                            {/* WhatsApp / Tel */}
+                            <td className="p-4">
+                              {isWaiting || !drv.phone ? (
+                                <span className="text-zinc-600 font-mono text-xs">—</span>
+                              ) : (
+                                <a
+                                  href={`https://wa.me/55${drv.phone.replace(/\D/g, '')}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="font-mono text-xs text-zinc-300 hover:text-emerald-400 transition underline underline-offset-2"
+                                >
+                                  {drv.phone}
+                                </a>
+                              )}
+                            </td>
+
+                            {/* Placa do Veículo */}
+                            <td className="p-4">
+                              {isWaiting || !drv.vehiclePlate ? (
+                                <span className="text-zinc-600 font-mono text-xs">—</span>
+                              ) : (
+                                <span className="font-mono font-bold uppercase text-[11px] px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-200">
+                                  {drv.vehiclePlate}
+                                </span>
+                              )}
+                            </td>
+
+                            {/* Status do Plantão */}
+                            <td className="p-4">
+                              {isBlocked ? (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-red-950/80 border border-red-800 text-red-300">
+                                  <span className="w-2 h-2 rounded-full bg-red-400" />
+                                  🔴 Bloqueado
+                                </span>
+                              ) : isWaiting ? (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-950/60 text-amber-300 border border-amber-800/60">
+                                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                                  🟡 Aguardando Entrada do Motoboy
+                                </span>
+                              ) : isOnline ? (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-950/70 text-emerald-300 border border-emerald-800/60">
+                                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                                  🟢 Em Plantão (Disponível)
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-zinc-800 text-zinc-400 border border-zinc-700">
+                                  <span className="w-2 h-2 rounded-full bg-zinc-500" />
+                                  ⚪ Plantão Encerrado / Offline
+                                </span>
+                              )}
+                            </td>
+
+                            {/* Carga Atual */}
+                            <td className="p-4 font-semibold text-zinc-200">
+                              {drv.activeDeliveries || 0} de {drv.maxDeliveries || 3} pedidos
+                            </td>
+
+                            {/* Validade */}
+                            <td className="p-4 text-zinc-400">
+                              {drv.validityDays ? `${drv.validityDays} dia(s)` : `${drv.inviteExpiryDays || 1} dia(s)`}
+                            </td>
+
+                            {/* Ações */}
+                            <td className="p-4 text-right">
+                              <div className="flex items-center justify-end gap-2">
+                                {isWaiting && (
+                                  <a
+                                    href={getWhatsAppShareUrl(drv.inviteCode)}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="px-2.5 py-1 rounded-lg bg-emerald-950 hover:bg-emerald-900 border border-emerald-800/60 text-emerald-300 text-[11px] font-bold flex items-center gap-1 transition"
+                                    title="Enviar Código no WhatsApp"
+                                  >
+                                    <MessageSquare className="w-3 h-3" />
+                                    <span>WhatsApp</span>
+                                  </a>
+                                )}
+
+                                {!isWaiting && (
+                                  <button
+                                    onClick={() => handleToggleBlockDriver(drv.id)}
+                                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition ${
+                                      isBlocked
+                                        ? 'bg-emerald-900/60 hover:bg-emerald-800 text-emerald-300'
+                                        : 'bg-zinc-800 hover:bg-red-950 hover:text-red-300 text-zinc-300'
+                                    }`}
+                                  >
+                                    {isBlocked ? 'Desbloquear' : 'Bloquear'}
+                                  </button>
+                                )}
+
+                                <button
+                                  onClick={() => handleDeleteDriverShift(drv.id)}
+                                  className="p-1.5 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-zinc-800 transition"
+                                  title="Remover Código de Plantão"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
                     )}
                   </tbody>
                 </table>
               </div>
             </div>
 
-            {/* FORMULÁRIO DE CADASTRO DE NOVO ENTREGADOR */}
+            {/* FORMULÁRIO DE GERAÇÃO DE CÓDIGO DE PLANTÃO */}
             <div className="p-6 rounded-2xl bg-zinc-900/60 border border-zinc-800 shadow-xl space-y-4">
-              <h3 className="font-extrabold text-base text-white flex items-center gap-2">
-                <UserPlus className="w-4 h-4 text-red-500" />
-                <span>Cadastrar Novo Entregador & Gerar Convite de Uso Único</span>
-              </h3>
-
-              <form onSubmit={handleCreateDriver} className="grid grid-cols-1 sm:grid-cols-4 gap-4 text-xs">
+              <div className="flex items-center justify-between">
                 <div>
-                  <label className="text-zinc-400 block mb-1">Nome Completo *</label>
-                  <input
-                    type="text"
-                    required
-                    value={newDriverName}
-                    onChange={(e) => setNewDriverName(e.target.value)}
-                    placeholder="Ex: Carlos Santana"
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2.5 text-white"
-                  />
+                  <h3 className="font-extrabold text-base text-white flex items-center gap-2">
+                    <KeyRound className="w-4 h-4 text-red-500" />
+                    <span>Gerar Código de Plantão</span>
+                  </h3>
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    O motoboy conecta seu próprio cadastro e aplicativo através deste código dinâmico.
+                  </p>
                 </div>
+              </div>
 
-                <div>
-                  <label className="text-zinc-400 block mb-1">Telefone WhatsApp (Opcional)</label>
-                  <input
-                    type="tel"
-                    value={newDriverPhone}
-                    onChange={(e) => setNewDriverPhone(e.target.value)}
-                    placeholder="(11) 98888-7777"
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2.5 text-white"
-                  />
-                </div>
-
-                <div>
-                  <label className="text-zinc-400 block mb-1">Validade do Acesso</label>
+              <form onSubmit={handleGenerateShiftCode} className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs items-end">
+                <div className="sm:col-span-2">
+                  <label className="text-zinc-300 font-semibold block mb-1.5">
+                    Validade do Plantão
+                  </label>
                   <select
-                    value={newDriverValidity}
-                    onChange={(e) => setNewDriverValidity(e.target.value)}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2.5 text-white"
+                    value={shiftValidity}
+                    onChange={(e) => setShiftValidity(e.target.value)}
+                    className="w-full bg-zinc-950 border border-zinc-700/80 rounded-xl p-3 text-white font-medium focus:border-red-500 focus:outline-none transition"
                   >
-                    <option value="3">3 dias (Temporário)</option>
-                    <option value="10">10 dias (Experimental)</option>
-                    <option value="30">30 dias (Mensal)</option>
+                    <option value="1">Hoje / 1 dia</option>
+                    <option value="3">3 dias</option>
+                    <option value="7">7 dias</option>
+                    <option value="30">30 dias</option>
                   </select>
                 </div>
 
-                <div className="flex items-end">
+                <div>
                   <button
                     type="submit"
-                    className="w-full py-2.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-red-600/30"
+                    disabled={isGeneratingShiftCode}
+                    className="w-full py-3 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 transition"
                   >
                     <KeyRound className="w-4 h-4" />
-                    Gerar Código de Convite
+                    <span>{isGeneratingShiftCode ? 'Gerando...' : 'Gerar Código de Plantão'}</span>
                   </button>
                 </div>
               </form>
 
-              {/* Exibição do Código Gerado com Hash de Alta Entropia */}
-              {generatedInviteCode && (
-                <div className="mt-4 p-4 rounded-xl bg-zinc-950 border border-amber-800/60 text-xs space-y-2">
+              {/* Exibição do Código Gerado com Copiar e Compartilhar no WhatsApp */}
+              {generatedShiftCode && (
+                <div className="mt-4 p-5 rounded-2xl bg-zinc-950 border border-amber-500/40 shadow-2xl space-y-4">
                   <div className="flex items-center justify-between">
-                    <span className="font-bold text-amber-300">Código de Ativação Gerado:</span>
-                    <span className="text-[10px] text-zinc-500">Uso Único • Expira em {newDriverValidity} dias</span>
+                    <div className="flex items-center gap-2">
+                      <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse" />
+                      <span className="font-bold text-amber-300 text-sm">Código de Plantão Gerado:</span>
+                    </div>
+                    <span className="text-[11px] text-zinc-400 bg-zinc-900 px-2.5 py-1 rounded-full border border-zinc-800">
+                      Validade: {shiftValidity === '1' ? 'Hoje / 1 dia' : `${shiftValidity} dias`}
+                    </span>
                   </div>
-                  <div className="text-2xl font-mono font-black text-white bg-zinc-900 p-3 rounded-lg border border-zinc-800 tracking-widest text-center select-all">
-                    {generatedInviteCode}
+
+                  <div className="flex flex-col sm:flex-row items-center justify-between gap-4 p-4 rounded-xl bg-zinc-900 border border-zinc-800">
+                    <div className="text-3xl font-mono font-black text-amber-400 tracking-wider select-all">
+                      {generatedShiftCode}
+                    </div>
+
+                    <div className="flex items-center gap-2 w-full sm:w-auto">
+                      <button
+                        type="button"
+                        onClick={() => handleCopyCode(generatedShiftCode)}
+                        className={`px-4 py-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition w-full sm:w-auto ${
+                          codeCopied 
+                            ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/30' 
+                            : 'bg-zinc-800 hover:bg-zinc-700 text-white'
+                        }`}
+                      >
+                        {codeCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                        <span>{codeCopied ? 'Código Copiado!' : 'Copiar Código'}</span>
+                      </button>
+
+                      <a
+                        href={getWhatsAppShareUrl(generatedShiftCode)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/30 transition w-full sm:w-auto text-center"
+                      >
+                        <MessageSquare className="w-4 h-4" />
+                        <span>Compartilhar no WhatsApp</span>
+                      </a>
+                    </div>
                   </div>
-                  <p className="text-[11px] text-zinc-400 leading-tight">
-                    Forneça este código ao entregador para que ele digite no aplicativo <strong>NovaesWeb Entregador</strong>. O código só pode ser usado uma vez e vincula o aparelho exclusivamente à sua loja.
+
+                  <p className="text-xs text-zinc-400 bg-zinc-900/60 p-3 rounded-lg border border-zinc-800/80">
+                    Mensagem enviada: <span className="text-zinc-200 italic">"Olá! Seu código de plantão para hoje na Bella Pizza é: <strong className="text-amber-400">{generatedShiftCode}</strong>. Abra seu app NovaesWeb Entregador e insira o código para iniciar."</span>
                   </p>
                 </div>
               )}

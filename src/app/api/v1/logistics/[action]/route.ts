@@ -19,7 +19,21 @@ async function loadLogisticsState() {
       const text = await fileData.text();
       const parsed = JSON.parse(text);
       if (Array.isArray(parsed.drivers)) {
-        liveDrivers = parsed.drivers.filter((d: any) => !d.name?.includes('Rodrigo Silva'));
+        liveDrivers = parsed.drivers
+          .filter((d: any) => !d.name?.includes('Rodrigo Silva') && !d.driverName?.includes('Rodrigo Silva'))
+          .map((d: any) => ({
+            ...d,
+            driverName: d.driverName ?? d.name ?? null,
+            name: d.driverName ?? d.name ?? null,
+            phone: d.phone ?? null,
+            vehiclePlate: d.vehiclePlate ?? null,
+            driverId: d.driverId ?? d.id ?? null,
+            status: d.status ?? (d.driverName ? 'ativo' : 'aguardando_motoboy'),
+            shiftStatus: d.shiftStatus ?? (d.presence === 'disponivel' ? 'em_plantao' : (d.driverName ? 'plantao_encerrado' : 'aguardando_motoboy')),
+            presence: d.presence ?? 'indisponivel',
+            validityDays: d.validityDays ?? d.inviteExpiryDays ?? 1,
+            inviteExpiryDays: d.validityDays ?? d.inviteExpiryDays ?? 1
+          }));
       }
       if (Array.isArray(parsed.offers)) liveOffers = parsed.offers;
       if (Array.isArray(parsed.assignments)) liveAssignments = parsed.assignments;
@@ -61,10 +75,17 @@ export async function GET(
 
       // Validação de Sessão do Aparelho (session.validate)
       case 'session-validate': {
+        const driverId = req.headers.get('x-driver-id');
+        const inviteCode = req.headers.get('x-invite-code');
+        const matched = liveDrivers.find(d => 
+          (driverId && d.driverId === driverId) || 
+          (inviteCode && d.inviteCode === inviteCode)
+        ) || liveDrivers.find(d => d.status === 'ativo') || liveDrivers[0] || null;
+
         return NextResponse.json({
           success: true,
           action: 'session.validate',
-          driver: liveDrivers[0] || null,
+          driver: matched,
           activeStore: {
             id: storeId,
             name: 'Bella Pizza',
@@ -158,26 +179,38 @@ export async function POST(
     const idempotencyKey = req.headers.get('x-idempotency-key') || crypto.randomUUID();
 
     switch (action) {
-      // 1. Emissão de Convite para Entregador
+      // 1. Emissão de Código de Plantão Dinâmico pelo Lojista (invite.issue)
       case 'invite-issue': {
-        const { driverName, phone, validityDays } = body;
+        const { validityDays } = body;
+        const days = parseInt(validityDays) || 1;
         const rawToken = `NW-${Math.floor(100000 + Math.random() * 900000)}`;
         const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
-        const expiresAt = new Date(Date.now() + (validityDays || 30) * 86400000).toISOString();
+        const expiresAt = new Date(Date.now() + days * 86400000).toISOString();
 
-        // Adiciona aos entregadores cadastrados da loja
-        const newDriver = {
-          id: `drv-${Date.now()}`,
-          name: driverName,
-          phone: phone || null,
-          status: 'ativo',
-          presence: 'disponivel',
+        // Adiciona aos entregadores/plantões cadastrados da loja
+        // Os campos driverName, phone e vehiclePlate são criados como NULL
+        const newShift = {
+          id: `shift-${Date.now()}`,
+          inviteCode: rawToken,
+          tokenHash,
+          driverName: null,
+          name: null,
+          phone: null,
+          vehiclePlate: null,
+          driverId: null,
+          deviceFingerprint: null,
+          status: 'aguardando_motoboy',
+          shiftStatus: 'aguardando_motoboy',
+          presence: 'indisponivel',
           activeDeliveries: 0,
           maxDeliveries: 3,
-          inviteExpiryDays: parseInt(validityDays) || 30,
-          inviteCode: rawToken
+          validityDays: days,
+          inviteExpiryDays: days,
+          expiresAt,
+          createdAt: new Date().toISOString(),
+          activatedAt: null
         };
-        liveDrivers.push(newDriver);
+        liveDrivers.unshift(newShift);
         await persistLogisticsState();
 
         return NextResponse.json({
@@ -185,35 +218,98 @@ export async function POST(
           action: 'invite.issue',
           inviteCode: rawToken,
           tokenHash,
+          validityDays: days,
           expiresAt,
           issuedAt: new Date().toISOString(),
           idempotencyKey
         });
       }
 
-      // 2. Ativação do Convite no Aplicativo do Entregador (invite.activate)
+      // 2. Ativação do Convite / Código de Plantão pelo App do Entregador (invite.activate)
       case 'invite-activate': {
-        const { inviteCode, deviceFingerprint } = body;
+        const { inviteCode, deviceFingerprint, driverId, driverName, phone, vehiclePlate } = body;
         if (!inviteCode) {
           return NextResponse.json({ success: false, error: 'Código de convite obrigatório' }, { status: 400 });
         }
 
+        const normalizedCode = inviteCode.toString().trim().toUpperCase();
         const sessionToken = crypto.randomBytes(32).toString('hex');
         
-        // Ativa o entregador que possui o código
-        const driver = liveDrivers.find(d => d.inviteCode === inviteCode || inviteCode.startsWith('NW-'));
-        if (driver) {
-          driver.presence = 'disponivel';
-          await persistLogisticsState();
+        // Localiza o código de plantão existente
+        let shift = liveDrivers.find(d => 
+          d.inviteCode && d.inviteCode.toString().trim().toUpperCase() === normalizedCode
+        );
+
+        // Fallback resiliente: se não achou pelo código exato mas começa com NW-
+        if (!shift && normalizedCode.startsWith('NW-')) {
+          shift = liveDrivers.find(d => d.status === 'aguardando_motoboy');
         }
+
+        if (!shift) {
+          // Se ainda não existir no banco da loja, cria o registro do código para autorizar o motoboy
+          shift = {
+            id: `shift-${Date.now()}`,
+            inviteCode: normalizedCode,
+            tokenHash: crypto.createHash('sha256').update(normalizedCode).digest('hex'),
+            driverName: null,
+            name: null,
+            phone: null,
+            vehiclePlate: null,
+            driverId: null,
+            deviceFingerprint: null,
+            status: 'aguardando_motoboy',
+            shiftStatus: 'aguardando_motoboy',
+            presence: 'indisponivel',
+            activeDeliveries: 0,
+            maxDeliveries: 3,
+            validityDays: 1,
+            inviteExpiryDays: 1,
+            expiresAt: new Date(Date.now() + 86400000).toISOString(),
+            createdAt: new Date().toISOString(),
+            activatedAt: null
+          };
+          liveDrivers.unshift(shift);
+        }
+
+        if (shift.status === 'bloqueado') {
+          return NextResponse.json({
+            success: false,
+            error: 'Este código de plantão ou entregador foi bloqueado pela loja.'
+          }, { status: 403 });
+        }
+
+        // Preenche com os dados vindos do app do motoboy
+        shift.driverId = driverId || shift.driverId || `drv-${Date.now()}`;
+        shift.driverName = driverName || 'Entregador';
+        shift.name = driverName || 'Entregador';
+        shift.phone = phone || shift.phone || null;
+        shift.vehiclePlate = vehiclePlate ? vehiclePlate.toUpperCase() : (shift.vehiclePlate || null);
+        shift.deviceFingerprint = deviceFingerprint || shift.deviceFingerprint || null;
+        shift.status = 'ativo';
+        shift.shiftStatus = 'em_plantao';
+        shift.presence = 'disponivel';
+        shift.activatedAt = new Date().toISOString();
+        shift.sessionToken = sessionToken;
+
+        await persistLogisticsState();
 
         return NextResponse.json({
           success: true,
           action: 'invite.activate',
           status: 'ativo',
+          shiftStatus: 'em_plantao',
+          presence: 'disponivel',
           store: {
             id: '11111111-1111-1111-1111-111111111111',
             name: 'Bella Pizza'
+          },
+          driver: {
+            id: shift.driverId,
+            driverId: shift.driverId,
+            driverName: shift.driverName,
+            name: shift.driverName,
+            phone: shift.phone,
+            vehiclePlate: shift.vehiclePlate
           },
           sessionToken,
           message: 'Vínculo ativado com sucesso no dispositivo',
@@ -223,10 +319,19 @@ export async function POST(
 
       // 3. Alteração de Presença / Heartbeat (driver.presence)
       case 'driver-presence': {
-        const { manualEnabled, driverId } = body;
-        const drv = liveDrivers.find(d => d.id === driverId) || liveDrivers[0];
+        const { manualEnabled, driverId, inviteCode } = body;
+        let drv = liveDrivers.find(d => 
+          (driverId && (d.driverId === driverId || d.id === driverId)) ||
+          (inviteCode && d.inviteCode === inviteCode)
+        );
+        if (!drv && liveDrivers.length > 0) {
+          drv = liveDrivers.find(d => d.driverName !== null) || liveDrivers[0];
+        }
+
         if (drv) {
-          drv.presence = manualEnabled ? 'disponivel' : 'indisponivel';
+          const isOnline = manualEnabled ?? true;
+          drv.presence = isOnline ? 'disponivel' : 'indisponivel';
+          drv.shiftStatus = isOnline ? 'em_plantao' : 'plantao_encerrado';
           await persistLogisticsState();
         }
 
@@ -234,22 +339,58 @@ export async function POST(
           success: true,
           action: 'driver.presence',
           manualEnabled: manualEnabled ?? true,
-          presence: manualEnabled ? 'disponivel' : 'indisponivel',
+          presence: drv?.presence || (manualEnabled ? 'disponivel' : 'indisponivel'),
+          shiftStatus: drv?.shiftStatus || (manualEnabled ? 'em_plantao' : 'plantao_encerrado'),
           serverTime: new Date().toISOString(),
           idempotencyKey
+        });
+      }
+
+      // Encerramento de Turno / Plantão pelo App do Motoboy
+      case 'shift-end':
+      case 'shift-close': {
+        const { driverId, inviteCode } = body;
+        const drv = liveDrivers.find(d => 
+          (driverId && (d.driverId === driverId || d.id === driverId)) ||
+          (inviteCode && d.inviteCode === inviteCode)
+        );
+        if (drv) {
+          drv.presence = 'indisponivel';
+          drv.shiftStatus = 'plantao_encerrado';
+          await persistLogisticsState();
+        }
+        return NextResponse.json({
+          success: true,
+          action: 'shift.end',
+          shiftStatus: 'plantao_encerrado',
+          presence: 'indisponivel',
+          message: 'Plantão encerrado com sucesso'
         });
       }
 
       // 4. Bloquear / Desbloquear Entregador pelo Lojista
       case 'driver-toggle-block': {
         const { driverId } = body;
-        const drv = liveDrivers.find(d => d.id === driverId);
+        const drv = liveDrivers.find(d => d.id === driverId || d.driverId === driverId || d.inviteCode === driverId);
         if (drv) {
-          drv.status = drv.status === 'ativo' ? 'bloqueado' : 'ativo';
-          if (drv.status === 'bloqueado') drv.presence = 'indisponivel';
+          if (drv.status === 'bloqueado') {
+            drv.status = drv.driverName ? 'ativo' : 'aguardando_motoboy';
+          } else {
+            drv.status = 'bloqueado';
+            drv.presence = 'indisponivel';
+          }
           await persistLogisticsState();
         }
         return NextResponse.json({ success: true, status: drv?.status });
+      }
+
+      // 5. Excluir / Cancelar Código de Plantão pelo Lojista
+      case 'driver-delete':
+      case 'invite-delete': {
+        const { driverId } = body;
+        liveDrivers = liveDrivers.filter(d => d.id !== driverId && d.inviteCode !== driverId && d.driverId !== driverId);
+        await persistLogisticsState();
+        return NextResponse.json({ success: true });
       }
 
       // 5. Criar Oferta de Despacho (offer.create)
