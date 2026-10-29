@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS public.delivery_drivers (
 -- 2. VÍNCULOS POR LOJA (MEMBERSHIPS)
 CREATE TABLE IF NOT EXISTS public.delivery_store_memberships (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    driver_id UUID NOT NULL REFERENCES public.delivery_drivers(id) ON DELETE CASCADE,
+    driver_id UUID REFERENCES public.delivery_drivers(id) ON DELETE CASCADE,
     store_id UUID NOT NULL REFERENCES public.stores(id) ON DELETE CASCADE,
     status TEXT NOT NULL DEFAULT 'pendente' CHECK (status IN ('pendente', 'ativo', 'expirado', 'bloqueado', 'encerrado')),
     valid_from TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
