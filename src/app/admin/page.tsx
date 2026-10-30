@@ -198,41 +198,165 @@ export default function AdminDashboardPage() {
         });
       }
 
-      // 2. Buscar Entregadores Reais e Status de Presença
-      let loadedDrivers: any[] = [];
+      // 2. Sincronização em Tempo Real com o Supabase Logistics (Ofertas, Entregadores e Entregas)
       try {
-        const resDrivers = await fetch('/api/v1/logistics/drivers');
-        if (resDrivers.ok) {
-          const dataDrivers = await resDrivers.json();
-          if (dataDrivers.success && Array.isArray(dataDrivers.drivers)) {
-            loadedDrivers = dataDrivers.drivers.filter((d: any) => !d.name?.includes('Rodrigo Silva'));
+        const cloudRes = await fetch(`${SUPABASE_STORAGE_URL}?t=${Date.now()}`, {
+          headers: {
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
           }
-        }
-      } catch (e) {}
-
-      // Fallback gracioso ao Supabase Storage caso a API local esteja indisponível
-      if (loadedDrivers.length === 0) {
-        try {
-          const cloudRes = await fetch(`${SUPABASE_STORAGE_URL}?t=${Date.now()}`, {
-            headers: {
-              'apikey': SUPABASE_ANON_KEY,
-              'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
+        });
+        if (cloudRes.ok) {
+          const cloudData = await cloudRes.json();
+          if (Array.isArray(cloudData.drivers)) {
+            const validDrivers = cloudData.drivers.filter((d: any) => !d.name?.includes('Rodrigo Silva'));
+            setDrivers(validDrivers);
+            if (!selectedDriverId && validDrivers.length > 0) {
+              setSelectedDriverId(validDrivers[0].id);
             }
+          }
+
+          // SINCRONIZAÇÃO AUTOMÁTICA EM TEMPO REAL: Aceite, Retirada e Conclusão das Entregas
+          const cloudOffers = Array.isArray(cloudData.offers) ? cloudData.offers : [];
+          const cloudAssignments = Array.isArray(cloudData.assignments) ? cloudData.assignments : [];
+
+          setOrders(prevOrders => {
+            let hasChanged = false;
+            const updated = prevOrders.map(order => {
+              const orderIdStr = String(order.id);
+              const orderNumStr = String(order.orderNumber).replace('#', '');
+
+              // 1. Verificar em Assignments (tarefas do motoboy)
+              const asg = cloudAssignments.find((a: any) => 
+                String(a.orderId) === orderIdStr ||
+                String(a.orderNumber).replace('#', '') === orderNumStr
+              );
+
+              if (asg) {
+                const asgDriver = asg.driverName || asg.driverId || order.assignedDriverName || order.driverName;
+
+                // Status: Concluído com validação de PIN
+                if (asg.status === 'delivered' || asg.status === 'entregue') {
+                  if (order.status !== 'concluido' || order.dispatchStatus !== 'concluido') {
+                    hasChanged = true;
+                    return {
+                      ...order,
+                      status: 'concluido' as const,
+                      dispatchStatus: 'concluido' as const,
+                      driverName: asgDriver,
+                      assignedDriverName: asgDriver,
+                      deliveredAt: asg.deliveredAt || new Date().toISOString()
+                    };
+                  }
+                  return order;
+                }
+
+                // Status: Retirada confirmada na loja -> Em Rota de Entrega
+                if (asg.status === 'picked_up' || asg.status === 'in_transit') {
+                  if (order.status !== 'em_entrega' || order.dispatchStatus !== 'em_entrega') {
+                    hasChanged = true;
+                    return {
+                      ...order,
+                      status: 'em_entrega' as const,
+                      dispatchStatus: 'em_entrega' as const,
+                      driverName: asgDriver,
+                      assignedDriverName: asgDriver,
+                      pickedUpAt: asg.pickupConfirmedAt || order.pickedUpAt
+                    };
+                  }
+                  return order;
+                }
+
+                // Status: Aceito pelo motoboy -> Aguardando Retirada no Balcão
+                if (asg.status === 'waiting_pickup') {
+                  if (order.dispatchStatus !== 'aceito_aguardando_retirada' || order.driverName !== asgDriver) {
+                    hasChanged = true;
+                    return {
+                      ...order,
+                      status: 'pronto' as const,
+                      dispatchStatus: 'aceito_aguardando_retirada' as const,
+                      driverName: asgDriver,
+                      assignedDriverName: asgDriver
+                    };
+                  }
+                  return order;
+                }
+              }
+
+              // 2. Verificar em Offers (ofertas enviadas)
+              const offer = cloudOffers.find((o: any) => {
+                if (String(o.orderId) === orderIdStr || String(o.orderNumber).replace('#', '') === orderNumStr) return true;
+                if (Array.isArray(o.orderIds) && o.orderIds.some((id: any) => String(id) === orderIdStr)) return true;
+                if (Array.isArray(o.orders) && o.orders.some((item: any) => 
+                  String(item.orderId || item.id) === orderIdStr || 
+                  String(item.orderNumber).replace('#', '') === orderNumStr
+                )) return true;
+                return false;
+              });
+
+              if (offer) {
+                const offerDriver = offer.driverName || offer.targetDriverName || order.assignedDriverName || order.driverName;
+
+                // Oferta aceita pelo motoboy
+                if (offer.status === 'atribuida' || offer.status === 'accepted') {
+                  if (order.dispatchStatus !== 'aceito_aguardando_retirada' || order.driverName !== offerDriver) {
+                    hasChanged = true;
+                    return {
+                      ...order,
+                      status: 'pronto' as const,
+                      dispatchStatus: 'aceito_aguardando_retirada' as const,
+                      driverName: offerDriver,
+                      assignedDriverName: offerDriver
+                    };
+                  }
+                  return order;
+                }
+
+                // Oferta aguardando aceite
+                if (offer.status === 'pendente') {
+                  if (order.dispatchStatus !== 'aguardando_aceite') {
+                    hasChanged = true;
+                    return {
+                      ...order,
+                      status: 'pronto' as const,
+                      dispatchStatus: 'aguardando_aceite' as const,
+                      assignedDriverName: offerDriver,
+                      driverName: offerDriver
+                    };
+                  }
+                  return order;
+                }
+
+                // Oferta recusada ou expirada
+                if (offer.status === 'recusada' || offer.status === 'expirada' || offer.status === 'cancelada') {
+                  if (order.dispatchStatus === 'aguardando_aceite') {
+                    hasChanged = true;
+                    return {
+                      ...order,
+                      status: 'pronto' as const,
+                      dispatchStatus: 'disponivel' as const,
+                      assignedDriverName: null,
+                      driverName: null
+                    };
+                  }
+                  return order;
+                }
+              }
+
+              return order;
+            });
+
+            if (hasChanged) {
+              if (typeof window !== 'undefined') {
+                localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
+              }
+              return updated;
+            }
+            return prevOrders;
           });
-          if (cloudRes.ok) {
-            const cloudData = await cloudRes.json();
-            if (Array.isArray(cloudData.drivers)) {
-              loadedDrivers = cloudData.drivers.filter((d: any) => !d.name?.includes('Rodrigo Silva'));
-            }
-          }
-        } catch (ce) {}
-      }
-
-      if (loadedDrivers.length > 0) {
-        setDrivers(loadedDrivers);
-        if (!selectedDriverId) {
-          setSelectedDriverId(loadedDrivers[0].id);
         }
+      } catch (cloudErr) {
+        console.warn('Erro ao sincronizar logistics.json do Supabase:', cloudErr);
       }
     } catch (err) {
       console.error('Erro ao sincronizar dados:', err);
