@@ -90,7 +90,8 @@ async function persistOrders(ordersList: any[]): Promise<void> {
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-store-id',
+  'Access-Control-Allow-Headers': '*',
+  'Access-Control-Max-Age': '86400',
 };
 
 export async function OPTIONS() {
@@ -100,12 +101,19 @@ export async function OPTIONS() {
   });
 }
 
+function jsonResponse(data: any, init?: { status?: number }) {
+  return NextResponse.json(data, {
+    status: init?.status ?? 200,
+    headers: corsHeaders,
+  });
+}
+
 export async function GET(req: NextRequest) {
   try {
     const orders = await fetchCurrentOrders();
-    return NextResponse.json({ success: true, orders });
+    return jsonResponse({ success: true, orders });
   } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message, orders: liveOrders }, { status: 500 });
+    return jsonResponse({ success: false, error: err.message, orders: liveOrders }, { status: 500 });
   }
 }
 
@@ -199,7 +207,7 @@ export async function POST(req: NextRequest) {
       // Fallback garantido pelo Supabase Storage
     }
 
-    return NextResponse.json({
+    return jsonResponse({
       success: true,
       orderNumber,
       trackingToken,
@@ -208,7 +216,7 @@ export async function POST(req: NextRequest) {
       createdAt: new Date().toISOString()
     });
   } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 400 });
+    return jsonResponse({ success: false, error: err.message }, { status: 400 });
   }
 }
 
@@ -247,8 +255,8 @@ export async function PATCH(req: NextRequest) {
       // Fallback garantido pelo Supabase Storage
     }
 
-    return NextResponse.json({ success: true, message: 'Pedido atualizado com sucesso' });
+    return jsonResponse({ success: true, message: 'Pedido atualizado com sucesso' });
   } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+    return jsonResponse({ success: false, error: err.message }, { status: 500 });
   }
 }

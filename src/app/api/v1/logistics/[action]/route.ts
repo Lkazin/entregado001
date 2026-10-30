@@ -84,10 +84,11 @@ async function updateStoreOrdersStatus(updater: (orders: any[]) => boolean): Pro
   }
 }
 
-const corsHeaders = {
+const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-store-id',
+  'Access-Control-Allow-Headers': '*',
+  'Access-Control-Max-Age': '86400',
 };
 
 export async function OPTIONS() {
@@ -97,10 +98,81 @@ export async function OPTIONS() {
   });
 }
 
-function jsonResponse(data: any, init?: { status?: number }) {
+function jsonResponse(data: any, init?: ResponseInit) {
   return NextResponse.json(data, {
+    ...init,
     status: init?.status ?? 200,
-    headers: corsHeaders,
+    headers: {
+      ...corsHeaders,
+      ...((init?.headers as Record<string, string>) || {}),
+    },
+  });
+}
+
+async function handleSessionValidate(req: NextRequest, body: any, storeUuid: string) {
+  const driverId = req.headers.get('x-driver-id') || body?.driverId || body?.id;
+  const inviteCode = req.headers.get('x-invite-code') || body?.inviteCode;
+  const deviceFingerprint = req.headers.get('x-device-fingerprint') || body?.deviceFingerprint;
+
+  let matched = liveDrivers.find(d => 
+    (driverId && (d.driverId === driverId || d.id === driverId)) || 
+    (inviteCode && d.inviteCode === inviteCode)
+  );
+
+  if (!matched && (driverId || inviteCode)) {
+    try {
+      if (inviteCode) {
+        const normalizedCode = inviteCode.toString().trim().toUpperCase();
+        const { data: invite } = await supabaseAdmin
+          .from('delivery_invites')
+          .select('*, delivery_store_memberships(*, delivery_drivers(*))')
+          .eq('code_display_hint', normalizedCode)
+          .maybeSingle();
+
+        if (invite) {
+          const m = Array.isArray(invite.delivery_store_memberships) ? invite.delivery_store_memberships[0] : invite.delivery_store_memberships;
+          const drv = Array.isArray(m?.delivery_drivers) ? m.delivery_drivers[0] : m?.delivery_drivers;
+          matched = {
+            id: m?.id || invite.membership_id,
+            inviteCode: invite.code_display_hint,
+            driverName: drv?.display_name || null,
+            name: drv?.display_name || null,
+            phone: drv?.optional_phone || null,
+            vehiclePlate: null,
+            driverId: m?.driver_id || null,
+            deviceFingerprint: deviceFingerprint || null,
+            status: m?.status || 'ativo',
+            shiftStatus: m?.status === 'ativo' ? 'em_plantao' : 'aguardando_motoboy',
+            presence: 'disponivel',
+            activeDeliveries: 0,
+            maxDeliveries: 3,
+            validityDays: 1,
+            inviteExpiryDays: 1,
+            expiresAt: invite.expires_at,
+            createdAt: invite.created_at
+          };
+        }
+      }
+    } catch (e) {}
+  }
+
+  if (!matched) {
+    matched = liveDrivers.find(d => d.status === 'ativo') || liveDrivers[0] || null;
+  }
+
+  return jsonResponse({
+    success: true,
+    action: 'session.validate',
+    driver: matched,
+    activeStore: {
+      id: storeUuid,
+      name: 'Bella Pizza',
+      slug: 'bella-pizza'
+    },
+    stores: [
+      { id: storeUuid, name: 'Bella Pizza', status: 'ativo', expiresAt: '2026-11-28T00:00:00Z' }
+    ],
+    serverTime: new Date().toISOString()
   });
 }
 
@@ -194,7 +266,7 @@ export async function GET(
               };
             });
 
-            return NextResponse.json({
+            return jsonResponse({
               success: true,
               source: 'supabase_tables',
               drivers: dbDrivers
@@ -204,7 +276,7 @@ export async function GET(
           // Fallback gracioso para o storage se a tabela não tiver sido executada no banco
         }
 
-        return NextResponse.json({
+        return jsonResponse({
           success: true,
           source: 'storage_cache',
           drivers: liveDrivers
@@ -213,32 +285,12 @@ export async function GET(
 
       // 2. Validação de Sessão do Aparelho (session.validate)
       case 'session-validate': {
-        const driverId = req.headers.get('x-driver-id');
-        const inviteCode = req.headers.get('x-invite-code');
-        const matched = liveDrivers.find(d => 
-          (driverId && d.driverId === driverId) || 
-          (inviteCode && d.inviteCode === inviteCode)
-        ) || liveDrivers.find(d => d.status === 'ativo') || liveDrivers[0] || null;
-
-        return NextResponse.json({
-          success: true,
-          action: 'session.validate',
-          driver: matched,
-          activeStore: {
-            id: storeUuid,
-            name: 'Bella Pizza',
-            slug: 'bella-pizza'
-          },
-          stores: [
-            { id: storeUuid, name: 'Bella Pizza', status: 'ativo', expiresAt: '2026-11-28T00:00:00Z' }
-          ],
-          serverTime: new Date().toISOString()
-        });
+        return handleSessionValidate(req, {}, storeUuid);
       }
 
       // 3. Consulta de Ofertas Pendentes (offer.list)
       case 'offers': {
-        return NextResponse.json({
+        return jsonResponse({
           success: true,
           action: 'offer.list',
           offers: liveOffers.filter(o => o.status === 'pendente')
@@ -247,7 +299,7 @@ export async function GET(
 
       // 4. Consulta de Pedidos Atribuídos ao Motoboy (assignment.list)
       case 'assignments': {
-        return NextResponse.json({
+        return jsonResponse({
           success: true,
           action: 'assignment.list',
           assignments: liveAssignments
@@ -256,7 +308,7 @@ export async function GET(
 
       // 5. Consulta da Rota Atual do Entregador (route.current)
       case 'route-current': {
-        return NextResponse.json({
+        return jsonResponse({
           success: true,
           action: 'route.current',
           route: {
@@ -278,7 +330,7 @@ export async function GET(
 
       // 6. Histórico de Entregas (history.list)
       case 'history': {
-        return NextResponse.json({
+        return jsonResponse({
           success: true,
           action: 'history.list',
           deliveries: liveAssignments.filter(a => a.status === 'entregue'),
@@ -288,7 +340,7 @@ export async function GET(
 
       // 7. Avaliações do Motoboy (ratings.summary)
       case 'ratings': {
-        return NextResponse.json({
+        return jsonResponse({
           success: true,
           action: 'ratings.summary',
           averageStars: 5.0,
@@ -298,10 +350,10 @@ export async function GET(
       }
 
       default:
-        return NextResponse.json({ success: false, error: `Rota GET ${action} não encontrada no contrato v1` }, { status: 404 });
+        return jsonResponse({ success: false, error: `Rota GET ${action} não encontrada no contrato v1` }, { status: 404 });
     }
   } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+    return jsonResponse({ success: false, error: err.message }, { status: 500 });
   }
 }
 
@@ -319,6 +371,48 @@ export async function POST(
     const storeUuid = toValidUuid(storeHeader);
 
     switch (action) {
+      // Validação de sessão do motoboy também via POST
+      case 'session-validate': {
+        return handleSessionValidate(req, body, storeUuid);
+      }
+
+      // Consulta de ofertas e rotas disponíveis via POST para apps externos
+      case 'offers': {
+        return jsonResponse({
+          success: true,
+          action: 'offer.list',
+          offers: liveOffers.filter(o => o.status === 'pendente')
+        });
+      }
+
+      case 'assignments': {
+        return jsonResponse({
+          success: true,
+          action: 'assignment.list',
+          assignments: liveAssignments
+        });
+      }
+
+      case 'route-current': {
+        return jsonResponse({
+          success: true,
+          action: 'route.current',
+          route: {
+            id: 'rt-live-1',
+            version: 1,
+            status: 'em_andamento',
+            currentStopIndex: 0,
+            stops: liveAssignments.map((a, idx) => ({
+              assignmentId: a.id,
+              orderNumber: a.orderNumber,
+              address: a.address,
+              region: a.region,
+              sequence: idx + 1,
+              status: a.status === 'em_rota' ? 'em_deslocamento' : 'pendente'
+            }))
+          }
+        });
+      }
       // 1. Emissão de Código de Plantão Dinâmico pelo Lojista (invite.issue)
       // Grava nas tabelas: delivery_store_memberships e delivery_invites
       case 'invite-issue': {
@@ -425,7 +519,7 @@ export async function POST(
         liveDrivers.unshift(newShift);
         await persistLogisticsState();
 
-        return NextResponse.json({
+        return jsonResponse({
           success: true,
           action: 'invite.issue',
           inviteCode: rawToken,
@@ -447,7 +541,7 @@ export async function POST(
       case 'invite-activate': {
         const { inviteCode, deviceFingerprint, driverId, driverName, phone, vehiclePlate } = body;
         if (!inviteCode) {
-          return NextResponse.json({ success: false, error: 'Código de convite obrigatório' }, { status: 400 });
+          return jsonResponse({ success: false, error: 'Código de convite obrigatório' }, { status: 400 });
         }
 
         const normalizedCode = inviteCode.toString().trim().toUpperCase();
@@ -571,7 +665,7 @@ export async function POST(
         }
 
         if (shift.status === 'bloqueado') {
-          return NextResponse.json({
+          return jsonResponse({
             success: false,
             error: 'Este código de plantão ou entregador foi bloqueado pela loja.'
           }, { status: 403 });
@@ -592,7 +686,7 @@ export async function POST(
 
         await persistLogisticsState();
 
-        return NextResponse.json({
+        return jsonResponse({
           success: true,
           action: 'invite.activate',
           status: 'ativo',
@@ -651,7 +745,7 @@ export async function POST(
           await persistLogisticsState();
         }
 
-        return NextResponse.json({
+        return jsonResponse({
           success: true,
           action: 'driver.presence',
           manualEnabled: isOnline,
@@ -690,7 +784,7 @@ export async function POST(
           drv.shiftStatus = 'plantao_encerrado';
           await persistLogisticsState();
         }
-        return NextResponse.json({
+        return jsonResponse({
           success: true,
           action: 'shift.end',
           shiftStatus: 'plantao_encerrado',
@@ -725,7 +819,7 @@ export async function POST(
             .eq('id', memberId);
         } catch (e) {}
 
-        return NextResponse.json({ success: true, status: drv?.status });
+        return jsonResponse({ success: true, status: drv?.status });
       }
 
       // 5. Excluir / Cancelar Código de Plantão pelo Lojista
@@ -746,7 +840,7 @@ export async function POST(
 
         liveDrivers = liveDrivers.filter(d => d.id !== driverId && d.inviteCode !== driverId && d.driverId !== driverId);
         await persistLogisticsState();
-        return NextResponse.json({ success: true });
+        return jsonResponse({ success: true });
       }
 
       // 6. Criar Oferta de Despacho (offer.create)
@@ -803,7 +897,7 @@ export async function POST(
           return updated;
         });
 
-        return NextResponse.json({
+        return jsonResponse({
           success: true,
           action: 'offer.create',
           offer: offerObj,
@@ -862,7 +956,7 @@ export async function POST(
               return updated;
             });
 
-            return NextResponse.json({
+            return jsonResponse({
               success: true,
               action: 'offer.respond',
               offerId,
@@ -886,7 +980,7 @@ export async function POST(
               return updated;
             });
             await persistLogisticsState();
-            return NextResponse.json({
+            return jsonResponse({
               success: true,
               action: 'offer.respond',
               offerId,
@@ -896,7 +990,7 @@ export async function POST(
           }
         }
 
-        return NextResponse.json({
+        return jsonResponse({
           success: true,
           action: 'offer.respond',
           offerId,
@@ -935,7 +1029,7 @@ export async function POST(
           return updated;
         });
 
-        return NextResponse.json({
+        return jsonResponse({
           success: true,
           action: 'pickup.confirm',
           confirmedIds: targetIds,
@@ -951,7 +1045,7 @@ export async function POST(
         const { assignmentId, pinCandidate } = body;
 
         if (!pinCandidate || pinCandidate.length !== 4) {
-          return NextResponse.json({ success: false, error: 'O código PIN deve conter exatamente 4 dígitos' }, { status: 422 });
+          return jsonResponse({ success: false, error: 'O código PIN deve conter exatamente 4 dígitos' }, { status: 422 });
         }
 
         const asg = liveAssignments.find(a => a.id === assignmentId || a.assignmentId === assignmentId);
@@ -989,7 +1083,7 @@ export async function POST(
           });
         }
 
-        return NextResponse.json({
+        return jsonResponse({
           success: true,
           action: 'delivery.complete',
           assignmentId,
@@ -1001,9 +1095,9 @@ export async function POST(
       }
 
       default:
-        return NextResponse.json({ success: false, error: `Ação POST ${action} desconhecida` }, { status: 404 });
+        return jsonResponse({ success: false, error: `Ação POST ${action} desconhecida` }, { status: 404 });
     }
   } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+    return jsonResponse({ success: false, error: err.message }, { status: 500 });
   }
 }
