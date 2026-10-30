@@ -354,16 +354,25 @@ export default function AdminDashboardPage() {
         state = await getRes.json();
       }
 
+      const offerUniqueId = `off_${Date.now()}`;
       state.offers.unshift({
-        id: `off_${Date.now()}`,
+        id: offerUniqueId,
+        offerId: offerUniqueId,
         orderId: selectedOrderToDispatch.id,
-        orderNumber: selectedOrderToDispatch.orderNumber,
+        orderNumber: String(selectedOrderToDispatch.orderNumber),
         customerAddress: selectedOrderToDispatch.address,
         deliveryAddress: selectedOrderToDispatch.address,
+        customerNeighborhood: selectedOrderToDispatch.region || 'Bairro Próximo',
+        customerCity: 'São Paulo',
+        customerName: selectedOrderToDispatch.customerName || 'Cliente',
+        customerPhone: selectedOrderToDispatch.phone || '',
+        itemsSummary: selectedOrderToDispatch.itemsSummary || '1x Pedido Delivery',
         targetDriverId: driver.driverId || driver.id,
         driverId: driver.driverId || driver.id,
         feeOffered: feeNum,
         deliveryFee: feeNum,
+        estimatedDistanceKm: 2.8,
+        totalOrdersGrouped: 1,
         status: 'pendente',
         expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
         createdAt: new Date().toISOString()
