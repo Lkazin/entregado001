@@ -139,13 +139,30 @@ export default function CartCheckoutDrawer({
         createdAt: new Date().toISOString()
       };
 
+      // Envia o pedido ao servidor para que ele chegue ao painel do lojista (qualquer dispositivo).
+      // Se falhar, o pedido continua salvo localmente como reserva (comportamento anterior).
+      let serverOrderId: string | null = null;
+      try {
+        const res = await fetch('/api/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...orderPayload, notes })
+        });
+        const data = await res.json();
+        if (res.ok && data?.success && data.orderId) {
+          serverOrderId = String(data.orderId);
+        }
+      } catch (e) {
+        console.warn('Nao foi possivel enviar o pedido ao servidor, mantendo copia local:', e);
+      }
+
       // Salvar em localStorage para sincronização imediata com o painel do lojista
       if (typeof window !== 'undefined') {
         try {
           const cached = localStorage.getItem('novaesweb_orders');
           const current = cached ? JSON.parse(cached) : [];
           const newOrder = {
-            id: `ord-${Date.now()}-${orderPayload.orderNumber}`,
+            id: serverOrderId || `ord-${Date.now()}-${orderPayload.orderNumber}`,
             orderNumber: orderPayload.orderNumber,
             customerName: customerName,
             phone: customerPhone,
@@ -159,11 +176,17 @@ export default function CartCheckoutDrawer({
             deliveryPin: orderPayload.deliveryPin,
             trackingToken: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
             driverName: null,
-            createdAt: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+            createdAt: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+            notes,
+            subtotal,
+            deliveryFee,
+            changeFor: orderPayload.payment.changeFor,
+            addressDetail: { street, number, complement, reference, region: selectedRegion.name }
           };
           localStorage.setItem('novaesweb_orders', JSON.stringify([newOrder, ...current.filter((o: any) => o.id !== newOrder.id)]));
         } catch (e) {}
       }
+
 
       onOrderSuccess(orderPayload);
     } catch (err: any) {

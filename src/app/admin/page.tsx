@@ -12,9 +12,8 @@ import { PIZZA_FLAVORS } from '@/lib/constants';
 
 import AdminPinAuth from '@/components/AdminPinAuth';
 
-const SUPABASE_STORAGE_URL = 'https://nrdbporbyujwtgnpiejz.supabase.co/storage/v1/object/novaesweb_store/logistics.json';
-const SUPABASE_ANON_KEY = 'sb_publishable_ynzw0icpmaxAhkCJWDYDGg_nTQCPUeY';
-const SUPABASE_SERVICE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5yZGJwb3JieXVqd3RnbnBpZWp6Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MzE3NjI1MiwiZXhwIjoyMTA4NzUyMjUyfQ.14LuRaZIPmmRCyHz9uD6PiTajpH0ap5vGphW2_d0YrA';
+const SUPABASE_STORAGE_URL = '/api/storage/logistics.json';
+const ORDERS_STORAGE_URL = '/api/storage/orders.json';
 
 interface AdminOrder {
   id: string;
@@ -38,6 +37,15 @@ interface AdminOrder {
   deliveredAt?: string;
   cancellationReason?: string;
   canceledAt?: string;
+  // Detalhes completos (pedidos novos)
+  createdAtISO?: string;
+  notes?: string;
+  subtotal?: number;
+  deliveryFee?: number;
+  changeFor?: number | null;
+  trackingToken?: string;
+  addressDetail?: { street?: string; number?: string; complement?: string; reference?: string; region?: string };
+  items?: Array<{ type?: string; name?: string; quantity?: number; size?: string | null; flavors?: string[]; crust?: string | null; unitPrice?: number; totalPrice?: number }>;
 }
 
 interface AdminDriver {
@@ -69,6 +77,44 @@ export default function AdminDashboardPage() {
   const [drivers, setDrivers] = useState<AdminDriver[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // Detalhes do pedido e aviso de novo pedido
+  const [detailOrderId, setDetailOrderId] = useState<string | null>(null);
+  const [newOrderAlert, setNewOrderAlert] = useState<{ id: string; orderNumber: number } | null>(null);
+  const [copiedDetail, setCopiedDetail] = useState(false);
+  const knownOrderIdsRef = React.useRef<Set<string> | null>(null);
+
+  useEffect(() => {
+    if (isLoading) return;
+    const currentIds = new Set(orders.map(o => o.id));
+    if (knownOrderIdsRef.current === null) {
+      // Primeira carga: tudo o que ja existe nao e "novo"
+      knownOrderIdsRef.current = currentIds;
+      return;
+    }
+    const known = knownOrderIdsRef.current;
+    const fresh = orders.find(o => !known.has(o.id) && o.status === 'recebido');
+    currentIds.forEach(id => known.add(id));
+    if (fresh) {
+      setNewOrderAlert({ id: fresh.id, orderNumber: fresh.orderNumber });
+      try {
+        const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
+        if (AudioCtx) {
+          const ctx = new AudioCtx();
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.value = 880;
+          gain.gain.setValueAtTime(0.15, ctx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.6);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start();
+          osc.stop(ctx.currentTime + 0.6);
+        }
+      } catch (e) {}
+    }
+  }, [orders, isLoading]);
 
   // Checar autenticação via PIN 615210
   useEffect(() => {
@@ -205,8 +251,6 @@ export default function AdminDashboardPage() {
       try {
         const cloudRes = await fetch(`${SUPABASE_STORAGE_URL}?t=${Date.now()}`, {
           headers: {
-            'apikey': SUPABASE_ANON_KEY,
-            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
           }
         });
         if (cloudRes.ok) {
@@ -464,7 +508,7 @@ export default function AdminDashboardPage() {
       // Retira ofertas ou entregas ativas deste pedido no Supabase Storage
       try {
         const logRes = await fetch(SUPABASE_STORAGE_URL, {
-          headers: { 'apikey': SUPABASE_ANON_KEY }
+          headers: {}
         });
         if (logRes.ok) {
           const logData = await logRes.json();
@@ -488,8 +532,6 @@ export default function AdminDashboardPage() {
             await fetch(SUPABASE_STORAGE_URL, {
               method: 'PUT',
               headers: {
-                'apikey': SUPABASE_SERVICE_KEY,
-                'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
                 'Content-Type': 'application/json'
               },
               body: JSON.stringify(logData)
@@ -637,8 +679,6 @@ export default function AdminDashboardPage() {
       // Remove a oferta do Supabase Storage
       const getRes = await fetch(`${SUPABASE_STORAGE_URL}?t=${Date.now()}`, {
         headers: {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
         }
       });
       if (getRes.ok) {
@@ -651,8 +691,6 @@ export default function AdminDashboardPage() {
           await fetch(SUPABASE_STORAGE_URL, {
             method: 'POST',
             headers: {
-              'apikey': SUPABASE_ANON_KEY,
-              'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
               'x-upsert': 'true',
               'Content-Type': 'application/json'
             },
@@ -742,8 +780,6 @@ export default function AdminDashboardPage() {
     try {
       const getRes = await fetch(`${SUPABASE_STORAGE_URL}?t=${Date.now()}`, {
         headers: {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
         }
       });
       let state: { drivers: any[]; offers: any[]; assignments: any[] } = { drivers: [], offers: [], assignments: [] };
@@ -781,8 +817,6 @@ export default function AdminDashboardPage() {
       await fetch(SUPABASE_STORAGE_URL, {
         method: 'POST',
         headers: {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
           'x-upsert': 'true',
           'Content-Type': 'application/json'
         },
@@ -831,10 +865,8 @@ export default function AdminDashboardPage() {
 
     // Atualiza diretamente no orders.json do Supabase Storage
     try {
-      const ordersRes = await fetch('https://nrdbporbyujwtgnpiejz.supabase.co/storage/v1/object/novaesweb_store/orders.json', {
+      const ordersRes = await fetch(ORDERS_STORAGE_URL, {
         headers: {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
         }
       });
       if (ordersRes.ok) {
@@ -852,11 +884,9 @@ export default function AdminDashboardPage() {
             }
             return o;
           });
-          await fetch('https://nrdbporbyujwtgnpiejz.supabase.co/storage/v1/object/novaesweb_store/orders.json', {
+          await fetch(ORDERS_STORAGE_URL, {
             method: 'POST',
             headers: {
-              'apikey': SUPABASE_ANON_KEY,
-              'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
               'x-upsert': 'true',
               'Content-Type': 'application/json'
             },
@@ -913,8 +943,6 @@ export default function AdminDashboardPage() {
         const rawToken = `NW-${Math.floor(100000 + Math.random() * 900000)}`;
         const getRes = await fetch(`${SUPABASE_STORAGE_URL}?t=${Date.now()}`, {
           headers: {
-            'apikey': SUPABASE_ANON_KEY,
-            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
           }
         });
         let state: { drivers: any[]; offers: any[]; assignments: any[] } = { drivers: [], offers: [], assignments: [] };
@@ -944,8 +972,6 @@ export default function AdminDashboardPage() {
         await fetch(SUPABASE_STORAGE_URL, {
           method: 'POST',
           headers: {
-            'apikey': SUPABASE_ANON_KEY,
-            'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
             'x-upsert': 'true',
             'Content-Type': 'application/json'
           },
@@ -1020,6 +1046,38 @@ export default function AdminDashboardPage() {
   return (
     <div className="min-h-screen bg-zinc-950 text-white flex flex-col">
       
+      {/* Aviso de novo pedido */}
+      {newOrderAlert && (
+        <div className="fixed top-4 right-4 z-50 max-w-sm w-[calc(100%-2rem)] p-4 rounded-2xl bg-emerald-950/95 border border-emerald-600/60 shadow-2xl shadow-emerald-900/40 backdrop-blur-md">
+          <div className="flex items-start gap-3">
+            <div className="w-9 h-9 rounded-xl bg-emerald-600 flex items-center justify-center shrink-0 animate-pulse">
+              <ShoppingCart className="w-4 h-4 text-white" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-black text-emerald-300">Novo pedido #{newOrderAlert.orderNumber}</p>
+              <p className="text-[11px] text-zinc-300">Chegou agora. Veja os detalhes do pedido.</p>
+              <div className="flex gap-2 mt-2">
+                <button
+                  onClick={() => {
+                    setDetailOrderId(newOrderAlert.id);
+                    setNewOrderAlert(null);
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold transition"
+                >
+                  Ver pedido
+                </button>
+                <button
+                  onClick={() => setNewOrderAlert(null)}
+                  className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[11px] font-semibold transition"
+                >
+                  Dispensar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Topo do Painel Administrativo */}
       <header className="border-b border-zinc-800 bg-zinc-900/90 backdrop-blur-md px-6 py-4 sticky top-0 z-30">
         <div className="flex items-center justify-between">
@@ -1350,6 +1408,14 @@ export default function AdminDashboardPage() {
 
                             {/* Ações Operacionais */}
                             <div className="pt-2 border-t border-zinc-800/80 flex items-center justify-between gap-1">
+                            <div className="flex items-center gap-1">
+                              <button
+                                onClick={() => setDetailOrderId(order.id)}
+                                className="px-2 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-200 hover:text-white text-[10px] font-bold transition"
+                                title="Ver todas as informações do pedido"
+                              >
+                                Detalhes
+                              </button>
                               <button
                                 onClick={() => handleCancelOrder(order.id)}
                                 className="text-zinc-500 hover:text-red-400 p-1 text-[10px]"
@@ -1357,6 +1423,7 @@ export default function AdminDashboardPage() {
                               >
                                 Cancelar
                               </button>
+                            </div>
 
                               {col.key === 'pronto' ? (
                                 order.dispatchStatus === 'aguardando_aceite' ? (
@@ -2435,7 +2502,231 @@ export default function AdminDashboardPage() {
           </div>
         </div>
       )}
+      {/* Modal: Detalhes do Pedido */}
+      {(() => {
+        const detail = detailOrderId ? orders.find(o => o.id === detailOrderId) : null;
+        if (!detail) return null;
+
+        const money = (n?: number | null) => `R$ ${Number(n || 0).toFixed(2).replace('.', ',')}`;
+        const phoneDigits = String(detail.phone || '').replace(/\D/g, '');
+        const ad = detail.addressDetail;
+        const fullAddress = ad && (ad.street || ad.number)
+          ? `${ad.street || ''}, ${ad.number || ''}${ad.complement ? ' - ' + ad.complement : ''}`
+          : detail.address;
+        const itemLines = Array.isArray(detail.items) && detail.items.length > 0
+          ? detail.items
+          : null;
+        const paymentLabel =
+          detail.paymentMethod === 'pix_manual' ? 'Pix' :
+          detail.paymentMethod === 'cash_delivery' ? 'Dinheiro na entrega' :
+          detail.paymentMethod === 'card_terminal' ? 'Maquininha' : detail.paymentMethod;
+        const statusLabels: Record<string, string> = {
+          recebido: 'Recebido', preparando: 'Preparando', pronto: 'Pronto / Despacho',
+          em_entrega: 'Em entrega', concluido: 'Concluído', cancelado: 'Cancelado'
+        };
+        const dispatchLabels: Record<string, string> = {
+          disponivel: 'Disponível', aguardando_aceite: 'Aguardando aceite do motoboy',
+          aceito_aguardando_retirada: 'Aceito — aguardando retirada', em_entrega: 'Em entrega', concluido: 'Entregue'
+        };
+        const driver = detail.assignedDriverName || detail.driverName;
+        const fmtDate = (iso?: string) => iso ? new Date(iso).toLocaleString('pt-BR') : null;
+
+        const handleCopyDetail = async () => {
+          const lines = [
+            `Pedido #${detail.orderNumber}`,
+            `Cliente: ${detail.customerName}`,
+            `Telefone: ${detail.phone}`,
+            `Endereço: ${fullAddress}${ad?.reference ? ` (Ref.: ${ad.reference})` : ''} - ${detail.region}`,
+            `Itens: ${itemLines ? itemLines.map(i => `${i.quantity}x ${i.name}${i.size ? ' ' + i.size : ''}${i.flavors && i.flavors.length ? ' (' + i.flavors.join(' + ') + ')' : ''}`).join(' | ') : detail.itemsSummary}`,
+            detail.notes ? `Obs.: ${detail.notes}` : null,
+            `Pagamento: ${paymentLabel}${detail.changeFor ? ` (troco para ${money(detail.changeFor)})` : ''}`,
+            `Total: ${money(detail.total)}`
+          ].filter(Boolean).join('\n');
+          try {
+            await navigator.clipboard.writeText(lines);
+            setCopiedDetail(true);
+            setTimeout(() => setCopiedDetail(false), 2000);
+          } catch (e) {}
+        };
+
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+            onClick={() => setDetailOrderId(null)}
+          >
+            <div
+              className="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl bg-zinc-900 border border-zinc-800 shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-3 p-5 border-b border-zinc-800 sticky top-0 bg-zinc-900 z-10">
+                <div>
+                  <h3 className="text-lg font-black text-white">Pedido #{detail.orderNumber}</h3>
+                  <div className="flex flex-wrap items-center gap-2 mt-1">
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-200">
+                      {statusLabels[detail.status] || detail.status}
+                    </span>
+                    <span className="text-[11px] text-zinc-500 font-mono">
+                      {fmtDate(detail.createdAtISO) || detail.createdAt}
+                    </span>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setDetailOrderId(null)}
+                  className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition"
+                  title="Fechar"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="p-5 space-y-4 text-sm">
+                {/* Cliente */}
+                <section className="space-y-1">
+                  <h4 className="text-[10px] font-black uppercase tracking-wider text-zinc-500">Cliente</h4>
+                  <p className="font-bold text-white">{detail.customerName}</p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-zinc-300">{detail.phone || 'Sem telefone'}</span>
+                    {phoneDigits && (
+                      <a
+                        href={`https://wa.me/55${phoneDigits}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 hover:bg-emerald-900 transition"
+                      >
+                        WhatsApp
+                      </a>
+                    )}
+                  </div>
+                </section>
+
+                {/* Endereço */}
+                <section className="space-y-1">
+                  <h4 className="text-[10px] font-black uppercase tracking-wider text-zinc-500 flex items-center gap-1">
+                    <MapPin className="w-3 h-3" /> Endereço de entrega
+                  </h4>
+                  <p className="text-zinc-200">{fullAddress}</p>
+                  <p className="text-zinc-400 text-xs">Bairro/região: {detail.region}</p>
+                  {ad?.reference && <p className="text-zinc-400 text-xs">Referência: {ad.reference}</p>}
+                </section>
+
+                {/* Itens */}
+                <section className="space-y-2">
+                  <h4 className="text-[10px] font-black uppercase tracking-wider text-zinc-500 flex items-center gap-1">
+                    <Package className="w-3 h-3" /> Itens do pedido
+                  </h4>
+                  {itemLines ? (
+                    <ul className="space-y-2">
+                      {itemLines.map((it, idx) => (
+                        <li key={idx} className="p-3 rounded-xl bg-zinc-950 border border-zinc-800">
+                          <div className="flex items-start justify-between gap-2">
+                            <span className="font-bold text-zinc-100">
+                              {it.quantity}x {it.name}{it.size ? ` ${it.size}` : ''}
+                            </span>
+                            {typeof it.totalPrice === 'number' && it.totalPrice > 0 && (
+                              <span className="text-zinc-300 font-semibold shrink-0">{money(it.totalPrice)}</span>
+                            )}
+                          </div>
+                          {it.flavors && it.flavors.length > 0 && (
+                            <p className="text-xs text-zinc-400 mt-1">Sabores: {it.flavors.join(' + ')}</p>
+                          )}
+                          {it.crust && <p className="text-xs text-zinc-400">Borda: {it.crust}</p>}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <ul className="space-y-1.5">
+                      {String(detail.itemsSummary || '').split(' • ').filter(Boolean).map((line, idx) => (
+                        <li key={idx} className="p-2.5 rounded-lg bg-zinc-950 border border-zinc-800 text-zinc-200">{line}</li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+
+                {/* Observações */}
+                {detail.notes && (
+                  <section className="space-y-1">
+                    <h4 className="text-[10px] font-black uppercase tracking-wider text-zinc-500 flex items-center gap-1">
+                      <MessageSquare className="w-3 h-3" /> Observações do cliente
+                    </h4>
+                    <p className="p-3 rounded-xl bg-amber-950/30 border border-amber-800/40 text-amber-200">{detail.notes}</p>
+                  </section>
+                )}
+
+                {/* Pagamento */}
+                <section className="space-y-1.5">
+                  <h4 className="text-[10px] font-black uppercase tracking-wider text-zinc-500">Pagamento</h4>
+                  <div className="p-3 rounded-xl bg-zinc-950 border border-zinc-800 space-y-1 text-zinc-300">
+                    <div className="flex justify-between"><span>Forma</span><span className="font-semibold text-white">{paymentLabel}</span></div>
+                    {detail.paymentMethod === 'pix_manual' && (
+                      <div className="flex justify-between">
+                        <span>Situação</span>
+                        <span className={detail.paymentStatus === 'aguardando_conferencia' ? 'text-amber-400 font-semibold' : 'text-emerald-400 font-semibold'}>
+                          {detail.paymentStatus === 'aguardando_conferencia' ? 'Aguardando conferência' : 'Pix confirmado'}
+                        </span>
+                      </div>
+                    )}
+                    {detail.changeFor ? (
+                      <div className="flex justify-between"><span>Troco para</span><span className="font-semibold text-white">{money(detail.changeFor)}</span></div>
+                    ) : null}
+                    {typeof detail.subtotal === 'number' && detail.subtotal > 0 && (
+                      <div className="flex justify-between"><span>Subtotal</span><span>{money(detail.subtotal)}</span></div>
+                    )}
+                    {typeof detail.deliveryFee === 'number' && detail.deliveryFee > 0 && (
+                      <div className="flex justify-between"><span>Taxa de entrega</span><span>{money(detail.deliveryFee)}</span></div>
+                    )}
+                    <div className="flex justify-between pt-1 border-t border-zinc-800 text-base">
+                      <span className="font-bold text-white">Total</span>
+                      <span className="font-black text-white">{money(detail.total)}</span>
+                    </div>
+                  </div>
+                </section>
+
+                {/* Entrega / Despacho */}
+                <section className="space-y-1.5">
+                  <h4 className="text-[10px] font-black uppercase tracking-wider text-zinc-500 flex items-center gap-1">
+                    <Bike className="w-3 h-3" /> Entrega
+                  </h4>
+                  <div className="p-3 rounded-xl bg-zinc-950 border border-zinc-800 space-y-1 text-zinc-300">
+                    <div className="flex justify-between">
+                      <span>PIN de entrega</span>
+                      <span className="font-mono font-black text-white tracking-widest">{detail.deliveryPin || '—'}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Despacho</span>
+                      <span className="text-right">{detail.dispatchStatus ? (dispatchLabels[detail.dispatchStatus] || detail.dispatchStatus) : 'Ainda não despachado'}</span>
+                    </div>
+                    {driver && <div className="flex justify-between"><span>Motoboy</span><span className="font-semibold text-white">{driver}</span></div>}
+                    {fmtDate(detail.pickedUpAt) && <div className="flex justify-between"><span>Retirado em</span><span>{fmtDate(detail.pickedUpAt)}</span></div>}
+                    {fmtDate(detail.deliveredAt) && <div className="flex justify-between"><span>Entregue em</span><span>{fmtDate(detail.deliveredAt)}</span></div>}
+                    {detail.cancellationReason && (
+                      <div className="flex justify-between"><span>Motivo do cancelamento</span><span className="text-red-400 text-right">{detail.cancellationReason}</span></div>
+                    )}
+                  </div>
+                  <p className="text-[10px] text-zinc-500">O PIN é informado pelo cliente ao motoboy para confirmar a entrega.</p>
+                </section>
+              </div>
+
+              <div className="p-4 border-t border-zinc-800 flex gap-2 justify-end sticky bottom-0 bg-zinc-900">
+                <button
+                  onClick={handleCopyDetail}
+                  className="px-3 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold flex items-center gap-1.5 transition"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>{copiedDetail ? 'Copiado!' : 'Copiar pedido'}</span>
+                </button>
+                <button
+                  onClick={() => setDetailOrderId(null)}
+                  className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold transition"
+                >
+                  Fechar
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
     </div>
   );
 }
+

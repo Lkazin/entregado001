@@ -114,11 +114,20 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { customer, address, items, subtotal, deliveryFee, total, payment } = body;
 
-    const trackingToken = crypto.randomUUID();
-    const pin = String(Math.floor(1000 + Math.random() * 9000));
+    // Respeita os dados que o cliente ja viu na tela de confirmacao (quando validos)
+    const providedPin = typeof body.deliveryPin === 'string' && /^\d{4}$/.test(body.deliveryPin) ? body.deliveryPin : null;
+    const providedNumber = Number.isInteger(Number(body.orderNumber)) && Number(body.orderNumber) >= 1000 && Number(body.orderNumber) <= 999999
+      ? Number(body.orderNumber)
+      : null;
+    const providedToken = typeof body.trackingToken === 'string' && body.trackingToken.length >= 8 && body.trackingToken.length <= 80
+      ? body.trackingToken
+      : null;
+
+    const trackingToken = providedToken || crypto.randomUUID();
+    const pin = providedPin || String(Math.floor(1000 + Math.random() * 9000));
     const pinHash = crypto.createHash('sha256').update(pin).digest('hex');
     const storeId = process.env.NEXT_PUBLIC_DEFAULT_STORE_ID || '11111111-1111-1111-1111-111111111111';
-    const orderNumber = Math.floor(1000 + Math.random() * 9000);
+    const orderNumber = providedNumber || Math.floor(1000 + Math.random() * 9000);
 
     const itemsSummary = items.map((i: any) => {
       if (i.type === 'pizza') {
@@ -127,6 +136,18 @@ export async function POST(req: NextRequest) {
       }
       return `${i.quantity}x ${i.name}`;
     }).join(' • ');
+
+    // Itens detalhados para o painel do lojista (sem alterar o itemsSummary usado pelo despacho)
+    const itemsDetail = items.map((i: any) => ({
+      type: i.type,
+      name: i.type === 'pizza' ? 'Pizza' : (i.name || 'Item'),
+      quantity: Number(i.quantity) || 1,
+      size: i.size?.name || null,
+      flavors: Array.isArray(i.flavors) ? i.flavors.map((f: any) => f.name) : [],
+      crust: i.crust?.name || null,
+      unitPrice: Number(i.unitPrice) || 0,
+      totalPrice: Number(i.totalPrice) || 0
+    }));
 
     const newOrderObj = {
       id: `ord-${Date.now()}-${orderNumber}`,
@@ -143,11 +164,42 @@ export async function POST(req: NextRequest) {
       deliveryPin: pin,
       trackingToken,
       driverName: null,
-      createdAt: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+      createdAt: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+      // Detalhes completos do pedido
+      createdAtISO: new Date().toISOString(),
+      notes: typeof body.notes === 'string' ? body.notes.slice(0, 500) : '',
+      subtotal: Number(subtotal) || 0,
+      deliveryFee: Number(deliveryFee) || 0,
+      changeFor: payment.changeFor ?? null,
+      addressDetail: {
+        street: address.street || '',
+        number: address.number || '',
+        complement: address.complement || '',
+        reference: address.reference || '',
+        region: address.region || ''
+      },
+      items: itemsDetail
     };
+
 
     // Atualiza pedidos existentes e grava no Supabase Storage
     const current = await fetchCurrentOrders();
+
+    // Idempotencia: se o mesmo pedido (numero + telefone) ja existe, nao duplica
+    const duplicate = current.find(o => Number(o.orderNumber) === orderNumber && String(o.phone) === String(customer.phone));
+    if (duplicate) {
+      return NextResponse.json({
+        success: true,
+        orderId: duplicate.id,
+        orderNumber: duplicate.orderNumber,
+        trackingToken: duplicate.trackingToken,
+        deliveryPin: duplicate.deliveryPin,
+        status: duplicate.status,
+        duplicate: true,
+        createdAt: new Date().toISOString()
+      });
+    }
+
     const updated = [newOrderObj, ...current.filter(o => o.id !== newOrderObj.id)];
     await persistOrders(updated);
 
@@ -201,6 +253,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
+      orderId: newOrderObj.id,
       orderNumber,
       trackingToken,
       deliveryPin: pin,
