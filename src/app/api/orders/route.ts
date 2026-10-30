@@ -87,6 +87,19 @@ async function persistOrders(ordersList: any[]): Promise<void> {
   }
 }
 
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-store-id',
+};
+
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: corsHeaders,
+  });
+}
+
 export async function GET(req: NextRequest) {
   try {
     const orders = await fetchCurrentOrders();

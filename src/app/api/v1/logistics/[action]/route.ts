@@ -62,6 +62,26 @@ async function persistLogisticsState() {
   } catch (e) {}
 }
 
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-store-id',
+};
+
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: corsHeaders,
+  });
+}
+
+function jsonResponse(data: any, init?: { status?: number }) {
+  return NextResponse.json(data, {
+    status: init?.status ?? 200,
+    headers: corsHeaders,
+  });
+}
+
 // 1. TRATAMENTO DE REQUISIÇÕES GET
 export async function GET(
   req: NextRequest,
