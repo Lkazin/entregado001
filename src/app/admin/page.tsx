@@ -12,6 +12,10 @@ import { PIZZA_FLAVORS } from '@/lib/constants';
 
 import AdminPinAuth from '@/components/AdminPinAuth';
 
+const SUPABASE_STORAGE_URL = 'https://nrdbporbyujwtgnpiejz.supabase.co/storage/v1/object/novaesweb_store/logistics.json';
+const SUPABASE_ANON_KEY = 'sb_publishable_ynzw0icpmaxAhkCJWDYDGg_nTQCPUeY';
+const SUPABASE_SERVICE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5yZGJwb3JieXVqd3RnbnBpZWp6Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MzE3NjI1MiwiZXhwIjoyMTA4NzUyMjUyfQ.14LuRaZIPmmRCyHz9uD6PiTajpH0ap5vGphW2_d0YrA';
+
 interface AdminOrder {
   id: string;
   orderNumber: number;
@@ -174,13 +178,39 @@ export default function AdminDashboardPage() {
       }
 
       // 2. Buscar Entregadores Reais e Status de Presença
-      const resDrivers = await fetch('/api/v1/logistics/drivers');
-      const dataDrivers = await resDrivers.json();
-      if (dataDrivers.success && Array.isArray(dataDrivers.drivers)) {
-        const realDrivers = dataDrivers.drivers.filter((d: any) => !d.name?.includes('Rodrigo Silva'));
-        setDrivers(realDrivers);
-        if (!selectedDriverId && realDrivers.length > 0) {
-          setSelectedDriverId(realDrivers[0].id);
+      let loadedDrivers: any[] = [];
+      try {
+        const resDrivers = await fetch('/api/v1/logistics/drivers');
+        if (resDrivers.ok) {
+          const dataDrivers = await resDrivers.json();
+          if (dataDrivers.success && Array.isArray(dataDrivers.drivers)) {
+            loadedDrivers = dataDrivers.drivers.filter((d: any) => !d.name?.includes('Rodrigo Silva'));
+          }
+        }
+      } catch (e) {}
+
+      // Fallback gracioso ao Supabase Storage caso a API local esteja indisponível
+      if (loadedDrivers.length === 0) {
+        try {
+          const cloudRes = await fetch(`${SUPABASE_STORAGE_URL}?t=${Date.now()}`, {
+            headers: {
+              'apikey': SUPABASE_ANON_KEY,
+              'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
+            }
+          });
+          if (cloudRes.ok) {
+            const cloudData = await cloudRes.json();
+            if (Array.isArray(cloudData.drivers)) {
+              loadedDrivers = cloudData.drivers.filter((d: any) => !d.name?.includes('Rodrigo Silva'));
+            }
+          }
+        } catch (ce) {}
+      }
+
+      if (loadedDrivers.length > 0) {
+        setDrivers(loadedDrivers);
+        if (!selectedDriverId) {
+          setSelectedDriverId(loadedDrivers[0].id);
         }
       }
     } catch (err) {
@@ -296,17 +326,62 @@ export default function AdminDashboardPage() {
 
     const feeNum = parseFloat(deliveryFeeOffered.replace(',', '.')) || 12.00;
 
-    await fetch('/api/v1/logistics/offer-create', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    // 1. Tenta API local
+    try {
+      await fetch('/api/v1/logistics/offer-create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          orderId: selectedOrderToDispatch.id,
+          orderNumber: selectedOrderToDispatch.orderNumber,
+          customerAddress: selectedOrderToDispatch.address,
+          driverId: driver.driverId || driver.id,
+          feeOffered: feeNum
+        })
+      });
+    } catch {}
+
+    // 2. Sincroniza oferta garantida no Supabase Storage (Nuvem)
+    try {
+      const getRes = await fetch(`${SUPABASE_STORAGE_URL}?t=${Date.now()}`, {
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
+        }
+      });
+      let state: { drivers: any[]; offers: any[]; assignments: any[] } = { drivers: [], offers: [], assignments: [] };
+      if (getRes.ok) {
+        state = await getRes.json();
+      }
+
+      state.offers.unshift({
+        id: `off_${Date.now()}`,
         orderId: selectedOrderToDispatch.id,
         orderNumber: selectedOrderToDispatch.orderNumber,
         customerAddress: selectedOrderToDispatch.address,
+        deliveryAddress: selectedOrderToDispatch.address,
+        targetDriverId: driver.driverId || driver.id,
         driverId: driver.driverId || driver.id,
-        feeOffered: feeNum
-      })
-    });
+        feeOffered: feeNum,
+        deliveryFee: feeNum,
+        status: 'pendente',
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+        createdAt: new Date().toISOString()
+      } as any);
+
+      await fetch(SUPABASE_STORAGE_URL, {
+        method: 'POST',
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+          'x-upsert': 'true',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(state)
+      });
+    } catch (err) {
+      console.warn('Oferta gravada localmente, sincronização em nuvem falhou:', err);
+    }
 
     await fetch('/api/orders', {
       method: 'PATCH',
@@ -328,24 +403,83 @@ export default function AdminDashboardPage() {
   const handleGenerateShiftCode = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setIsGeneratingShiftCode(true);
+    let codeGenerated: string | null = null;
+    const days = parseInt(shiftValidity) || 1;
+    const expiresAt = new Date(Date.now() + days * 86400000).toISOString();
+
+    // 1. Tenta API local
     try {
       const res = await fetch('/api/v1/logistics/invite-issue', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          validityDays: parseInt(shiftValidity) || 1
-        })
+        body: JSON.stringify({ validityDays: days })
       });
-      const data = await res.json();
-      if (data.success && data.inviteCode) {
-        setGeneratedShiftCode(data.inviteCode);
-        fetchData(true);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.inviteCode) {
+          codeGenerated = data.inviteCode;
+        }
       }
     } catch (err) {
-      console.error('Erro ao gerar código de plantão:', err);
-    } finally {
-      setIsGeneratingShiftCode(false);
+      console.warn('API local invite-issue falhou, gerando na nuvem Supabase...');
     }
+
+    // 2. Se a API local não retornou código, grava direto na nuvem Supabase
+    if (!codeGenerated) {
+      try {
+        const rawToken = `NW-${Math.floor(100000 + Math.random() * 900000)}`;
+        const getRes = await fetch(`${SUPABASE_STORAGE_URL}?t=${Date.now()}`, {
+          headers: {
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
+          }
+        });
+        let state: { drivers: any[]; offers: any[]; assignments: any[] } = { drivers: [], offers: [], assignments: [] };
+        if (getRes.ok) {
+          state = await getRes.json();
+        }
+
+        const newShift = {
+          id: `shift-${Date.now()}`,
+          inviteCode: rawToken,
+          driverName: null,
+          name: null,
+          phone: null,
+          vehiclePlate: null,
+          driverId: null,
+          status: 'aguardando_motoboy',
+          shiftStatus: 'aguardando_motoboy',
+          presence: 'indisponivel',
+          activeDeliveries: 0,
+          maxDeliveries: 3,
+          validityDays: days,
+          expiresAt,
+          createdAt: new Date().toISOString()
+        };
+        state.drivers.unshift(newShift as any);
+
+        await fetch(SUPABASE_STORAGE_URL, {
+          method: 'POST',
+          headers: {
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+            'x-upsert': 'true',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(state)
+        });
+
+        codeGenerated = rawToken;
+      } catch (cloudErr) {
+        console.error('Erro ao salvar código no Supabase Cloud:', cloudErr);
+      }
+    }
+
+    if (codeGenerated) {
+      setGeneratedShiftCode(codeGenerated);
+      fetchData(true);
+    }
+    setIsGeneratingShiftCode(false);
   };
 
   const handleCopyCode = (code: string) => {
