@@ -6,7 +6,7 @@ import {
   Flame, LayoutDashboard, ShoppingCart, UtensilsCrossed, Bike, Settings, 
   CheckCircle2, Clock, AlertTriangle, ArrowRight, Printer, XCircle, Search, 
   UserPlus, ShieldAlert, KeyRound, Check, RefreshCw, Send, Lock, PlusCircle,
-  Copy, MessageSquare, Trash2
+  Copy, MessageSquare, Trash2, CheckSquare, Square, X, MapPin, Package, Users
 } from 'lucide-react';
 import { PIZZA_FLAVORS } from '@/lib/constants';
 
@@ -26,11 +26,16 @@ interface AdminOrder {
   itemsSummary: string;
   total: number;
   status: 'recebido' | 'preparando' | 'pronto' | 'em_entrega' | 'concluido' | 'cancelado';
+  dispatchStatus?: 'disponivel' | 'aguardando_aceite' | 'aceito_aguardando_retirada' | 'em_entrega' | 'concluido';
   paymentMethod: 'pix_manual' | 'cash_delivery' | 'card_terminal';
   paymentStatus: 'aguardando_conferencia' | 'confirmado_manual' | 'recebido_entrega';
   deliveryPin: string;
   driverName?: string | null;
+  assignedDriverName?: string | null;
+  offerGroupId?: string | null;
   createdAt: string;
+  pickedUpAt?: string;
+  deliveredAt?: string;
 }
 
 interface AdminDriver {
@@ -103,11 +108,16 @@ export default function AdminDashboardPage() {
     }
   }, []);
 
-  // Estados de Despacho
+  // Estados de Despacho e Seleção Múltipla
+  const [selectedOrderIds, setSelectedOrderIds] = useState<string[]>([]);
+  const [isDispatchDrawerOpen, setIsDispatchDrawerOpen] = useState(false);
+  const [driverSearchQuery, setDriverSearchQuery] = useState('');
+  const [isInlineInviteOpen, setIsInlineInviteOpen] = useState(false);
   const [selectedOrderToDispatch, setSelectedOrderToDispatch] = useState<AdminOrder | null>(null);
   const [selectedDriverId, setSelectedDriverId] = useState<string>('');
   const [deliveryFeeOffered, setDeliveryFeeOffered] = useState<string>('12,00');
   const [dispatchAlert, setDispatchAlert] = useState<string | null>(null);
+  const [isSendingDispatch, setIsSendingDispatch] = useState(false);
 
   // Estados para Código de Plantão Dinâmico
   const [shiftValidity, setShiftValidity] = useState<string>('1');
@@ -151,7 +161,7 @@ export default function AdminDashboardPage() {
 
           [...localSaved, ...prevOrders].forEach(o => mergedMap.set(o.id, o));
 
-          // Atualizar com pedidos que vieram do servidor
+          // Atualizar com pedidos que vieram do servidor preservando substatus de despacho
           incoming.forEach(o => {
             const existing = mergedMap.get(o.id);
             if (existing) {
@@ -160,9 +170,20 @@ export default function AdminDashboardPage() {
               const localIdx = sequence.indexOf(existing.status);
               const serverIdx = sequence.indexOf(o.status);
               if (localIdx > serverIdx) {
-                mergedMap.set(o.id, { ...o, status: existing.status });
+                mergedMap.set(o.id, { 
+                  ...o, 
+                  status: existing.status,
+                  dispatchStatus: existing.dispatchStatus || o.dispatchStatus,
+                  assignedDriverName: existing.assignedDriverName || o.assignedDriverName || o.driverName,
+                  offerGroupId: existing.offerGroupId || o.offerGroupId
+                });
               } else {
-                mergedMap.set(o.id, o);
+                mergedMap.set(o.id, {
+                  ...o,
+                  dispatchStatus: o.dispatchStatus || existing.dispatchStatus,
+                  assignedDriverName: o.assignedDriverName || existing.assignedDriverName || o.driverName || existing.driverName,
+                  offerGroupId: o.offerGroupId || existing.offerGroupId
+                });
               }
             } else {
               mergedMap.set(o.id, o);
@@ -303,45 +324,178 @@ export default function AdminDashboardPage() {
     }
   };
 
-  // Disparar Oferta de Despacho Conectado à API
-  const handleSendDispatchOffer = async () => {
-    if (!selectedOrderToDispatch) return;
-    const driver = drivers.find(d => d.id === selectedDriverId);
-    if (!driver) return;
+  // Handlers de Seleção Múltipla de Pedidos para Despacho
+  const handleToggleSelectOrder = (orderId: string) => {
+    setSelectedOrderIds(prev => 
+      prev.includes(orderId) ? prev.filter(id => id !== orderId) : [...prev, orderId]
+    );
+  };
 
-    if (!driver.driverName) {
+  const readyOrders = orders.filter(o => 
+    o.status === 'pronto' && 
+    o.dispatchStatus !== 'aguardando_aceite' && 
+    o.dispatchStatus !== 'aceito_aguardando_retirada'
+  );
+
+  const handleToggleSelectAllReady = () => {
+    if (readyOrders.length === 0) return;
+    const allSelected = readyOrders.every(o => selectedOrderIds.includes(o.id));
+    if (allSelected) {
+      setSelectedOrderIds(prev => prev.filter(id => !readyOrders.some(ro => ro.id === id)));
+    } else {
+      const readyIds = readyOrders.map(o => o.id);
+      setSelectedOrderIds(prev => Array.from(new Set([...prev, ...readyIds])));
+    }
+  };
+
+  const handleOpenDispatchForSingle = (order: AdminOrder) => {
+    setSelectedOrderIds([order.id]);
+    setSelectedOrderToDispatch(order);
+    setIsDispatchDrawerOpen(true);
+  };
+
+  const handleOpenDispatchForSelected = () => {
+    if (selectedOrderIds.length === 0) return;
+    setIsDispatchDrawerOpen(true);
+  };
+
+  // Cancelar ou Retirar Despacho de Pedido em "Aguardando Aceite"
+  const handleCancelDispatch = async (orderId: string) => {
+    if (!confirm('Deseja retirar este pedido do despacho e torná-lo disponível novamente?')) return;
+    
+    // Atualização otimista local
+    setOrders(prev => {
+      const updated = prev.map(o => o.id === orderId ? {
+        ...o,
+        dispatchStatus: 'disponivel' as const,
+        assignedDriverName: null,
+        driverName: null,
+        offerGroupId: null
+      } : o);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
+      }
+      return updated;
+    });
+
+    try {
+      await fetch('/api/orders', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          orderId,
+          dispatchStatus: 'disponivel',
+          assignedDriverName: null,
+          driverName: null,
+          offerGroupId: null
+        })
+      });
+
+      // Remove a oferta do Supabase Storage
+      const getRes = await fetch(`${SUPABASE_STORAGE_URL}?t=${Date.now()}`, {
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
+        }
+      });
+      if (getRes.ok) {
+        const state = await getRes.json();
+        if (Array.isArray(state.offers)) {
+          state.offers = state.offers.filter((off: any) => 
+            off.orderId !== orderId && 
+            (!off.orders || !off.orders.some((item: any) => item.orderId === orderId))
+          );
+          await fetch(SUPABASE_STORAGE_URL, {
+            method: 'POST',
+            headers: {
+              'apikey': SUPABASE_ANON_KEY,
+              'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+              'x-upsert': 'true',
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(state)
+          });
+        }
+      }
+    } catch (err) {
+      console.error('Erro ao cancelar oferta de despacho:', err);
+    }
+
+    setDispatchAlert('Despacho cancelado com sucesso. O pedido está pronto para nova seleção.');
+    setTimeout(() => setDispatchAlert(null), 4000);
+    fetchData(true);
+  };
+
+  // Disparar Oferta de Despacho em Lote (Agrupando 1 ou Vários Pedidos)
+  const handleSendGroupedDispatchOffer = async () => {
+    const selectedOrders = orders.filter(o => selectedOrderIds.includes(o.id));
+    if (selectedOrders.length === 0) {
+      alert('Nenhum pedido selecionado para despacho.');
+      return;
+    }
+
+    const driver = drivers.find(d => d.id === selectedDriverId);
+    if (!driver) {
+      alert('Selecione um entregador para enviar a oferta.');
+      return;
+    }
+
+    const driverName = driver.driverName || driver.name;
+    if (!driverName) {
       alert('Aguarde o motoboy conectar seu aplicativo através do código de plantão antes de despachar.');
       return;
     }
 
-    if (driver.presence !== 'disponivel') {
-      alert(`O entregador ${driver.driverName || driver.name} está offline no aplicativo. Oferta não despachada.`);
+    if (driver.status === 'bloqueado') {
+      alert(`O entregador ${driverName} está bloqueado.`);
       return;
     }
 
     if (driver.activeDeliveries >= driver.maxDeliveries) {
-      alert(`O entregador ${driver.driverName || driver.name} atingiu a capacidade máxima de ${driver.maxDeliveries} entregas simultâneas!`);
+      alert(`O entregador ${driverName} atingiu a capacidade máxima de ${driver.maxDeliveries} entregas simultâneas!`);
       return;
     }
 
+    setIsSendingDispatch(true);
     const feeNum = parseFloat(deliveryFeeOffered.replace(',', '.')) || 12.00;
+    const offerUniqueId = `off_${Date.now()}`;
+    const targetDriverId = driver.driverId || driver.id;
 
-    // 1. Tenta API local
+    const offerOrders = selectedOrders.map(o => ({
+      orderId: o.id,
+      orderNumber: o.orderNumber,
+      customerName: o.customerName || 'Cliente',
+      customerPhone: o.phone || '',
+      customerAddress: o.address,
+      deliveryAddress: o.address,
+      customerNeighborhood: o.region || 'Região Central',
+      itemsSummary: o.itemsSummary || '1x Pedido Delivery',
+      total: o.total,
+      deliveryFee: Number((feeNum / selectedOrders.length).toFixed(2)),
+      deliveryPin: o.deliveryPin || '****'
+    }));
+
+    // 1. Tentar API local
     try {
       await fetch('/api/v1/logistics/offer-create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          orderId: selectedOrderToDispatch.id,
-          orderNumber: selectedOrderToDispatch.orderNumber,
-          customerAddress: selectedOrderToDispatch.address,
-          driverId: driver.driverId || driver.id,
-          feeOffered: feeNum
+          orderId: selectedOrders[0].id,
+          orderNumber: selectedOrders[0].orderNumber,
+          orderIds: selectedOrders.map(o => o.id),
+          orders: offerOrders,
+          customerAddress: selectedOrders.map(o => `#${o.orderNumber}: ${o.address}`).join(' | '),
+          driverId: targetDriverId,
+          feeOffered: feeNum,
+          totalOrdersGrouped: selectedOrders.length
         })
       });
-    } catch {}
+    } catch (e) {
+      console.warn('API local falhou, prosseguindo com nuvem Supabase:', e);
+    }
 
-    // 2. Sincroniza oferta garantida no Supabase Storage (Nuvem)
+    // 2. Sincronizar oferta no Supabase Storage (logistics.json)
     try {
       const getRes = await fetch(`${SUPABASE_STORAGE_URL}?t=${Date.now()}`, {
         headers: {
@@ -354,29 +508,32 @@ export default function AdminDashboardPage() {
         state = await getRes.json();
       }
 
-      const offerUniqueId = `off_${Date.now()}`;
-      state.offers.unshift({
+      const newOffer = {
         id: offerUniqueId,
         offerId: offerUniqueId,
-        orderId: selectedOrderToDispatch.id,
-        orderNumber: String(selectedOrderToDispatch.orderNumber),
-        customerAddress: selectedOrderToDispatch.address,
-        deliveryAddress: selectedOrderToDispatch.address,
-        customerNeighborhood: selectedOrderToDispatch.region || 'Bairro Próximo',
+        orderId: selectedOrders[0].id,
+        orderNumber: selectedOrders.map(o => `#${o.orderNumber}`).join(', '),
+        orderIds: selectedOrders.map(o => o.id),
+        orders: offerOrders,
+        customerAddress: selectedOrders.map(o => `#${o.orderNumber}: ${o.address}`).join(' | '),
+        deliveryAddress: selectedOrders.map(o => `#${o.orderNumber}: ${o.address}`).join(' | '),
+        customerNeighborhood: selectedOrders[0].region || 'Bairro Atendido',
         customerCity: 'São Paulo',
-        customerName: selectedOrderToDispatch.customerName || 'Cliente',
-        customerPhone: selectedOrderToDispatch.phone || '',
-        itemsSummary: selectedOrderToDispatch.itemsSummary || '1x Pedido Delivery',
-        targetDriverId: driver.driverId || driver.id,
-        driverId: driver.driverId || driver.id,
+        customerName: selectedOrders.length === 1 ? selectedOrders[0].customerName : `${selectedOrders.length} Clientes (Lote)`,
+        customerPhone: selectedOrders[0].phone || '',
+        itemsSummary: selectedOrders.map(o => `#${o.orderNumber} (${o.itemsSummary})`).join(' • '),
+        targetDriverId,
+        driverId: targetDriverId,
         feeOffered: feeNum,
         deliveryFee: feeNum,
-        estimatedDistanceKm: 2.8,
-        totalOrdersGrouped: 1,
+        estimatedDistanceKm: Number((2.0 + selectedOrders.length * 1.2).toFixed(1)),
+        totalOrdersGrouped: selectedOrders.length,
         status: 'pendente',
         expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
         createdAt: new Date().toISOString()
-      } as any);
+      };
+
+      state.offers = [newOffer as any, ...(state.offers || [])];
 
       await fetch(SUPABASE_STORAGE_URL, {
         method: 'POST',
@@ -389,23 +546,97 @@ export default function AdminDashboardPage() {
         body: JSON.stringify(state)
       });
     } catch (err) {
-      console.warn('Oferta gravada localmente, sincronização em nuvem falhou:', err);
+      console.warn('Erro ao sincronizar logistics.json no Supabase:', err);
     }
 
-    await fetch('/api/orders', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        orderId: selectedOrderToDispatch.id,
-        status: 'em_entrega',
-        driverName: driver.driverName || driver.name
-      })
+    // 3. Atualizar pedidos selecionados: dispatchStatus = 'aguardando_aceite'
+    // Preserva status 'pronto' até o motoboy aceitar e retirar
+    setOrders(prev => {
+      const updated = prev.map(o => {
+        if (selectedOrderIds.includes(o.id)) {
+          return {
+            ...o,
+            dispatchStatus: 'aguardando_aceite' as const,
+            assignedDriverName: driverName,
+            driverName: driverName,
+            offerGroupId: offerUniqueId
+          };
+        }
+        return o;
+      });
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
+      }
+      return updated;
     });
 
-    setDispatchAlert(`Oferta enviada em tempo real para ${driver.driverName || driver.name}! Pedido movido para "Em Entrega".`);
+    for (const order of selectedOrders) {
+      try {
+        await fetch('/api/orders', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            orderId: order.id,
+            dispatchStatus: 'aguardando_aceite',
+            assignedDriverName: driverName,
+            driverName: driverName,
+            offerGroupId: offerUniqueId
+          })
+        });
+      } catch (err) {}
+    }
+
+    // Atualiza diretamente no orders.json do Supabase Storage
+    try {
+      const ordersRes = await fetch('https://nrdbporbyujwtgnpiejz.supabase.co/storage/v1/object/novaesweb_store/orders.json', {
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
+        }
+      });
+      if (ordersRes.ok) {
+        let cloudOrders = await ordersRes.json();
+        if (Array.isArray(cloudOrders)) {
+          cloudOrders = cloudOrders.map((o: any) => {
+            if (selectedOrderIds.includes(o.id) || selectedOrderIds.includes(String(o.orderNumber))) {
+              return {
+                ...o,
+                dispatchStatus: 'aguardando_aceite',
+                assignedDriverName: driverName,
+                driverName: driverName,
+                offerGroupId: offerUniqueId
+              };
+            }
+            return o;
+          });
+          await fetch('https://nrdbporbyujwtgnpiejz.supabase.co/storage/v1/object/novaesweb_store/orders.json', {
+            method: 'POST',
+            headers: {
+              'apikey': SUPABASE_ANON_KEY,
+              'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+              'x-upsert': 'true',
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(cloudOrders)
+          });
+        }
+      }
+    } catch (err) {}
+
+    setIsSendingDispatch(false);
+    setIsDispatchDrawerOpen(false);
+    setSelectedOrderIds([]);
     setSelectedOrderToDispatch(null);
-    fetchData(true);
+    setDispatchAlert(`Oferta de ${selectedOrders.length} pedido(s) enviada para ${driverName}! Aguardando aceite no aplicativo.`);
     setTimeout(() => setDispatchAlert(null), 5000);
+    fetchData(true);
+  };
+
+  const handleSendDispatchOffer = async () => {
+    if (selectedOrderToDispatch) {
+      setSelectedOrderIds([selectedOrderToDispatch.id]);
+    }
+    await handleSendGroupedDispatchOffer();
   };
 
   // Gerar Código de Plantão Dinâmico (Uso Único no App do Motoboy)
@@ -540,6 +771,8 @@ export default function AdminDashboardPage() {
       </div>
     );
   }
+
+  const selectedOrders = orders.filter(o => selectedOrderIds.includes(o.id));
 
   return (
     <div className="min-h-screen bg-zinc-950 text-white flex flex-col">
@@ -699,12 +932,35 @@ export default function AdminDashboardPage() {
                 return (
                   <div key={col.key} className="bg-zinc-900/50 border border-zinc-800/80 rounded-2xl p-4 flex flex-col h-[700px]">
                     <div className="flex items-center justify-between pb-3 border-b border-zinc-800 mb-3">
-                      <span className={`text-xs font-black uppercase tracking-wider ${col.color}`}>
-                        {col.label}
-                      </span>
-                      <span className="text-xs px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-300 font-bold">
-                        {colOrders.length}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className={`text-xs font-black uppercase tracking-wider ${col.color}`}>
+                          {col.label}
+                        </span>
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-300 font-bold">
+                          {colOrders.length}
+                        </span>
+                      </div>
+
+                      {col.key === 'pronto' && readyOrders.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={handleToggleSelectAllReady}
+                          className="text-[10px] font-bold text-zinc-400 hover:text-white flex items-center gap-1 px-2 py-1 rounded bg-zinc-800/80 hover:bg-zinc-700 transition"
+                          title="Selecionar ou desmarcar todos os pedidos prontos disponíveis"
+                        >
+                          {readyOrders.every(o => selectedOrderIds.includes(o.id)) ? (
+                            <>
+                              <CheckSquare className="w-3 h-3 text-red-500" />
+                              <span>Desmarcar ({readyOrders.length})</span>
+                            </>
+                          ) : (
+                            <>
+                              <Square className="w-3 h-3 text-zinc-400" />
+                              <span>Todos ({readyOrders.length})</span>
+                            </>
+                          )}
+                        </button>
+                      )}
                     </div>
 
                     <div className="flex-1 overflow-y-auto space-y-3 pr-1">
@@ -716,8 +972,69 @@ export default function AdminDashboardPage() {
                         colOrders.map((order) => (
                           <div
                             key={order.id}
-                            className="p-3.5 rounded-xl bg-zinc-900 border border-zinc-800 hover:border-zinc-700 transition shadow-md space-y-2 text-xs"
+                            className={`p-3.5 rounded-xl bg-zinc-900 border transition shadow-md space-y-2 text-xs ${
+                              selectedOrderIds.includes(order.id) 
+                                ? 'border-red-600/80 bg-red-950/20' 
+                                : 'border-zinc-800 hover:border-zinc-700'
+                            }`}
                           >
+                            {/* Checkbox de seleção para despacho em lote */}
+                            {col.key === 'pronto' && order.dispatchStatus !== 'aguardando_aceite' && order.dispatchStatus !== 'aceito_aguardando_retirada' && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleToggleSelectOrder(order.id);
+                                }}
+                                className={`flex items-center gap-1.5 text-left w-full pb-1.5 border-b border-zinc-800/70 mb-1 cursor-pointer transition ${
+                                  selectedOrderIds.includes(order.id) ? 'text-red-400 font-bold' : 'text-zinc-400 hover:text-zinc-200'
+                                }`}
+                              >
+                                {selectedOrderIds.includes(order.id) ? (
+                                  <CheckSquare className="w-4 h-4 text-red-500 shrink-0" />
+                                ) : (
+                                  <Square className="w-4 h-4 text-zinc-500 shrink-0" />
+                                )}
+                                <span className="text-[11px]">
+                                  {selectedOrderIds.includes(order.id) ? 'Selecionado para Envio' : 'Selecionar para Despacho'}
+                                </span>
+                              </button>
+                            )}
+
+                            {/* Substatus Badges de Despacho */}
+                            {order.dispatchStatus === 'aguardando_aceite' && (
+                              <div className="p-2 rounded-lg bg-amber-950/70 border border-amber-600/60 text-amber-300 text-[11px] space-y-1 animate-pulse">
+                                <div className="flex items-center justify-between">
+                                  <span className="font-bold flex items-center gap-1">
+                                    <Clock className="w-3 h-3 text-amber-400" />
+                                    Aguardando Aceite
+                                  </span>
+                                  <button
+                                    onClick={() => handleCancelDispatch(order.id)}
+                                    className="text-[10px] underline text-amber-400 hover:text-white"
+                                    title="Retirar pedido do despacho e trocar motoboy"
+                                  >
+                                    Trocar / Retirar
+                                  </button>
+                                </div>
+                                <p className="text-[10px] text-zinc-300">
+                                  Oferta enviada para: <strong className="text-amber-300">{order.assignedDriverName || order.driverName}</strong>
+                                </p>
+                              </div>
+                            )}
+
+                            {order.dispatchStatus === 'aceito_aguardando_retirada' && (
+                              <div className="p-2 rounded-lg bg-blue-950/70 border border-blue-600/60 text-blue-300 text-[11px] space-y-1">
+                                <span className="font-bold flex items-center gap-1 text-blue-400">
+                                  <Bike className="w-3.5 h-3.5" />
+                                  Aceito — Aguardando Retirada
+                                </span>
+                                <p className="text-[10px] text-zinc-300">
+                                  Entregador <strong className="text-white">{order.assignedDriverName || order.driverName}</strong> a caminho da loja para retirar.
+                                </p>
+                              </div>
+                            )}
+
                             <div className="flex justify-between items-center">
                               <span className="font-black text-white text-sm">#{order.orderNumber}</span>
                               <span className="text-[10px] text-zinc-500 font-mono">{order.createdAt}</span>
@@ -787,16 +1104,29 @@ export default function AdminDashboardPage() {
                               </button>
 
                               {col.key === 'pronto' ? (
-                                <button
-                                  onClick={() => {
-                                    setSelectedOrderToDispatch(order);
-                                    setActiveTab('logistics');
-                                  }}
-                                  className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold text-[11px] flex items-center gap-1 transition shadow-md"
-                                >
-                                  <Send className="w-3 h-3" />
-                                  <span>Despachar</span>
-                                </button>
+                                order.dispatchStatus === 'aguardando_aceite' ? (
+                                  <button
+                                    onClick={() => handleCancelDispatch(order.id)}
+                                    className="px-2.5 py-1.5 rounded-lg bg-amber-950/80 hover:bg-amber-900 border border-amber-800 text-amber-300 text-[10px] font-bold transition flex items-center gap-1"
+                                    title="Cancelar despacho e escolher outro motoboy"
+                                  >
+                                    <X className="w-3 h-3" />
+                                    <span>Trocar Motoboy</span>
+                                  </button>
+                                ) : order.dispatchStatus === 'aceito_aguardando_retirada' ? (
+                                  <span className="text-[10px] text-blue-400 font-bold px-2 py-1 rounded bg-blue-950/60 border border-blue-900 flex items-center gap-1">
+                                    <Clock className="w-3 h-3 animate-spin" />
+                                    <span>Aguardando Retirada...</span>
+                                  </span>
+                                ) : (
+                                  <button
+                                    onClick={() => handleOpenDispatchForSingle(order)}
+                                    className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold text-[11px] flex items-center gap-1 transition shadow-md"
+                                  >
+                                    <Send className="w-3 h-3" />
+                                    <span>Despachar</span>
+                                  </button>
+                                )
                               ) : col.key !== 'concluido' ? (
                                 <button
                                   onClick={() => handleAdvanceStatus(order.id, order.status)}
@@ -812,6 +1142,20 @@ export default function AdminDashboardPage() {
                         ))
                       )}
                     </div>
+
+                    {/* Botão de Despacho em Lote Fixo na Coluna 3 */}
+                    {col.key === 'pronto' && selectedOrderIds.length > 0 && (
+                      <div className="pt-2 sticky bottom-0 bg-zinc-900/95 -mx-1 px-1 pb-1 border-t border-zinc-800">
+                        <button
+                          type="button"
+                          onClick={handleOpenDispatchForSelected}
+                          className="w-full py-2.5 px-3 rounded-xl bg-gradient-to-r from-red-600 to-red-500 hover:from-red-500 hover:to-red-600 text-white font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-red-600/40 transition transform active:scale-95"
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                          <span>Despachar ({selectedOrderIds.length}) Selecionados</span>
+                        </button>
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -1311,6 +1655,340 @@ export default function AdminDashboardPage() {
         )}
 
       </main>
+
+      {/* MODAL / DRAWER INTEGRADO DE DESPACHO (SELEÇÃO DE 1 OU MÚLTIPLOS PEDIDOS) */}
+      {isDispatchDrawerOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto animate-in fade-in duration-200">
+          <div className="bg-zinc-900 border border-zinc-700/80 rounded-3xl max-w-3xl w-full max-h-[92vh] flex flex-col shadow-2xl overflow-hidden my-auto">
+            
+            {/* Cabeçalho do Modal */}
+            <div className="px-6 py-4 border-b border-zinc-800 bg-zinc-950/80 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-red-600/20 border border-red-500/40 flex items-center justify-center text-red-500">
+                  <Package className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-white flex items-center gap-2">
+                    Despachar Pedidos em Lote
+                    <span className="px-2.5 py-0.5 rounded-full bg-red-600 text-white text-xs font-bold">
+                      {selectedOrders.length} {selectedOrders.length === 1 ? 'pedido' : 'pedidos'}
+                    </span>
+                  </h3>
+                  <p className="text-xs text-zinc-400">
+                    Selecione o motoboy e envie a oferta com todos os destinos agrupados em tempo real.
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setIsDispatchDrawerOpen(false)}
+                className="p-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Corpo do Modal com Scroll */}
+            <div className="p-6 overflow-y-auto space-y-6 flex-1 text-xs">
+              
+              {/* Seção 1: Lista dos Pedidos Selecionados */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-extrabold text-zinc-300 text-xs uppercase tracking-wider flex items-center gap-1.5">
+                    <CheckSquare className="w-4 h-4 text-red-500" />
+                    Pedidos Selecionados para esta Corrida ({selectedOrders.length})
+                  </span>
+                  <span className="text-zinc-500 text-[11px]">
+                    Subtotal dos pedidos: R$ {selectedOrders.reduce((acc, o) => acc + o.total, 0).toFixed(2).replace('.', ',')}
+                  </span>
+                </div>
+
+                <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                  {selectedOrders.length === 0 ? (
+                    <div className="p-4 rounded-xl bg-zinc-950 border border-zinc-800 text-center text-zinc-500">
+                      Nenhum pedido selecionado. Feche o modal e marque os pedidos prontos.
+                    </div>
+                  ) : (
+                    selectedOrders.map((order) => (
+                      <div
+                        key={order.id}
+                        className="p-3 rounded-xl bg-zinc-950/80 border border-zinc-800 flex items-center justify-between gap-3 hover:border-zinc-700 transition"
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          <span className="font-mono font-black text-white px-2 py-1 rounded bg-zinc-900 border border-zinc-800 text-xs">
+                            #{order.orderNumber}
+                          </span>
+                          <div className="min-w-0">
+                            <p className="font-bold text-zinc-200 truncate">{order.customerName}</p>
+                            <p className="text-[11px] text-zinc-400 truncate flex items-center gap-1">
+                              <MapPin className="w-3 h-3 text-red-400 shrink-0" />
+                              {order.address} ({order.region})
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-3 shrink-0">
+                          <span className="font-bold text-white text-xs">
+                            R$ {order.total.toFixed(2).replace('.', ',')}
+                          </span>
+                          {selectedOrders.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleSelectOrder(order.id)}
+                              className="p-1 rounded text-zinc-500 hover:text-red-400 hover:bg-zinc-800 transition"
+                              title="Remover pedido deste lote"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* Seção 2: Escolher Entregador */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="font-extrabold text-zinc-300 text-xs uppercase tracking-wider flex items-center gap-1.5">
+                    <Bike className="w-4 h-4 text-amber-400" />
+                    Escolher Entregador para este Lote
+                  </span>
+
+                  <button
+                    type="button"
+                    onClick={() => setIsInlineInviteOpen(!isInlineInviteOpen)}
+                    className="text-xs font-bold text-red-400 hover:text-red-300 flex items-center gap-1 underline underline-offset-2"
+                  >
+                    <UserPlus className="w-3.5 h-3.5" />
+                    <span>{isInlineInviteOpen ? 'Fechar Gerador de Plantão' : '+ Convidar / Vincular Entregador'}</span>
+                  </button>
+                </div>
+
+                {/* Sub-painel retrátil de convite rápido de motoboy sem sair da tela */}
+                {isInlineInviteOpen && (
+                  <div className="p-4 rounded-2xl bg-zinc-950 border border-amber-500/30 space-y-3 animate-in fade-in slide-in-from-top-2">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-amber-300 text-xs flex items-center gap-1.5">
+                        <KeyRound className="w-4 h-4 text-amber-400" />
+                        Gerar Código de Plantão Instantâneo
+                      </span>
+                      <span className="text-[10px] text-zinc-400">
+                        O motoboy conecta pelo app usando este código
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={shiftValidity}
+                        onChange={(e) => setShiftValidity(e.target.value)}
+                        className="bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-white text-xs font-semibold"
+                      >
+                        <option value="1">Validade: 1 dia</option>
+                        <option value="3">Validade: 3 dias</option>
+                        <option value="7">Validade: 7 dias</option>
+                      </select>
+
+                      <button
+                        type="button"
+                        onClick={(e) => handleGenerateShiftCode(e)}
+                        disabled={isGeneratingShiftCode}
+                        className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-black font-extrabold text-xs flex items-center gap-1.5 transition disabled:opacity-50"
+                      >
+                        <KeyRound className="w-3.5 h-3.5" />
+                        <span>{isGeneratingShiftCode ? 'Gerando...' : 'Gerar Código'}</span>
+                      </button>
+                    </div>
+
+                    {generatedShiftCode && (
+                      <div className="p-3 rounded-xl bg-zinc-900 border border-amber-500/40 flex items-center justify-between gap-2">
+                        <span className="font-mono font-black text-amber-400 text-base">
+                          {generatedShiftCode}
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleCopyCode(generatedShiftCode)}
+                            className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-white font-bold text-[11px] flex items-center gap-1 transition"
+                          >
+                            <Copy className="w-3 h-3" />
+                            <span>{codeCopied ? 'Copiado!' : 'Copiar'}</span>
+                          </button>
+                          <a
+                            href={getWhatsAppShareUrl(generatedShiftCode)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] flex items-center gap-1 transition"
+                          >
+                            <MessageSquare className="w-3 h-3" />
+                            <span>WhatsApp</span>
+                          </a>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Campo de Busca de Entregadores */}
+                <div className="relative">
+                  <Search className="w-4 h-4 text-zinc-500 absolute left-3 top-3" />
+                  <input
+                    type="text"
+                    value={driverSearchQuery}
+                    onChange={(e) => setDriverSearchQuery(e.target.value)}
+                    placeholder="Buscar entregador por nome, placa ou telefone..."
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-xl pl-9 pr-3 py-2 text-white placeholder-zinc-500 text-xs focus:border-red-500 focus:outline-none transition"
+                  />
+                </div>
+
+                {/* Grid / Lista de Entregadores */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-56 overflow-y-auto pr-1">
+                  {drivers
+                    .filter(d => {
+                      const name = (d.driverName || d.name || '').toLowerCase();
+                      const plate = (d.vehiclePlate || '').toLowerCase();
+                      const phone = (d.phone || '').toLowerCase();
+                      const q = driverSearchQuery.toLowerCase();
+                      return name.includes(q) || plate.includes(q) || phone.includes(q);
+                    })
+                    .map((drv) => {
+                      const isSelected = selectedDriverId === drv.id;
+                      const isWaiting = !drv.driverName || drv.status === 'aguardando_motoboy';
+                      const isBlocked = drv.status === 'bloqueado';
+                      const isOnline = drv.presence === 'disponivel';
+                      const isMaxReached = (drv.activeDeliveries || 0) >= (drv.maxDeliveries || 3);
+
+                      return (
+                        <div
+                          key={drv.id}
+                          onClick={() => {
+                            if (!isBlocked && !isWaiting) {
+                              setSelectedDriverId(drv.id);
+                            }
+                          }}
+                          className={`p-3 rounded-2xl border transition text-xs cursor-pointer relative ${
+                            isSelected 
+                              ? 'bg-red-950/40 border-red-500 shadow-md shadow-red-600/20' 
+                              : 'bg-zinc-950 border-zinc-800 hover:border-zinc-700'
+                          } ${isBlocked || isWaiting ? 'opacity-60 cursor-not-allowed' : ''}`}
+                        >
+                          <div className="flex items-center justify-between mb-1.5">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className={`w-2.5 h-2.5 rounded-full ${isOnline ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-500'}`} />
+                              <span className="font-bold text-white truncate text-xs">
+                                {drv.driverName || drv.name || 'Aguardando Motoboy'}
+                              </span>
+                            </div>
+
+                            {isSelected && (
+                              <span className="px-2 py-0.5 rounded-full bg-red-600 text-white font-extrabold text-[10px]">
+                                Selecionado ✓
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="space-y-1 text-[11px] text-zinc-400">
+                            <div className="flex items-center justify-between">
+                              <span>Placa: <strong className="text-zinc-200 font-mono uppercase">{drv.vehiclePlate || 'N/A'}</strong></span>
+                              <span className={`font-semibold ${isOnline ? 'text-emerald-400' : 'text-zinc-500'}`}>
+                                {isOnline ? '🟢 Online' : '⚪ Offline'}
+                              </span>
+                            </div>
+
+                            <div className="flex items-center justify-between">
+                              <span>Carga ativa:</span>
+                              <span className={`font-bold ${isMaxReached ? 'text-red-400' : 'text-zinc-200'}`}>
+                                {drv.activeDeliveries || 0} de {drv.maxDeliveries || 3} corridas
+                              </span>
+                            </div>
+                          </div>
+
+                          {isWaiting && (
+                            <p className="text-[10px] text-amber-400/90 mt-1 font-semibold">
+                              Código: {drv.inviteCode} (Aguardando login no app)
+                            </p>
+                          )}
+                          {isBlocked && (
+                            <p className="text-[10px] text-red-400 mt-1 font-semibold">
+                              🔴 Entregador bloqueado
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
+
+              {/* Seção 3: Valor da Taxa de Repasse */}
+              <div className="p-4 rounded-2xl bg-zinc-950 border border-zinc-800 grid grid-cols-1 sm:grid-cols-2 gap-4 items-center">
+                <div>
+                  <label className="font-extrabold text-zinc-300 text-xs uppercase tracking-wider block mb-1">
+                    Taxa de Repasse Total do Lote (R$)
+                  </label>
+                  <input
+                    type="text"
+                    value={deliveryFeeOffered}
+                    onChange={(e) => setDeliveryFeeOffered(e.target.value)}
+                    placeholder="Ex: 12,00"
+                    className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-white font-black text-sm focus:border-red-500 focus:outline-none"
+                  />
+                  <p className="text-[10px] text-zinc-500 mt-1">
+                    Valor total que aparecerá na notificação do app do entregador.
+                  </p>
+                </div>
+
+                <div className="p-3 bg-zinc-900/60 rounded-xl border border-zinc-800/80 space-y-1 text-[11px]">
+                  <div className="flex justify-between text-zinc-400">
+                    <span>Média por entrega:</span>
+                    <strong className="text-zinc-200">
+                      R$ {((parseFloat(deliveryFeeOffered.replace(',', '.')) || 12.00) / (selectedOrders.length || 1)).toFixed(2).replace('.', ',')}
+                    </strong>
+                  </div>
+                  <div className="flex justify-between text-zinc-400">
+                    <span>Paradas / Entregas no Lote:</span>
+                    <strong className="text-white font-bold">{selectedOrders.length} paradas</strong>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+
+            {/* Rodapé com Botões de Ação */}
+            <div className="px-6 py-4 border-t border-zinc-800 bg-zinc-950 flex flex-col sm:flex-row items-center justify-between gap-3">
+              <span className="text-xs text-zinc-400">
+                {selectedOrders.length} pedido(s) selecionado(s) para despacho
+              </span>
+
+              <div className="flex items-center gap-3 w-full sm:w-auto">
+                <button
+                  type="button"
+                  onClick={() => setIsDispatchDrawerOpen(false)}
+                  className="px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white font-semibold text-xs transition flex-1 sm:flex-none text-center"
+                >
+                  Cancelar
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleSendGroupedDispatchOffer}
+                  disabled={isSendingDispatch || selectedOrders.length === 0 || !selectedDriverId}
+                  className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-red-600 to-red-500 hover:from-red-500 hover:to-red-600 disabled:opacity-50 text-white font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 transition transform active:scale-95 flex-1 sm:flex-none"
+                >
+                  <Send className={`w-4 h-4 ${isSendingDispatch ? 'animate-spin' : ''}`} />
+                  <span>
+                    {isSendingDispatch 
+                      ? 'Enviando Oferta...' 
+                      : `Confirmar e Enviar Oferta com ${selectedOrders.length} ${selectedOrders.length === 1 ? 'Entrega' : 'Entregas'}`}
+                  </span>
+                </button>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      )}
 
     </div>
   );

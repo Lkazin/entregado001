@@ -62,6 +62,28 @@ async function persistLogisticsState() {
   } catch (e) {}
 }
 
+async function updateStoreOrdersStatus(updater: (orders: any[]) => boolean): Promise<void> {
+  try {
+    const { data: fileData } = await supabaseAdmin.storage
+      .from('novaesweb_store')
+      .download('orders.json');
+    if (fileData) {
+      const text = await fileData.text();
+      const orders = JSON.parse(text);
+      if (Array.isArray(orders)) {
+        const changed = updater(orders);
+        if (changed) {
+          await supabaseAdmin.storage
+            .from('novaesweb_store')
+            .upload('orders.json', JSON.stringify(orders), { upsert: true, contentType: 'application/json' });
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[route.ts] Erro ao sincronizar orders.json:', err);
+  }
+}
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
@@ -729,24 +751,57 @@ export async function POST(
 
       // 6. Criar Oferta de Despacho (offer.create)
       case 'offer-create': {
-        const { orderId, orderNumber, customerAddress, driverId, feeOffered } = body;
+        const { orderId, orderIds, orders, orderNumber, customerAddress, driverId, feeOffered } = body;
         const offerId = `off-${Date.now()}`;
         const timeoutSeconds = 60;
         const expiresAt = new Date(Date.now() + timeoutSeconds * 1000).toISOString();
 
+        const targetOrders = Array.isArray(orders) && orders.length > 0
+          ? orders
+          : (Array.isArray(orderIds) && orderIds.length > 0
+              ? orderIds.map((id: string) => ({ id, orderId: id, orderNumber: orderNumber || '#000', customerAddress }))
+              : [{ id: orderId, orderId, orderNumber, customerAddress }]);
+
+        const drv = liveDrivers.find(d => d.id === driverId || d.driverId === driverId) || liveDrivers[0];
+
         const offerObj = {
           id: offerId,
-          orderId,
-          orderNumber,
-          customerAddress,
+          offerId,
+          orderId: targetOrders[0]?.id || targetOrders[0]?.orderId || orderId,
+          orderIds: targetOrders.map((o: any) => o.id || o.orderId),
+          orders: targetOrders,
+          orderNumber: targetOrders.map((o: any) => o.orderNumber ? String(o.orderNumber) : '').filter(Boolean).join(', ') || orderNumber,
+          customerAddress: customerAddress || targetOrders[0]?.customerAddress || targetOrders[0]?.deliveryAddress || 'Endereço',
           driverId,
+          targetDriverId: driverId,
+          driverName: drv?.driverName || drv?.name || 'Entregador',
           feeOffered: feeOffered || 12.00,
+          deliveryFee: feeOffered || 12.00,
+          totalOrdersGrouped: targetOrders.length,
           status: 'pendente',
           expiresAt,
-          timeoutSeconds
+          timeoutSeconds,
+          createdAt: new Date().toISOString()
         };
         liveOffers.unshift(offerObj);
         await persistLogisticsState();
+
+        // Atualiza os pedidos na loja para 'aguardando_aceite' (sem mudar status base para 'em_entrega')
+        const orderIdSet = new Set(targetOrders.map((o: any) => String(o.id || o.orderId)));
+        const orderNumberSet = new Set(targetOrders.map((o: any) => String(o.orderNumber).replace('#', '')));
+        await updateStoreOrdersStatus((allOrders) => {
+          let updated = false;
+          allOrders.forEach(o => {
+            if (orderIdSet.has(String(o.id)) || orderNumberSet.has(String(o.orderNumber))) {
+              o.dispatchStatus = 'aguardando_aceite';
+              o.driverName = drv?.driverName || drv?.name || null;
+              o.assignedDriverName = drv?.driverName || drv?.name || null;
+              o.offerGroupId = offerId;
+              updated = true;
+            }
+          });
+          return updated;
+        });
 
         return NextResponse.json({
           success: true,
@@ -759,34 +814,83 @@ export async function POST(
       // 7. Responder Oferta (offer.respond)
       case 'offer-respond': {
         const { offerId, decision } = body; // 'accepted' | 'rejected'
-        const offer = liveOffers.find(o => o.id === offerId);
+        const offer = liveOffers.find(o => o.id === offerId || o.offerId === offerId);
         if (offer) {
           offer.status = decision === 'accepted' ? 'aceita' : 'recusada';
-          if (decision === 'accepted') {
-            const assignmentId = `asg-${Date.now()}`;
-            const asgObj = {
-              id: assignmentId,
-              orderId: offer.orderId,
-              orderNumber: offer.orderNumber || 1042,
-              address: offer.customerAddress || 'Endereço do Cliente',
-              feeOffered: offer.feeOffered,
-              status: 'aguardando_retirada',
-              acceptedAt: new Date().toISOString()
-            };
-            liveAssignments.unshift(asgObj);
+          const targetOrders = Array.isArray(offer.orders) && offer.orders.length > 0
+            ? offer.orders
+            : [{ id: offer.orderId, orderId: offer.orderId, orderNumber: offer.orderNumber, customerAddress: offer.customerAddress }];
 
-            // Incrementa entregas ativas do motoboy
-            const drv = liveDrivers.find(d => d.id === offer.driverId) || liveDrivers[0];
-            if (drv) drv.activeDeliveries = (drv.activeDeliveries || 0) + 1;
+          if (decision === 'accepted') {
+            const drv = liveDrivers.find(d => d.id === offer.driverId || d.driverId === offer.driverId) || liveDrivers[0];
+            if (drv) drv.activeDeliveries = (drv.activeDeliveries || 0) + targetOrders.length;
+
+            targetOrders.forEach((ord: any, idx: number) => {
+              const asgObj = {
+                id: `asg-${ord.id || ord.orderId || Date.now()}-${idx}`,
+                assignmentId: `asg-${ord.id || ord.orderId || Date.now()}-${idx}`,
+                orderId: ord.id || ord.orderId,
+                orderNumber: ord.orderNumber ? String(ord.orderNumber) : String(offer.orderNumber || 1042),
+                address: ord.customerAddress || ord.address || offer.customerAddress || 'Endereço do Cliente',
+                feeOffered: offer.feeOffered ? (offer.feeOffered / targetOrders.length) : 12.00,
+                deliveryFee: offer.feeOffered ? (offer.feeOffered / targetOrders.length) : 12.00,
+                status: 'waiting_pickup',
+                driverId: offer.driverId,
+                driverName: drv?.driverName || drv?.name || 'Entregador',
+                sequence: idx + 1,
+                acceptedAt: new Date().toISOString()
+              };
+              liveAssignments.unshift(asgObj);
+            });
 
             await persistLogisticsState();
+
+            // Atualiza na loja para 'aceito_aguardando_retirada'
+            const orderIdSet = new Set(targetOrders.map((o: any) => String(o.id || o.orderId)));
+            const orderNumberSet = new Set(targetOrders.map((o: any) => String(o.orderNumber).replace('#', '')));
+            await updateStoreOrdersStatus((allOrders) => {
+              let updated = false;
+              allOrders.forEach(o => {
+                if (orderIdSet.has(String(o.id)) || orderNumberSet.has(String(o.orderNumber))) {
+                  o.dispatchStatus = 'aceito_aguardando_retirada';
+                  o.driverName = drv?.driverName || drv?.name || null;
+                  o.assignedDriverName = drv?.driverName || drv?.name || null;
+                  o.acceptedAt = new Date().toISOString();
+                  updated = true;
+                }
+              });
+              return updated;
+            });
 
             return NextResponse.json({
               success: true,
               action: 'offer.respond',
               offerId,
               status: 'aceita',
-              assignmentId,
+              idempotencyKey
+            });
+          } else {
+            // Recusada -> Devolve para disponível
+            const orderIdSet = new Set(targetOrders.map((o: any) => String(o.id || o.orderId)));
+            const orderNumberSet = new Set(targetOrders.map((o: any) => String(o.orderNumber).replace('#', '')));
+            await updateStoreOrdersStatus((allOrders) => {
+              let updated = false;
+              allOrders.forEach(o => {
+                if (orderIdSet.has(String(o.id)) || orderNumberSet.has(String(o.orderNumber))) {
+                  o.dispatchStatus = 'disponivel';
+                  o.driverName = null;
+                  o.assignedDriverName = null;
+                  updated = true;
+                }
+              });
+              return updated;
+            });
+            await persistLogisticsState();
+            return NextResponse.json({
+              success: true,
+              action: 'offer.respond',
+              offerId,
+              status: 'recusada',
               idempotencyKey
             });
           }
@@ -803,18 +907,38 @@ export async function POST(
 
       // 8. Confirmar Retirada na Loja (pickup.confirm)
       case 'pickup-confirm': {
-        const { assignmentId } = body;
-        const asg = liveAssignments.find(a => a.id === assignmentId) || liveAssignments[0];
-        if (asg) {
-          asg.status = 'em_rota';
-          asg.pickedUpAt = new Date().toISOString();
-          await persistLogisticsState();
-        }
+        const { assignmentId, assignmentIds } = body;
+        const targetIds = Array.isArray(assignmentIds) ? assignmentIds : [assignmentId].filter(Boolean);
+        const pickedOrderIds: string[] = [];
+
+        liveAssignments.forEach(a => {
+          if (targetIds.includes(a.id) || targetIds.includes(a.assignmentId)) {
+            a.status = 'picked_up';
+            a.pickedUpAt = new Date().toISOString();
+            if (a.orderId) pickedOrderIds.push(String(a.orderId));
+          }
+        });
+        await persistLogisticsState();
+
+        // Atualiza na loja para 'em_entrega'!
+        const pickedSet = new Set(pickedOrderIds);
+        await updateStoreOrdersStatus((allOrders) => {
+          let updated = false;
+          allOrders.forEach(o => {
+            if (pickedSet.has(String(o.id)) || pickedSet.has(String(o.orderNumber))) {
+              o.status = 'em_entrega';
+              o.dispatchStatus = 'em_entrega';
+              o.pickedUpAt = new Date().toISOString();
+              updated = true;
+            }
+          });
+          return updated;
+        });
 
         return NextResponse.json({
           success: true,
           action: 'pickup.confirm',
-          assignmentId,
+          confirmedIds: targetIds,
           status: 'retirada',
           pickedUpAt: new Date().toISOString(),
           idempotencyKey
@@ -830,16 +954,39 @@ export async function POST(
           return NextResponse.json({ success: false, error: 'O código PIN deve conter exatamente 4 dígitos' }, { status: 422 });
         }
 
-        const asg = liveAssignments.find(a => a.id === assignmentId) || liveAssignments[0];
+        const asg = liveAssignments.find(a => a.id === assignmentId || a.assignmentId === assignmentId);
+        let completedOrderId: string | null = null;
+        let completedOrderNumber: string | null = null;
+
         if (asg) {
           asg.status = 'entregue';
           asg.deliveredAt = new Date().toISOString();
-          
+          completedOrderId = asg.orderId ? String(asg.orderId) : null;
+          completedOrderNumber = asg.orderNumber ? String(asg.orderNumber).replace('#', '') : null;
+
           // Libera capacidade do motoboy
           if (liveDrivers[0] && liveDrivers[0].activeDeliveries > 0) {
             liveDrivers[0].activeDeliveries -= 1;
           }
           await persistLogisticsState();
+        }
+
+        // ATUALIZA SOMENTE ESTE PEDIDO NA LOJA PARA 'concluido' / 'Finalizado/Entregue'!
+        if (completedOrderId || completedOrderNumber) {
+          await updateStoreOrdersStatus((allOrders) => {
+            let updated = false;
+            allOrders.forEach(o => {
+              const idMatch = completedOrderId && String(o.id) === completedOrderId;
+              const numMatch = completedOrderNumber && String(o.orderNumber).replace('#', '') === completedOrderNumber;
+              if (idMatch || numMatch) {
+                o.status = 'concluido';
+                o.dispatchStatus = 'entregue';
+                o.deliveredAt = new Date().toISOString();
+                updated = true;
+              }
+            });
+            return updated;
+          });
         }
 
         return NextResponse.json({

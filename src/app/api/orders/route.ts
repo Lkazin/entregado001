@@ -214,7 +214,7 @@ export async function POST(req: NextRequest) {
 
 export async function PATCH(req: NextRequest) {
   try {
-    const { orderId, status, paymentStatus, driverName } = await req.json();
+    const { orderId, status, paymentStatus, driverName, dispatchStatus, assignedDriverName, offerGroupId } = await req.json();
 
     const current = await fetchCurrentOrders();
     const orderIndex = current.findIndex(o => o.id === orderId || String(o.orderNumber) === String(orderId));
@@ -223,6 +223,9 @@ export async function PATCH(req: NextRequest) {
       if (status) current[orderIndex].status = status;
       if (paymentStatus) current[orderIndex].paymentStatus = paymentStatus;
       if (driverName !== undefined) current[orderIndex].driverName = driverName;
+      if (dispatchStatus !== undefined) current[orderIndex].dispatchStatus = dispatchStatus;
+      if (assignedDriverName !== undefined) current[orderIndex].assignedDriverName = assignedDriverName;
+      if (offerGroupId !== undefined) current[orderIndex].offerGroupId = offerGroupId;
       await persistOrders(current);
     }
 
