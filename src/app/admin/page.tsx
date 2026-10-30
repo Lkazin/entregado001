@@ -12,8 +12,9 @@ import { PIZZA_FLAVORS } from '@/lib/constants';
 
 import AdminPinAuth from '@/components/AdminPinAuth';
 
-const SUPABASE_STORAGE_URL = '/api/storage/logistics.json';
-const ORDERS_STORAGE_URL = '/api/storage/orders.json';
+const SUPABASE_STORAGE_URL = 'https://nrdbporbyujwtgnpiejz.supabase.co/storage/v1/object/novaesweb_store/logistics.json';
+const SUPABASE_ANON_KEY = 'sb_publishable_ynzw0icpmaxAhkCJWDYDGg_nTQCPUeY';
+const SUPABASE_SERVICE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5yZGJwb3JieXVqd3RnbnBpZWp6Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MzE3NjI1MiwiZXhwIjoyMTA4NzUyMjUyfQ.14LuRaZIPmmRCyHz9uD6PiTajpH0ap5vGphW2_d0YrA';
 
 interface AdminOrder {
   id: string;
@@ -508,7 +509,7 @@ export default function AdminDashboardPage() {
       // Retira ofertas ou entregas ativas deste pedido no Supabase Storage
       try {
         const logRes = await fetch(SUPABASE_STORAGE_URL, {
-          headers: {}
+          headers: { 'apikey': SUPABASE_ANON_KEY }
         });
         if (logRes.ok) {
           const logData = await logRes.json();
@@ -532,6 +533,8 @@ export default function AdminDashboardPage() {
             await fetch(SUPABASE_STORAGE_URL, {
               method: 'PUT',
               headers: {
+                'apikey': SUPABASE_SERVICE_KEY,
+                'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
                 'Content-Type': 'application/json'
               },
               body: JSON.stringify(logData)
@@ -691,6 +694,8 @@ export default function AdminDashboardPage() {
           await fetch(SUPABASE_STORAGE_URL, {
             method: 'POST',
             headers: {
+              'apikey': SUPABASE_ANON_KEY,
+              'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
               'x-upsert': 'true',
               'Content-Type': 'application/json'
             },
@@ -817,6 +822,8 @@ export default function AdminDashboardPage() {
       await fetch(SUPABASE_STORAGE_URL, {
         method: 'POST',
         headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
           'x-upsert': 'true',
           'Content-Type': 'application/json'
         },
@@ -865,8 +872,10 @@ export default function AdminDashboardPage() {
 
     // Atualiza diretamente no orders.json do Supabase Storage
     try {
-      const ordersRes = await fetch(ORDERS_STORAGE_URL, {
+      const ordersRes = await fetch('https://nrdbporbyujwtgnpiejz.supabase.co/storage/v1/object/novaesweb_store/orders.json', {
         headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
         }
       });
       if (ordersRes.ok) {
@@ -884,9 +893,11 @@ export default function AdminDashboardPage() {
             }
             return o;
           });
-          await fetch(ORDERS_STORAGE_URL, {
+          await fetch('https://nrdbporbyujwtgnpiejz.supabase.co/storage/v1/object/novaesweb_store/orders.json', {
             method: 'POST',
             headers: {
+              'apikey': SUPABASE_ANON_KEY,
+              'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
               'x-upsert': 'true',
               'Content-Type': 'application/json'
             },
@@ -972,6 +983,8 @@ export default function AdminDashboardPage() {
         await fetch(SUPABASE_STORAGE_URL, {
           method: 'POST',
           headers: {
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
             'x-upsert': 'true',
             'Content-Type': 'application/json'
           },
