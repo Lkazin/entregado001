@@ -36,6 +36,8 @@ interface AdminOrder {
   createdAt: string;
   pickedUpAt?: string;
   deliveredAt?: string;
+  cancellationReason?: string;
+  canceledAt?: string;
 }
 
 interface AdminDriver {
@@ -59,7 +61,8 @@ interface AdminDriver {
 
 export default function AdminDashboardPage() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'kanban' | 'menu' | 'logistics' | 'settings'>('kanban');
+  const [activeTab, setActiveTab] = useState<'overview' | 'kanban' | 'menu' | 'logistics' | 'settings' | 'canceled'>('kanban');
+  const [canceledSearch, setCanceledSearch] = useState('');
 
   // Estado REAL sem dados fakes (carregados da API e do banco)
   const [orders, setOrders] = useState<AdminOrder[]>([]);
@@ -425,12 +428,20 @@ export default function AdminDashboardPage() {
     setTimeout(() => fetchData(true), 600);
   };
 
-  // Cancelar com Justificativa Conectado à API
+  // Cancelar com Justificativa Conectado à API e Sincronizado
   const handleCancelOrder = async (orderId: string) => {
-    const reason = prompt('Informe a justificativa do cancelamento:');
-    if (reason && reason.trim()) {
+    const reason = prompt('Informe a justificativa do cancelamento (opcional):');
+    if (reason !== null) {
+      const cancelReason = reason.trim() || 'Cancelado pelo lojista';
+      const cancelTime = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) + ' - ' + new Date().toLocaleDateString('pt-BR');
+
       setOrders(prev => {
-        const updated = prev.map(o => o.id === orderId ? { ...o, status: 'cancelado' as const } : o);
+        const updated = prev.map(o => o.id === orderId ? { 
+          ...o, 
+          status: 'cancelado' as const,
+          cancellationReason: cancelReason,
+          canceledAt: cancelTime
+        } : o);
         if (typeof window !== 'undefined') {
           localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
         }
@@ -441,11 +452,119 @@ export default function AdminDashboardPage() {
         await fetch('/api/orders', {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ orderId, status: 'cancelado' })
+          body: JSON.stringify({ 
+            orderId, 
+            status: 'cancelado',
+            cancellationReason: cancelReason,
+            canceledAt: cancelTime
+          })
         });
       } catch (err) {}
+
+      // Retira ofertas ou entregas ativas deste pedido no Supabase Storage
+      try {
+        const logRes = await fetch(SUPABASE_STORAGE_URL, {
+          headers: { 'apikey': SUPABASE_ANON_KEY }
+        });
+        if (logRes.ok) {
+          const logData = await logRes.json();
+          let changed = false;
+          if (Array.isArray(logData.offers)) {
+            logData.offers = logData.offers.filter((off: any) => {
+              const match = off.orderId === orderId || (Array.isArray(off.orders) && off.orders.some((o: any) => o.id === orderId));
+              if (match) changed = true;
+              return !match;
+            });
+          }
+          if (Array.isArray(logData.assignments)) {
+            logData.assignments.forEach((asg: any) => {
+              if (asg.orderId === orderId) {
+                asg.status = 'canceled_by_store';
+                changed = true;
+              }
+            });
+          }
+          if (changed) {
+            await fetch(SUPABASE_STORAGE_URL, {
+              method: 'PUT',
+              headers: {
+                'apikey': SUPABASE_SERVICE_KEY,
+                'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify(logData)
+            });
+          }
+        }
+      } catch (eLog) {
+        console.warn('Erro ao sincronizar cancelamento na nuvem:', eLog);
+      }
+
+      setDispatchAlert('Pedido cancelado com sucesso e transferido para a aba de Pedidos Cancelados.');
+      setTimeout(() => setDispatchAlert(null), 4000);
       setTimeout(() => fetchData(true), 600);
     }
+  };
+
+  // Restaurar Pedido Cancelado de volta para "Recebido"
+  const handleRestoreOrder = async (orderId: string) => {
+    if (!confirm('Deseja restaurar este pedido de volta para a coluna "1. Recebido" do Kanban?')) return;
+
+    setOrders(prev => {
+      const updated = prev.map(o => o.id === orderId ? { 
+        ...o, 
+        status: 'recebido' as const, 
+        dispatchStatus: 'disponivel' as const,
+        cancellationReason: undefined,
+        canceledAt: undefined
+      } : o);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
+      }
+      return updated;
+    });
+
+    try {
+      await fetch('/api/orders', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          orderId, 
+          status: 'recebido', 
+          dispatchStatus: 'disponivel',
+          cancellationReason: null,
+          canceledAt: null
+        })
+      });
+    } catch (err) {}
+
+    setDispatchAlert('Pedido restaurado com sucesso! Já está visível na coluna Recebido do Kanban.');
+    setTimeout(() => setDispatchAlert(null), 4000);
+    setTimeout(() => fetchData(true), 600);
+  };
+
+  // Excluir Definitivamente Registro de Pedido Cancelado
+  const handleDeleteOrderPermanently = async (orderId: string) => {
+    if (!confirm('Tem certeza que deseja excluir definitivamente este registro do histórico de cancelados?')) return;
+
+    setOrders(prev => {
+      const updated = prev.filter(o => o.id !== orderId);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
+      }
+      return updated;
+    });
+
+    try {
+      await fetch('/api/orders', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderId })
+      });
+    } catch (err) {}
+
+    setDispatchAlert('Registro de pedido cancelado excluído com sucesso.');
+    setTimeout(() => setDispatchAlert(null), 3000);
   };
 
   // Handlers de Seleção Múltipla de Pedidos para Despacho
@@ -1014,6 +1133,18 @@ export default function AdminDashboardPage() {
           >
             <Settings className="w-4 h-4" />
             <span>Configurações</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('canceled')}
+            className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
+              activeTab === 'canceled'
+                ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
+                : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60'
+            }`}
+          >
+            <XCircle className="w-4 h-4 text-red-400" />
+            <span>Pedidos Cancelados ({orders.filter(o => o.status === 'cancelado').length})</span>
           </button>
         </div>
       </header>
@@ -1777,6 +1908,197 @@ export default function AdminDashboardPage() {
             </div>
           </div>
         )}
+
+        {/* ABA 6: PEDIDOS CANCELADOS */}
+        {activeTab === 'canceled' && (() => {
+          const canceledOrders = orders.filter(o => o.status === 'cancelado');
+          const filteredCanceled = canceledOrders.filter(o => {
+            if (!canceledSearch.trim()) return true;
+            const term = canceledSearch.toLowerCase();
+            return (
+              String(o.orderNumber).includes(term) ||
+              (o.customerName && o.customerName.toLowerCase().includes(term)) ||
+              (o.phone && o.phone.includes(term)) ||
+              (o.address && o.address.toLowerCase().includes(term)) ||
+              (o.cancellationReason && o.cancellationReason.toLowerCase().includes(term))
+            );
+          });
+          const totalLost = canceledOrders.reduce((acc, o) => acc + (o.total || 0), 0);
+
+          return (
+            <div className="space-y-6">
+              {/* Cabeçalho */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-xl font-black text-white flex items-center gap-2">
+                    <XCircle className="w-5 h-5 text-red-500" />
+                    Histórico de Pedidos Cancelados
+                  </h2>
+                  <p className="text-xs text-zinc-400">
+                    Consulte os pedidos cancelados, justificativas de cancelamento e restaure pedidos para o Kanban quando necessário.
+                  </p>
+                </div>
+
+                {/* Resumo Rápido */}
+                <div className="flex items-center gap-3">
+                  <div className="px-3.5 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-right">
+                    <span className="text-[10px] text-zinc-500 uppercase font-bold block">Total Cancelados</span>
+                    <span className="text-sm font-black text-red-400">{canceledOrders.length} {canceledOrders.length === 1 ? 'pedido' : 'pedidos'}</span>
+                  </div>
+                  <div className="px-3.5 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-right">
+                    <span className="text-[10px] text-zinc-500 uppercase font-bold block">Valor Total</span>
+                    <span className="text-sm font-black text-white">R$ {totalLost.toFixed(2).replace('.', ',')}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Barra de Busca e Filtro */}
+              <div className="flex items-center gap-3 bg-zinc-900/60 border border-zinc-800/80 rounded-2xl p-3">
+                <Search className="w-4 h-4 text-zinc-500 ml-1 shrink-0" />
+                <input
+                  type="text"
+                  value={canceledSearch}
+                  onChange={(e) => setCanceledSearch(e.target.value)}
+                  placeholder="Filtrar por número do pedido, cliente, telefone, endereço ou motivo..."
+                  className="bg-transparent text-xs text-white placeholder-zinc-500 focus:outline-none w-full font-medium"
+                />
+                {canceledSearch && (
+                  <button
+                    onClick={() => setCanceledSearch('')}
+                    className="text-xs text-zinc-500 hover:text-white px-2 py-0.5 rounded bg-zinc-800"
+                  >
+                    Limpar
+                  </button>
+                )}
+              </div>
+
+              {/* Lista de Pedidos Cancelados */}
+              {filteredCanceled.length === 0 ? (
+                <div className="p-12 text-center rounded-2xl bg-zinc-900/40 border border-zinc-800/60 space-y-3">
+                  <div className="w-12 h-12 rounded-full bg-zinc-800/60 border border-zinc-700/50 flex items-center justify-center mx-auto text-zinc-500">
+                    <XCircle className="w-6 h-6" />
+                  </div>
+                  <h3 className="text-sm font-bold text-white">Nenhum pedido cancelado encontrado</h3>
+                  <p className="text-xs text-zinc-500 max-w-sm mx-auto">
+                    {canceledSearch ? 'Nenhum resultado corresponde à sua busca.' : 'Todos os pedidos estão ativos ou foram concluídos no fluxo de atendimento.'}
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {filteredCanceled.map((order) => {
+                    const phoneClean = (order.phone || '').replace(/\D/g, '');
+                    const waLink = phoneClean ? `https://wa.me/55${phoneClean}` : null;
+
+                    return (
+                      <div
+                        key={order.id}
+                        className="bg-zinc-900/80 border border-red-950/80 hover:border-red-900/60 rounded-2xl p-4 space-y-3 shadow-lg relative overflow-hidden transition"
+                      >
+                        {/* Faixa lateral decorativa de cancelado */}
+                        <div className="absolute top-0 left-0 bottom-0 w-1.5 bg-red-600/80" />
+
+                        {/* Topo do Card */}
+                        <div className="flex items-center justify-between pl-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-black text-white">#{order.orderNumber}</span>
+                            <span className="px-2 py-0.5 rounded-full bg-red-950 border border-red-800/80 text-[10px] font-bold text-red-400 uppercase tracking-wide">
+                              Cancelado
+                            </span>
+                          </div>
+                          <span className="text-[10px] font-mono text-zinc-500">
+                            {order.createdAt}
+                          </span>
+                        </div>
+
+                        {/* Justificativa do Cancelamento */}
+                        <div className="p-2.5 rounded-xl bg-red-950/40 border border-red-900/40 text-red-300 text-xs space-y-1">
+                          <div className="flex items-center gap-1.5 font-bold text-[11px] text-red-400">
+                            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                            <span>Motivo do Cancelamento:</span>
+                          </div>
+                          <p className="text-[11px] text-zinc-200 italic pl-5">
+                            "{order.cancellationReason || 'Cancelado pelo lojista'}"
+                          </p>
+                          {order.canceledAt && (
+                            <p className="text-[10px] text-zinc-400 pl-5">
+                              Cancelado em: <strong className="text-zinc-300">{order.canceledAt}</strong>
+                            </p>
+                          )}
+                        </div>
+
+                        {/* Dados do Cliente */}
+                        <div className="space-y-1 text-xs pl-1">
+                          <div className="flex items-center justify-between">
+                            <strong className="text-white text-sm">{order.customerName}</strong>
+                            {waLink && (
+                              <a
+                                href={waLink}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-[10px] text-emerald-400 hover:text-emerald-300 flex items-center gap-1 bg-emerald-950/60 border border-emerald-800 px-2 py-0.5 rounded-md transition"
+                                title="Falar com o cliente no WhatsApp"
+                              >
+                                <MessageSquare className="w-3 h-3" />
+                                <span>WhatsApp</span>
+                              </a>
+                            )}
+                          </div>
+                          <p className="text-zinc-400 text-[11px] truncate flex items-center gap-1">
+                            <MapPin className="w-3 h-3 text-zinc-500 shrink-0" />
+                            <span>{order.address}</span>
+                          </p>
+                          <p className="text-zinc-500 text-[10px] pl-4">{order.region}</p>
+                        </div>
+
+                        {/* Resumo dos Itens */}
+                        <div className="p-2 bg-zinc-950/80 rounded-xl border border-zinc-800/80 text-[11px] text-zinc-300">
+                          {order.itemsSummary}
+                        </div>
+
+                        {/* Valor e Pagamento */}
+                        <div className="flex items-center justify-between pt-1 border-t border-zinc-800/60 pl-1">
+                          <div className="flex flex-col">
+                            <span className="text-[10px] text-zinc-500 font-bold uppercase">Valor do Pedido</span>
+                            <span className="text-sm font-black text-white">
+                              R$ {order.total.toFixed(2).replace('.', ',')}
+                            </span>
+                          </div>
+                          <span className="text-[10px] text-zinc-400 font-medium px-2 py-1 rounded bg-zinc-800">
+                            {order.paymentMethod === 'pix_manual' ? 'Pix' : order.paymentMethod === 'cash_delivery' ? 'Dinheiro' : 'Cartão'}
+                          </span>
+                        </div>
+
+                        {/* Botões de Ação */}
+                        <div className="pt-2 border-t border-zinc-800/60 grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleRestoreOrder(order.id)}
+                            className="w-full py-2 px-3 rounded-xl bg-emerald-950 hover:bg-emerald-900 border border-emerald-700/80 text-emerald-300 hover:text-white font-bold text-xs flex items-center justify-center gap-1.5 transition shadow"
+                            title="Recolocar pedido no Kanban na etapa Recebido"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" />
+                            <span>Restaurar</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteOrderPermanently(order.id)}
+                            className="w-full py-2 px-3 rounded-xl bg-zinc-800/80 hover:bg-red-950/80 hover:border-red-800 border border-zinc-700/80 text-zinc-400 hover:text-red-400 font-bold text-xs flex items-center justify-center gap-1.5 transition"
+                            title="Excluir definitivamente este registro de cancelamento"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Excluir</span>
+                          </button>
+                        </div>
+
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
       </main>
 

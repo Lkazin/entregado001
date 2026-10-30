@@ -90,8 +90,7 @@ async function persistOrders(ordersList: any[]): Promise<void> {
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': '*',
-  'Access-Control-Max-Age': '86400',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-store-id',
 };
 
 export async function OPTIONS() {
@@ -101,19 +100,12 @@ export async function OPTIONS() {
   });
 }
 
-function jsonResponse(data: any, init?: { status?: number }) {
-  return NextResponse.json(data, {
-    status: init?.status ?? 200,
-    headers: corsHeaders,
-  });
-}
-
 export async function GET(req: NextRequest) {
   try {
     const orders = await fetchCurrentOrders();
-    return jsonResponse({ success: true, orders });
+    return NextResponse.json({ success: true, orders });
   } catch (err: any) {
-    return jsonResponse({ success: false, error: err.message, orders: liveOrders }, { status: 500 });
+    return NextResponse.json({ success: false, error: err.message, orders: liveOrders }, { status: 500 });
   }
 }
 
@@ -207,7 +199,7 @@ export async function POST(req: NextRequest) {
       // Fallback garantido pelo Supabase Storage
     }
 
-    return jsonResponse({
+    return NextResponse.json({
       success: true,
       orderNumber,
       trackingToken,
@@ -216,13 +208,23 @@ export async function POST(req: NextRequest) {
       createdAt: new Date().toISOString()
     });
   } catch (err: any) {
-    return jsonResponse({ success: false, error: err.message }, { status: 400 });
+    return NextResponse.json({ success: false, error: err.message }, { status: 400 });
   }
 }
 
 export async function PATCH(req: NextRequest) {
   try {
-    const { orderId, status, paymentStatus, driverName, dispatchStatus, assignedDriverName, offerGroupId } = await req.json();
+    const { 
+      orderId, 
+      status, 
+      paymentStatus, 
+      driverName, 
+      dispatchStatus, 
+      assignedDriverName, 
+      offerGroupId,
+      cancellationReason,
+      canceledAt
+    } = await req.json();
 
     const current = await fetchCurrentOrders();
     const orderIndex = current.findIndex(o => o.id === orderId || String(o.orderNumber) === String(orderId));
@@ -234,6 +236,8 @@ export async function PATCH(req: NextRequest) {
       if (dispatchStatus !== undefined) current[orderIndex].dispatchStatus = dispatchStatus;
       if (assignedDriverName !== undefined) current[orderIndex].assignedDriverName = assignedDriverName;
       if (offerGroupId !== undefined) current[orderIndex].offerGroupId = offerGroupId;
+      if (cancellationReason !== undefined) current[orderIndex].cancellationReason = cancellationReason;
+      if (canceledAt !== undefined) current[orderIndex].canceledAt = canceledAt;
       await persistOrders(current);
     }
 
@@ -255,8 +259,29 @@ export async function PATCH(req: NextRequest) {
       // Fallback garantido pelo Supabase Storage
     }
 
-    return jsonResponse({ success: true, message: 'Pedido atualizado com sucesso' });
+    return NextResponse.json({ success: true, message: 'Pedido atualizado com sucesso' });
   } catch (err: any) {
-    return jsonResponse({ success: false, error: err.message }, { status: 500 });
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
   }
 }
+
+export async function DELETE(req: NextRequest) {
+  try {
+    const { orderId } = await req.json();
+    const current = await fetchCurrentOrders();
+    const filtered = current.filter(o => o.id !== orderId && String(o.orderNumber) !== String(orderId));
+    await persistOrders(filtered);
+
+    try {
+      await supabaseAdmin
+        .from('orders')
+        .delete()
+        .eq('id', orderId);
+    } catch (e) {}
+
+    return NextResponse.json({ success: true, message: 'Pedido removido com sucesso' });
+  } catch (err: any) {
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  }
+}
+
