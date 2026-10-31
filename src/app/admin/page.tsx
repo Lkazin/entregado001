@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { 
+  Bell, Volume2, VolumeX, Maximize2, Minimize2,
   Flame, LayoutDashboard, ShoppingCart, UtensilsCrossed, Bike, Settings, 
   CheckCircle2, Clock, AlertTriangle, ArrowRight, Printer, XCircle, Search, 
   UserPlus, ShieldAlert, KeyRound, Check, RefreshCw, Send, Lock, PlusCircle,
@@ -94,6 +95,15 @@ export default function AdminDashboardPage() {
     }
     return false;
   });
+    // Modo Cozinha (Recolher Topo) e Fila de Novos Pedidos
+  const [isHeaderCollapsed, setIsHeaderCollapsed] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('novaesweb_kitchen_mode') === 'true';
+    }
+    return false;
+  });
+  const [pendingNewOrders, setPendingNewOrders] = useState<AdminOrder[]>([]);
+  const [isMuted, setIsMuted] = useState<boolean>(false);
   const [paperWidth, setPaperWidth] = useState<PaperWidth>(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('novaesweb_paper_width');
@@ -103,40 +113,72 @@ export default function AdminDashboardPage() {
   });
   const knownOrderIdsRef = React.useRef<Set<string> | null>(null);
 
+  // Deteccao de novos pedidos para fila e impressao automatica
   useEffect(() => {
     if (isLoading) return;
     const currentIds = new Set(orders.map(o => o.id));
     if (knownOrderIdsRef.current === null) {
-      // Primeira carga: tudo o que ja existe nao e "novo"
       knownOrderIdsRef.current = currentIds;
       return;
     }
     const known = knownOrderIdsRef.current;
-    const fresh = orders.find(o => !known.has(o.id) && o.status === 'recebido');
+    const freshOrders = orders.filter(o => !known.has(o.id) && o.status === 'recebido');
     currentIds.forEach(id => known.add(id));
-    if (fresh) {
-      setNewOrderAlert({ id: fresh.id, orderNumber: fresh.orderNumber });
+
+    if (freshOrders.length > 0) {
+      setPendingNewOrders(prev => {
+        const existingIds = new Set(prev.map(p => p.id));
+        const toAdd = freshOrders.filter(f => !existingIds.has(f.id));
+        return [...prev, ...toAdd];
+      });
+
       if (autoPrint) {
-        printThermalOrder(fresh, paperWidth);
+        freshOrders.forEach(ord => printThermalOrder(ord, paperWidth));
       }
+    }
+  }, [orders, isLoading, autoPrint, paperWidth]);
+
+  // Alarme Sonoro Continuo Tipo Campainha de Delivery (Ding-Dong)
+  useEffect(() => {
+    if (pendingNewOrders.length === 0 || isMuted) return;
+
+    const playDingDong = () => {
       try {
         const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
-        if (AudioCtx) {
-          const ctx = new AudioCtx();
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          osc.type = 'sine';
-          osc.frequency.value = 880;
-          gain.gain.setValueAtTime(0.15, ctx.currentTime);
-          gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.6);
-          osc.connect(gain);
-          gain.connect(ctx.destination);
-          osc.start();
-          osc.stop(ctx.currentTime + 0.6);
-        }
+        if (!AudioCtx) return;
+        const ctx = new AudioCtx();
+        const now = ctx.currentTime;
+
+        // Tom 1: Ding (880 Hz)
+        const osc1 = ctx.createOscillator();
+        const gain1 = ctx.createGain();
+        osc1.type = 'triangle';
+        osc1.frequency.setValueAtTime(880, now);
+        gain1.gain.setValueAtTime(0.35, now);
+        gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+        osc1.connect(gain1);
+        gain1.connect(ctx.destination);
+        osc1.start(now);
+        osc1.stop(now + 0.4);
+
+        // Tom 2: Dong (659 Hz)
+        const osc2 = ctx.createOscillator();
+        const gain2 = ctx.createGain();
+        osc2.type = 'sine';
+        osc2.frequency.setValueAtTime(659.25, now + 0.22);
+        gain2.gain.setValueAtTime(0.35, now + 0.22);
+        gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.85);
+        osc2.connect(gain2);
+        gain2.connect(ctx.destination);
+        osc2.start(now + 0.22);
+        osc2.stop(now + 0.85);
       } catch (e) {}
-    }
-  }, [orders, isLoading]);
+    };
+
+    playDingDong();
+    const interval = setInterval(playDingDong, 1800);
+    return () => clearInterval(interval);
+  }, [pendingNewOrders.length, isMuted]);
 
   // Checar autenticação via PIN 615210
   useEffect(() => {
@@ -1112,8 +1154,28 @@ export default function AdminDashboardPage() {
         </div>
       )}
 
-      {/* Topo do Painel Administrativo */}
-      <header className="border-b border-zinc-800 bg-zinc-900/90 backdrop-blur-md px-6 py-4 sticky top-0 z-30">
+      {/* Botao Flutuante para Restaurar Topo quando recolhido */}
+      {isHeaderCollapsed && (
+        <div className="fixed top-3 right-4 z-40 animate-fade-in">
+          <button
+            type="button"
+            onClick={() => {
+              setIsHeaderCollapsed(false);
+              localStorage.setItem('novaesweb_kitchen_mode', 'false');
+            }}
+            className="px-3.5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-black flex items-center gap-2 shadow-2xl shadow-red-600/50 transition transform active:scale-95"
+            title="Sair do modo tela cheia e exibir menu"
+          >
+            <Minimize2 className="w-4 h-4" />
+            <span>Exibir Menu Principal</span>
+          </button>
+        </div>
+      )}
+
+      {/* Topo do Painel Administrativo (Recolhivel no Modo Cozinha) */}
+      <header className={`border-b border-zinc-800 bg-zinc-900/90 backdrop-blur-md px-6 py-4 sticky top-0 z-30 transition-all duration-300 ${
+        isHeaderCollapsed ? 'hidden' : 'block'
+      }`}>
         <div className="flex items-center justify-between">
           
           <div className="flex items-center gap-3">
@@ -1312,6 +1374,20 @@ export default function AdminDashboardPage() {
                   <Printer className="w-3.5 h-3.5" />
                   <span>Testar Cupom</span>
                 </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !isHeaderCollapsed;
+                    setIsHeaderCollapsed(next);
+                    localStorage.setItem('novaesweb_kitchen_mode', String(next));
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold flex items-center gap-1.5 transition border border-zinc-700/60"
+                  title="Recolher topo para o Kanban ocupar toda a tela da cozinha"
+                >
+                  <Maximize2 className="w-3.5 h-3.5 text-zinc-400" />
+                  <span>{isHeaderCollapsed ? 'Restaurar Menu' : 'Modo Tela Cheia (Recolher Topo)'}</span>
+                </button>
               </div>
             </div>
 
@@ -1367,15 +1443,57 @@ export default function AdminDashboardPage() {
                           Nenhum pedido nesta etapa
                         </div>
                       ) : (
-                        colOrders.map((order) => (
+                        colOrders.map((order) => {
+                          const orderTimeMs = order.createdAtISO ? new Date(order.createdAtISO).getTime() : 0;
+                          const elapsedMins = orderTimeMs ? Math.max(0, Math.floor((Date.now() - orderTimeMs) / 60000)) : null;
+
+                          // Estilo Tematico por Coluna/Status
+                          const cardTheme = selectedOrderIds.includes(order.id)
+                            ? 'border-red-600/90 bg-red-950/30 shadow-lg shadow-red-950/40'
+                            : col.key === 'recebido'
+                            ? 'border-blue-500/70 bg-gradient-to-b from-blue-950/35 to-zinc-900/95 shadow-lg shadow-blue-950/20 hover:border-blue-400'
+                            : col.key === 'preparando'
+                            ? 'border-amber-500/70 bg-gradient-to-b from-amber-950/35 to-zinc-900/95 shadow-lg shadow-amber-950/20 hover:border-amber-400'
+                            : col.key === 'pronto'
+                            ? 'border-purple-500/70 bg-gradient-to-b from-purple-950/35 to-zinc-900/95 shadow-lg shadow-purple-950/20 hover:border-purple-400'
+                            : col.key === 'em_entrega'
+                            ? 'border-orange-500/70 bg-gradient-to-b from-orange-950/35 to-zinc-900/95 shadow-lg shadow-orange-950/20 hover:border-orange-400'
+                            : 'border-emerald-500/40 bg-zinc-900/80 hover:border-emerald-500/70';
+
+                          return (
                           <div
                             key={order.id}
-                            className={`p-3.5 rounded-xl bg-zinc-900 border transition shadow-md space-y-2 text-xs ${
-                              selectedOrderIds.includes(order.id) 
-                                ? 'border-red-600/80 bg-red-950/20' 
-                                : 'border-zinc-800 hover:border-zinc-700'
-                            }`}
+                            className={`p-3.5 rounded-xl border transition duration-150 space-y-2.5 text-xs ${cardTheme}`}
                           >
+                            {/* Barra de Status & SLA de Tempo */}
+                            <div className="flex items-center justify-between pb-1.5 border-b border-zinc-800/80">
+                              <span className={`text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded ${
+                                col.key === 'recebido' ? 'bg-blue-900/60 text-blue-300 border border-blue-700/50' :
+                                col.key === 'preparando' ? 'bg-amber-900/60 text-amber-300 border border-amber-700/50 flex items-center gap-1' :
+                                col.key === 'pronto' ? 'bg-purple-900/60 text-purple-300 border border-purple-700/50' :
+                                col.key === 'em_entrega' ? 'bg-orange-900/60 text-orange-300 border border-orange-700/50' :
+                                'bg-emerald-900/50 text-emerald-300 border border-emerald-700/40'
+                              }`}>
+                                {col.key === 'recebido' && 'Novo Pedido'}
+                                {col.key === 'preparando' && '🔥 No Forno'}
+                                {col.key === 'pronto' && 'Pronto p/ Despacho'}
+                                {col.key === 'em_entrega' && 'Na Rua'}
+                                {col.key === 'concluido' && 'Entregue ✓'}
+                              </span>
+
+                              {elapsedMins !== null && col.key !== 'concluido' && (
+                                <span className={`text-[10px] font-black px-1.5 py-0.5 rounded flex items-center gap-1 ${
+                                  elapsedMins > 30 
+                                    ? 'bg-red-950 text-red-400 border border-red-800 animate-pulse' 
+                                    : elapsedMins > 15 
+                                    ? 'bg-amber-950 text-amber-400 border border-amber-800' 
+                                    : 'bg-zinc-800 text-zinc-300'
+                                }`}>
+                                  <Clock className="w-2.5 h-2.5" />
+                                  <span>{elapsedMins} min</span>
+                                </span>
+                              )}
+                            </div>
                             {/* Checkbox de seleção para despacho em lote */}
                             {col.key === 'pronto' && order.dispatchStatus !== 'aguardando_aceite' && order.dispatchStatus !== 'aceito_aguardando_retirada' && (
                               <button
@@ -1561,7 +1679,8 @@ export default function AdminDashboardPage() {
                             </div>
 
                           </div>
-                        ))
+                        );
+                      })
                       )}
                     </div>
 
@@ -2602,6 +2721,184 @@ export default function AdminDashboardPage() {
           </div>
         </div>
       )}
+      {/* MODAL FULL-SCREEN: NOVO PEDIDO COM ALARME SONORO E FILA EMPILHADA */}
+      {pendingNewOrders.length > 0 && (() => {
+        const topOrder = pendingNewOrders[0];
+        const topPhoneDigits = String(topOrder.phone || '').replace(/\D/g, '');
+        const topAd = topOrder.addressDetail;
+        const topFullAddress = topAd && (topAd.street || topAd.number)
+          ? `${topAd.street || ''}, ${topAd.number || ''}${topAd.complement ? ' - ' + topAd.complement : ''}`
+          : topOrder.address;
+        const topItemLines = Array.isArray(topOrder.items) && topOrder.items.length > 0
+          ? topOrder.items
+          : null;
+        const money = (n?: number | null) => `R$ ${Number(n || 0).toFixed(2).replace('.', ',')}`;
+
+        const handleAcceptTopOrder = async (andPrint: boolean = false) => {
+          if (andPrint) {
+            printThermalOrder(topOrder, paperWidth);
+          }
+          // Remove do topo da fila
+          setPendingNewOrders(prev => prev.filter(o => o.id !== topOrder.id));
+          // Avanca status para 'preparando'
+          await handleAdvanceStatus(topOrder.id, 'recebido');
+        };
+
+        const handleRejectTopOrder = async () => {
+          setPendingNewOrders(prev => prev.filter(o => o.id !== topOrder.id));
+          await handleCancelOrder(topOrder.id);
+        };
+
+        return (
+          <div className="fixed inset-0 z-50 flex flex-col items-center justify-center p-4 bg-black/90 backdrop-blur-md animate-fade-in">
+            {/* Header com Alarme Pulsante */}
+            <div className="w-full max-w-xl text-center mb-3">
+              <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-red-600/30 border border-red-500 text-red-300 text-sm font-black animate-pulse mb-2">
+                <Bell className="w-4 h-4 animate-bounce text-yellow-300" />
+                <span>NOVO PEDIDO RECEBIDO!</span>
+              </div>
+              <h2 className="text-2xl font-black text-white tracking-wide">
+                Pedido #{topOrder.orderNumber}
+              </h2>
+            </div>
+
+            {/* Card Principal de Destaque */}
+            <div className="w-full max-w-xl rounded-2xl bg-zinc-900 border-2 border-red-500 shadow-2xl shadow-red-600/40 overflow-hidden flex flex-col max-h-[75vh]">
+              <div className="p-5 overflow-y-auto space-y-4 text-sm flex-1">
+                {/* Cliente & Telefone */}
+                <div className="flex items-start justify-between gap-3 pb-3 border-b border-zinc-800">
+                  <div>
+                    <h3 className="text-base font-black text-white">{topOrder.customerName}</h3>
+                    <p className="text-xs text-zinc-400">{topOrder.phone || 'Sem telefone'}</p>
+                  </div>
+                  <span className="text-xs font-black px-2.5 py-1 rounded-lg bg-blue-950 text-blue-400 border border-blue-800">
+                    Aguardando Aceite
+                  </span>
+                </div>
+
+                {/* Endereco */}
+                <div className="space-y-1">
+                  <h4 className="text-[10px] font-black uppercase text-zinc-500 flex items-center gap-1">
+                    <MapPin className="w-3.5 h-3.5 text-red-500" /> Endereço de Entrega
+                  </h4>
+                  <p className="font-bold text-zinc-100">{topFullAddress}</p>
+                  <p className="text-xs text-zinc-400">Bairro: {topOrder.region}</p>
+                  {topAd?.reference && <p className="text-xs text-zinc-400">Ref: {topAd.reference}</p>}
+                </div>
+
+                {/* Itens do Pedido */}
+                <div className="space-y-1.5">
+                  <h4 className="text-[10px] font-black uppercase text-zinc-500 flex items-center gap-1">
+                    <Package className="w-3.5 h-3.5 text-zinc-400" /> Itens
+                  </h4>
+                  <div className="p-3 rounded-xl bg-zinc-950 border border-zinc-800 space-y-2">
+                    {topItemLines ? (
+                      topItemLines.map((it, idx) => (
+                        <div key={idx} className="flex justify-between items-start text-xs border-b border-zinc-900 pb-1.5 last:border-none last:pb-0">
+                          <div>
+                            <strong className="text-white">{it.quantity}x {it.name}{it.size ? ' (' + it.size + ')' : ''}</strong>
+                            {it.flavors && it.flavors.length > 0 && <p className="text-[11px] text-zinc-400">Sabores: {it.flavors.join(' + ')}</p>}
+                            {it.crust && <p className="text-[11px] text-zinc-400">Borda: {it.crust}</p>}
+                          </div>
+                          {typeof it.totalPrice === 'number' && <span className="font-bold text-zinc-200">{money(it.totalPrice)}</span>}
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-xs text-zinc-200">{topOrder.itemsSummary}</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Observacoes do Cliente */}
+                {topOrder.notes && (
+                  <div className="p-2.5 rounded-xl bg-amber-950/40 border border-amber-800/60 text-xs text-amber-200">
+                    <strong>OBS:</strong> {topOrder.notes}
+                  </div>
+                )}
+
+                {/* Total & Pagamento */}
+                <div className="p-3 rounded-xl bg-zinc-950 border border-zinc-800 flex items-center justify-between text-sm">
+                  <div>
+                    <span className="text-xs text-zinc-400 block">Forma de Pagamento:</span>
+                    <strong className="text-white capitalize">
+                      {topOrder.paymentMethod === 'pix_manual' ? 'Pix' : topOrder.paymentMethod === 'cash_delivery' ? 'Dinheiro' : 'Cartão'}
+                    </strong>
+                    {topOrder.changeFor ? <span className="text-xs text-zinc-400 block">Troco para {money(topOrder.changeFor)}</span> : null}
+                  </div>
+                  <div className="text-right">
+                    <span className="text-xs text-zinc-400 block">Total do Pedido:</span>
+                    <span className="text-xl font-black text-emerald-400">{money(topOrder.total)}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Botoes de Acao de Alta Eficiencia */}
+              <div className="p-4 bg-zinc-950 border-t border-zinc-800 flex flex-col sm:flex-row gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleAcceptTopOrder(true)}
+                  className="flex-1 py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-600 text-white font-black text-sm flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/30 transition transform active:scale-95"
+                >
+                  <Printer className="w-4 h-4" />
+                  <span>Aceitar e Imprimir Comanda</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleAcceptTopOrder(false)}
+                  className="py-3 px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-100 font-bold text-xs flex items-center justify-center gap-1.5 transition"
+                >
+                  <Check className="w-4 h-4 text-emerald-400" />
+                  <span>Aceitar sem Imprimir</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleRejectTopOrder}
+                  className="py-3 px-3 rounded-xl bg-zinc-900 hover:bg-red-950/60 text-zinc-400 hover:text-red-400 border border-zinc-800 text-xs font-bold transition"
+                  title="Recusar pedido"
+                >
+                  Recusar
+                </button>
+              </div>
+            </div>
+
+            {/* Barra Inferior com Fila de Outros Pedidos e Mudo */}
+            <div className="w-full max-w-xl mt-3 flex items-center justify-between gap-2">
+              {pendingNewOrders.length > 1 ? (
+                <div className="flex items-center gap-2 overflow-x-auto text-xs text-amber-300 font-bold">
+                  <span>+{pendingNewOrders.length - 1} na fila:</span>
+                  {pendingNewOrders.slice(1).map(other => (
+                    <button
+                      key={other.id}
+                      onClick={() => setPendingNewOrders(prev => [other, ...prev.filter(o => o.id !== other.id)])}
+                      className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-white text-[11px] font-bold border border-zinc-700 shrink-0"
+                    >
+                      #{other.orderNumber}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <span className="text-xs text-zinc-500">Bella Pizza • Alerta de Pedidos</span>
+              )}
+
+              <button
+                type="button"
+                onClick={() => {
+                  setIsMuted(true);
+                  setTimeout(() => setIsMuted(false), 30000);
+                }}
+                className="px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 text-zinc-300 text-xs font-bold flex items-center gap-1.5 shrink-0 transition"
+                title="Pausar o som por 30 segundos"
+              >
+                {isMuted ? <VolumeX className="w-3.5 h-3.5 text-red-400" /> : <Volume2 className="w-3.5 h-3.5 text-zinc-400" />}
+                <span>{isMuted ? 'Mudo (30s)' : 'Pausar Som'}</span>
+              </button>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Modal: Detalhes do Pedido */}
       {(() => {
         const detail = detailOrderId ? orders.find(o => o.id === detailOrderId) : null;
