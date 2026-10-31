@@ -11,6 +11,7 @@ import {
 import { PIZZA_FLAVORS } from '@/lib/constants';
 
 import AdminPinAuth from '@/components/AdminPinAuth';
+import { printThermalOrder, testPrintThermal, PaperWidth } from '@/lib/thermalPrinter';
 
 const SUPABASE_STORAGE_URL = 'https://nrdbporbyujwtgnpiejz.supabase.co/storage/v1/object/novaesweb_store/logistics.json';
 const SUPABASE_ANON_KEY = 'sb_publishable_ynzw0icpmaxAhkCJWDYDGg_nTQCPUeY';
@@ -83,6 +84,19 @@ export default function AdminDashboardPage() {
   const [detailOrderId, setDetailOrderId] = useState<string | null>(null);
   const [newOrderAlert, setNewOrderAlert] = useState<{ id: string; orderNumber: number } | null>(null);
   const [copiedDetail, setCopiedDetail] = useState(false);
+  const [autoPrint, setAutoPrint] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('novaesweb_autoprint') === 'true';
+    }
+    return false;
+  });
+  const [paperWidth, setPaperWidth] = useState<PaperWidth>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('novaesweb_paper_width');
+      if (saved === '58mm' || saved === '80mm') return saved;
+    }
+    return '80mm';
+  });
   const knownOrderIdsRef = React.useRef<Set<string> | null>(null);
 
   useEffect(() => {
@@ -98,6 +112,9 @@ export default function AdminDashboardPage() {
     currentIds.forEach(id => known.add(id));
     if (fresh) {
       setNewOrderAlert({ id: fresh.id, orderNumber: fresh.orderNumber });
+      if (autoPrint) {
+        printThermalOrder(fresh, paperWidth);
+      }
       try {
         const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
         if (AudioCtx) {
@@ -1241,6 +1258,57 @@ export default function AdminDashboardPage() {
                   Os pedidos caem aqui em tempo real conforme os clientes compram no site.
                 </p>
               </div>
+
+              {/* Controles de Impressao Termica 80mm/58mm */}
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-xs">
+                  <Printer className="w-4 h-4 text-zinc-400" />
+                  <label className="flex items-center gap-1.5 cursor-pointer font-bold text-zinc-200 select-none">
+                    <input
+                      type="checkbox"
+                      checked={autoPrint}
+                      onChange={(e) => {
+                        const val = e.target.checked;
+                        setAutoPrint(val);
+                        localStorage.setItem('novaesweb_autoprint', String(val));
+                      }}
+                      className="w-4 h-4 rounded text-red-600 focus:ring-0 bg-zinc-800 border-zinc-700"
+                    />
+                    <span>Impressão Automática</span>
+                  </label>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-black ${
+                    autoPrint
+                      ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                      : 'bg-zinc-800 text-zinc-400'
+                  }`}>
+                    {autoPrint ? 'LIGADA' : 'DESLIGADA'}
+                  </span>
+                </div>
+
+                <select
+                  value={paperWidth}
+                  onChange={(e) => {
+                    const val = e.target.value as PaperWidth;
+                    setPaperWidth(val);
+                    localStorage.setItem('novaesweb_paper_width', val);
+                  }}
+                  className="px-2.5 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-xs font-bold text-zinc-200 focus:outline-none"
+                  title="Tamanho da bobina da impressora termica"
+                >
+                  <option value="80mm">Bobina 80mm</option>
+                  <option value="58mm">Bobina 58mm</option>
+                </select>
+
+                <button
+                  type="button"
+                  onClick={() => testPrintThermal(paperWidth)}
+                  className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold flex items-center gap-1.5 transition"
+                  title="Enviar cupom de teste para validar a impressora"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>Testar Cupom</span>
+                </button>
+              </div>
             </div>
 
             {/* As 5 Colunas do Kanban */}
@@ -1428,6 +1496,13 @@ export default function AdminDashboardPage() {
                                 title="Ver todas as informações do pedido"
                               >
                                 Detalhes
+                              </button>
+                              <button
+                                onClick={() => printThermalOrder(order, paperWidth)}
+                                className="p-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition"
+                                title="Imprimir Cupom Térmico (80mm/58mm)"
+                              >
+                                <Printer className="w-3.5 h-3.5" />
                               </button>
                               <button
                                 onClick={() => handleCancelOrder(order.id)}
@@ -2720,6 +2795,14 @@ export default function AdminDashboardPage() {
               </div>
 
               <div className="p-4 border-t border-zinc-800 flex gap-2 justify-end sticky bottom-0 bg-zinc-900">
+                <button
+                  onClick={() => printThermalOrder(detail, paperWidth)}
+                  className="px-3 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold flex items-center gap-1.5 transition"
+                  title="Imprimir comanda térmica deste pedido"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>Imprimir Comanda</span>
+                </button>
                 <button
                   onClick={handleCopyDetail}
                   className="px-3 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold flex items-center gap-1.5 transition"
