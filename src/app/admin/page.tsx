@@ -39,6 +39,10 @@ interface AdminOrder {
   deliveredAt?: string;
   cancellationReason?: string;
   canceledAt?: string;
+  forcedDelivery?: boolean;
+  forcedDeliveryReason?: string;
+  forcedByDriverName?: string;
+  forcedAt?: string;
   // Detalhes completos (pedidos novos)
   createdAtISO?: string;
   notes?: string;
@@ -1246,7 +1250,7 @@ export default function AdminDashboardPage() {
       )}
 
       {/* Conteúdo Dinâmico por Aba */}
-      <main className="flex-1 p-6 max-w-7xl w-full mx-auto">
+      <main className="flex-1 p-3 sm:p-5 lg:p-6 w-full max-w-none mx-auto">
         
         {/* ABA 1: KANBAN DE PEDIDOS */}
         {activeTab === 'kanban' && (
@@ -1324,7 +1328,7 @@ export default function AdminDashboardPage() {
                 const colOrders = orders.filter(o => o.status === col.key);
 
                 return (
-                  <div key={col.key} className="bg-zinc-900/50 border border-zinc-800/80 rounded-2xl p-4 flex flex-col h-[700px]">
+                  <div key={col.key} className="bg-zinc-900/50 border border-zinc-800/80 rounded-2xl p-3.5 flex flex-col h-[calc(100vh-210px)] min-h-[680px] w-full">
                     <div className="flex items-center justify-between pb-3 border-b border-zinc-800 mb-3">
                       <div className="flex items-center gap-2">
                         <span className={`text-xs font-black uppercase tracking-wider ${col.color}`}>
@@ -1484,6 +1488,14 @@ export default function AdminDashboardPage() {
                               <div className="p-1.5 bg-orange-950/40 border border-orange-800/50 rounded text-[10px] text-orange-300 font-semibold flex items-center gap-1">
                                 <Bike className="w-3 h-3" />
                                 <span>{order.driverName}</span>
+                              </div>
+                            )}
+
+                            {/* Alerta de Entrega Forçada sem PIN */}
+                            {order.forcedDelivery && (
+                              <div className="p-1.5 rounded-lg bg-amber-950/60 border border-amber-700/60 text-[10px] text-amber-300 font-bold flex items-center gap-1">
+                                <ShieldAlert className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                                <span>Entrega sem PIN ({order.forcedByDriverName || 'Motoboy'})</span>
                               </div>
                             )}
 
@@ -2791,6 +2803,17 @@ export default function AdminDashboardPage() {
                     )}
                   </div>
                   <p className="text-[10px] text-zinc-500">O PIN é informado pelo cliente ao motoboy para confirmar a entrega.</p>
+                    {detail.forcedDelivery && (
+                      <div className="mt-2 p-2.5 rounded-lg bg-amber-950/60 border border-amber-700/60 text-amber-200 text-xs space-y-0.5">
+                        <div className="flex items-center gap-1.5 font-bold text-amber-300">
+                          <ShieldAlert className="w-3.5 h-3.5" />
+                          <span>Entrega Concluída com Termo de Responsabilidade</span>
+                        </div>
+                        <p className="text-[11px] text-zinc-300">
+                          Finalizada sem o código PIN por <strong>{detail.forcedByDriverName || detail.driverName || 'Motoboy'}</strong> em {fmtDate(detail.forcedAt || detail.deliveredAt)}.
+                        </p>
+                      </div>
+                    )}
                 </section>
               </div>
 
