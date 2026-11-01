@@ -1076,6 +1076,9 @@ export default function AdminDashboardPage() {
         headers: getAdminHeaders(),
         body: JSON.stringify({
           validityDays: days,
+          driverName: newDriverName.trim() || undefined,
+          phone: newDriverPhone.trim() || undefined,
+          vehiclePlate: newDriverPlate.trim() || undefined,
           bindImmediately: false,
           maxDeliveries: storeSettings.maxConcurrentDeliveries || 5,
         }),
@@ -1107,7 +1110,7 @@ export default function AdminDashboardPage() {
   };
 
   const getWhatsAppShareUrl = (code: string) => {
-    const text = `Olá! Seu código de vínculo/plantão na Bella Pizza é: ${code}. Abra seu app NovaesWeb Entregador e insira o código para iniciar.`;
+    const text = `Olá! Segue seu código de autorização para cadastro na Bella Pizza: ${code}. Abra o app NovaesWeb Entregador, toque em "Criar conta" e insira este código para se vincular à nossa loja.`;
     return `https://wa.me/?text=${encodeURIComponent(text)}`;
   };
 
@@ -1940,7 +1943,7 @@ export default function AdminDashboardPage() {
                 </div>
               </div>
 
-              <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-x-auto shadow-xl">
+            <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-x-auto shadow-xl">
                 <table className="w-full text-left text-xs">
                   <thead className="bg-zinc-950/80 border-b border-zinc-800 text-zinc-400 uppercase text-[10px] font-bold">
                     <tr>
@@ -2506,19 +2509,21 @@ export default function AdminDashboardPage() {
               </div>
             </div>
 
-            {/* BLOCO 2: CADASTRAR OU CONVIDAR ENTREGADORES & GERAR CÓDIGOS DE VÍNCULO */}
+            {/* BLOCO 2: GERAR CÓDIGO PARA MOTOBOY & AUTORIZAÇÃO DE CADASTRO */}
             <div className="p-6 rounded-2xl bg-zinc-900/60 border border-zinc-800 shadow-xl space-y-4">
               <div>
                 <h3 className="font-extrabold text-base text-white flex items-center gap-2">
                   <UserPlus className="w-4 h-4 text-red-500" />
-                  <span>Cadastrar Entregador ou Gerar Código de Vínculo</span>
+                  <span>Gerar código para motoboy (Autorização de Cadastro)</span>
                 </h3>
                 <p className="text-xs text-zinc-400 mt-0.5">
-                  Cadastre um entregador já vinculado à loja ou gere um código de convite exclusivo (<code className="text-amber-400">NW-XXXXXX</code>) para o motoboy ativar no app.
+                  Gere um código exclusivo de uso único (<code className="text-amber-400 font-bold">NW-XXXXXX</code>) para autorizar o cadastro de um novo motoboy vinculado à sua loja. O motoboy só consegue concluir a conta com este código.
                 </p>
               </div>
 
               <form onSubmit={handleGenerateShiftCode} className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end max-w-xl">
+                <div><label htmlFor="new-selected-driver-name" className="text-zinc-300 font-semibold block mb-1">Nome do entregador (opcional)</label><input id="new-selected-driver-name" value={newDriverName} onChange={event => setNewDriverName(event.target.value)} maxLength={100} placeholder="Ex: Lucas Motoboy" className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-white" /></div>
+                <div><label htmlFor="new-selected-driver-phone" className="text-zinc-300 font-semibold block mb-1">Telefone com DDD (opcional)</label><input id="new-selected-driver-phone" type="tel" value={newDriverPhone} onChange={event => setNewDriverPhone(event.target.value)} maxLength={20} placeholder="(51) 99999-9999" className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-white" /></div>
                 <div>
                   <label className="text-zinc-300 font-semibold block mb-1">
                     Validade do Código
@@ -2530,7 +2535,7 @@ export default function AdminDashboardPage() {
                   >
                     <option value="1">1 dia (24h)</option>
                     <option value="3">3 dias</option>
-                    <option value="7">7 dias</option>
+                    <option value="7">7 dias (Recomendado)</option>
                     <option value="30">30 dias</option>
                   </select>
                 </div>
@@ -2541,7 +2546,7 @@ export default function AdminDashboardPage() {
                     className="w-full py-2.5 px-4 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-extrabold text-xs flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 transition"
                   >
                     <KeyRound className="w-4 h-4" />
-                    <span>{isGeneratingShiftCode ? 'Gerando...' : 'Gerar Código de Vínculo'}</span>
+                    <span>{isGeneratingShiftCode ? 'Gerando...' : 'Gerar Código para Motoboy'}</span>
                   </button>
                 </div>
               </form>
@@ -2549,7 +2554,7 @@ export default function AdminDashboardPage() {
               {generatedShiftCode && (
                 <div className="mt-4 p-4 rounded-2xl bg-zinc-950 border border-amber-500/40 flex flex-col sm:flex-row items-center justify-between gap-4">
                   <div className="flex items-center gap-3">
-                    <span className="text-xs font-bold text-amber-300">Código gerado:</span>
+                    <span className="text-xs font-bold text-amber-300">Código exclusivo gerado:</span>
                     <span className="text-2xl font-mono font-black text-amber-400 tracking-wider select-all">
                       {generatedShiftCode}
                     </span>
@@ -2570,7 +2575,7 @@ export default function AdminDashboardPage() {
                       className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5"
                     >
                       <MessageSquare className="w-3.5 h-3.5" />
-                      <span>Compartilhar no WhatsApp</span>
+                      <span>Enviar no WhatsApp</span>
                     </a>
                   </div>
                 </div>

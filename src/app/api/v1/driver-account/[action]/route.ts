@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import {
   AccountSessionError, checkAccountRateLimit, loginDriverAccount,
   logoutDriverAccount, registerDriverAccount, requireAccountSession,
+  verifyAuthorizationCode,
 } from '@/lib/auth/driver-account';
 
 export const dynamic = 'force-dynamic';
@@ -21,6 +22,11 @@ function failure(error: unknown) {
 export async function GET(req: NextRequest, context: { params: Promise<{ action: string }> }) {
   try {
     const { action } = await context.params;
+    if (action === 'verify-code') {
+      const code = req.nextUrl.searchParams.get('code') || '';
+      const verified = await verifyAuthorizationCode(code);
+      return json({ success: true, ...verified });
+    }
     if (action !== 'me') return json({ success: false, error: 'Operação não encontrada.' }, 404);
     return json({ success: true, account: await requireAccountSession(req) });
   } catch (error) { return failure(error); }
@@ -33,11 +39,18 @@ export async function POST(req: NextRequest, context: { params: Promise<{ action
       await logoutDriverAccount(req);
       return json({ success: true });
     }
-    if (action !== 'register' && action !== 'login') return json({ success: false, error: 'Operação não encontrada.' }, 404);
     const length = Number(req.headers.get('content-length') || 0);
-    if (length > 8192) return json({ success: false, error: 'Dados de cadastro muito grandes.' }, 413);
+    if (length > 8192) return json({ success: false, error: 'Dados muito grandes.' }, 413);
     let body: any;
     try { body = await req.json(); } catch { return json({ success: false, error: 'Dados inválidos.' }, 400); }
+
+    if (action === 'verify-code') {
+      const code = body?.code || body?.registrationCode;
+      const verified = await verifyAuthorizationCode(code);
+      return json({ success: true, ...verified });
+    }
+
+    if (action !== 'register' && action !== 'login') return json({ success: false, error: 'Operação não encontrada.' }, 404);
     await checkAccountRateLimit(req, action === 'register' ? body?.phone : body?.identifier);
     const result = action === 'register' ? await registerDriverAccount(body) : await loginDriverAccount(body);
     return json({ success: true, ...result });
