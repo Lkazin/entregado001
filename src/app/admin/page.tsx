@@ -268,10 +268,23 @@ export default function AdminDashboardPage() {
     return () => clearInterval(interval);
   }, [pendingNewOrders.length, isMuted]);
 
-  // Restaurar a interface; a autorização das operações é validada no servidor.
+  // O marcador local não comprova que a sessão do servidor continua válida.
   useEffect(() => {
-    const auth = typeof window !== 'undefined' ? sessionStorage.getItem('novaesweb_admin_auth') : null;
-    setIsAuthenticated(auth === 'authenticated');
+    let active = true;
+    const expired = () => {
+      sessionStorage.removeItem('novaesweb_admin_auth');
+      sessionStorage.removeItem('novaesweb_admin_token');
+      if (active) setIsAuthenticated(false);
+    };
+    window.addEventListener('novaesweb:admin-session-expired', expired);
+    fetch('/api/admin/auth', {headers:getAdminHeaders(), cache:'no-store'})
+      .then(async response => {
+        const data = await response.json().catch(() => ({}));
+        if (!active) return;
+        if (response.ok && data.authenticated) setIsAuthenticated(true);
+        else expired();
+      }).catch(() => {if (active) setIsAuthenticated(false);});
+    return () => {active=false;window.removeEventListener('novaesweb:admin-session-expired', expired);};
   }, []);
 
   // Carregar cache local de pedidos para nunca sumir nada

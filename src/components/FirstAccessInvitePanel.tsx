@@ -25,6 +25,10 @@ export default function FirstAccessInvitePanel({ getHeaders, onChanged }: {
   const loadInvites = useCallback(async () => {
     try {
       const response = await fetch('/api/v1/driver-first-access/list', { headers: getHeaders(), cache: 'no-store' });
+      if (response.status === 401) {
+        window.dispatchEvent(new Event('novaesweb:admin-session-expired'));
+        throw new Error('Sua sessão expirou. Entre novamente com o PIN da loja.');
+      }
       const result = await response.json();
       if (response.ok && result.success && Array.isArray(result.invites)) setInvites(result.invites);
     } catch { /* A falha da consulta não deve apagar um código que acabou de ser emitido. */ }
@@ -37,6 +41,10 @@ export default function FirstAccessInvitePanel({ getHeaders, onChanged }: {
       const response = await fetch('/api/v1/driver-first-access/issue', {
         method: 'POST', headers: getHeaders(), body: JSON.stringify({ name: name.trim(), phone }),
       });
+      if (response.status === 401) {
+        window.dispatchEvent(new Event('novaesweb:admin-session-expired'));
+        throw new Error('Sua sessão expirou. Entre novamente com o PIN da loja.');
+      }
       const result = await response.json();
       if (!response.ok || !result.success) throw new Error(result.error || 'Não foi possível gerar o primeiro acesso.');
       setIssued(result); await loadInvites(); onChanged?.();
@@ -50,6 +58,10 @@ export default function FirstAccessInvitePanel({ getHeaders, onChanged }: {
       const response = await fetch('/api/v1/driver-first-access/revoke', {
         method: 'POST', headers: getHeaders(), body: JSON.stringify({ inviteId }),
       });
+      if (response.status === 401) {
+        window.dispatchEvent(new Event('novaesweb:admin-session-expired'));
+        throw new Error('Sua sessão expirou. Entre novamente com o PIN da loja.');
+      }
       const result = await response.json();
       if (!response.ok || !result.success) throw new Error(result.error || 'Não foi possível revogar o código.');
       if (issued?.inviteId === inviteId) setIssued(null);
