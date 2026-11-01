@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import Navbar from '@/components/Navbar';
 import Hero from '@/components/Hero';
+import CategoryGrid from '@/components/CategoryGrid';
 import PizzaBuilder from '@/components/PizzaBuilder';
 import CatalogSection from '@/components/CatalogSection';
 import CartCheckoutDrawer from '@/components/CartCheckoutDrawer';
@@ -83,6 +84,7 @@ export default function HomePage() {
 
       <main className="flex-1">
         <Hero />
+        <CategoryGrid />
         <PizzaBuilder onAddToCart={handleAddToCart} />
         <CatalogSection
           onSelectFlavorForBuilder={(flavor: PizzaFlavorMock) => {
