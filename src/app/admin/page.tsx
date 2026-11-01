@@ -203,13 +203,11 @@ export default function AdminDashboardPage() {
 
   // Deteccao de novos pedidos para fila e impressao automatica
   useEffect(() => {
-    if (isLoading) return;
+    if (isLoading || !isAuthenticated) return;
     const currentIds = new Set(orders.map(o => o.id));
-    if (knownOrderIdsRef.current === null) {
-      knownOrderIdsRef.current = currentIds;
-      return;
-    }
-    const known = knownOrderIdsRef.current;
+    const initialLoad = knownOrderIdsRef.current === null;
+    const known = knownOrderIdsRef.current || new Set<string>();
+    knownOrderIdsRef.current = known;
     const freshOrders = orders.filter(o => !known.has(o.id) && o.status === 'recebido');
     currentIds.forEach(id => known.add(id));
 
@@ -220,21 +218,44 @@ export default function AdminDashboardPage() {
         return [...prev, ...toAdd];
       });
 
-      if (autoPrint) {
+      if (autoPrint && !initialLoad) {
         freshOrders.forEach(ord => printThermalOrder(ord, paperWidth));
       }
     }
-  }, [orders, isLoading, autoPrint, paperWidth]);
+  }, [orders, isLoading, isAuthenticated, autoPrint, paperWidth]);
+
+  const alarmAudioRef = React.useRef<AudioContext | null>(null);
+  useEffect(() => {
+    const unlock = () => {
+      try {
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        if (!AudioCtx) return;
+        const ctx = alarmAudioRef.current || new AudioCtx();
+        alarmAudioRef.current = ctx;
+        if (ctx.state === 'suspended') void ctx.resume().catch(() => {});
+      } catch {}
+    };
+    window.addEventListener('pointerdown', unlock);
+    window.addEventListener('keydown', unlock);
+    return () => {
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+      void alarmAudioRef.current?.close().catch(() => {});
+      alarmAudioRef.current = null;
+    };
+  }, []);
 
   // Alarme Sonoro Continuo Tipo Campainha de Delivery (Ding-Dong)
   useEffect(() => {
-    if (pendingNewOrders.length === 0 || isMuted) return;
+    if (pendingNewOrders.length === 0 || isMuted || !isAuthenticated) return;
 
     const playDingDong = () => {
       try {
         const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
         if (!AudioCtx) return;
-        const ctx = new AudioCtx();
+        const ctx = alarmAudioRef.current || new AudioCtx();
+        alarmAudioRef.current = ctx;
+        if (ctx.state === 'suspended') { void ctx.resume().catch(() => {}); return; }
         const now = ctx.currentTime;
 
         // Tom 1: Ding (880 Hz)
@@ -266,7 +287,7 @@ export default function AdminDashboardPage() {
     playDingDong();
     const interval = setInterval(playDingDong, 1800);
     return () => clearInterval(interval);
-  }, [pendingNewOrders.length, isMuted]);
+  }, [pendingNewOrders.length, isMuted, isAuthenticated]);
 
   // O marcador local não comprova que a sessão do servidor continua válida.
   useEffect(() => {
@@ -350,14 +371,9 @@ export default function AdminDashboardPage() {
       const dataOrders = await resOrders.json().catch(() => null);
       if (dataOrders && dataOrders.success && Array.isArray(dataOrders.orders)) {
         setOrders(prevOrders => {
-          // Filtrar quaisquer pedidos de demonstração remanescentes
-          const incoming: AdminOrder[] = dataOrders.orders.filter((o: any) => 
-            !o.customerName?.includes('Teste') && 
-            !o.customerName?.includes('Fictício') &&
-            !o.customerName?.includes('João') &&
-            !o.customerName?.includes('Maria')
-          );
-          
+          // Todo pedido retornado pelo servidor deve ser exibido, independentemente do nome.
+          const incoming: AdminOrder[] = dataOrders.orders;
+
           // Se a lista no servidor estiver vazia (ex: limpeza de demonstração pelo lojista), limpa tudo
           if (incoming.length === 0) {
             if (typeof window !== 'undefined') {
@@ -593,12 +609,13 @@ export default function AdminDashboardPage() {
 
   // POLLING AUTOMÁTICO A CADA 3 SEGUNDOS (Tempo Real Conectado ao App do Entregador)
   useEffect(() => {
+    if (!isAuthenticated) return;
     fetchData();
     const interval = setInterval(() => {
       fetchData(true);
     }, 3000);
     return () => clearInterval(interval);
-  }, []);
+  }, [isAuthenticated]);
 
   // Transições do Kanban Conectadas à API
   const handleAdvanceStatus = async (orderId: string, currentStatus: AdminOrder['status']) => {
