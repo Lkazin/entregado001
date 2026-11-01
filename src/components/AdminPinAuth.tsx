@@ -1,18 +1,17 @@
 'use client';
 
 import React, { useState, useRef, useEffect } from 'react';
-import { Flame, Lock, ShieldCheck, AlertCircle, ArrowRight, Delete } from 'lucide-react';
+import { Lock, ShieldCheck, AlertCircle, Delete } from 'lucide-react';
 
 interface AdminPinAuthProps {
   onSuccess: () => void;
 }
 
-const CORRECT_PIN = '615210';
-
 export default function AdminPinAuth({ onSuccess }: AdminPinAuthProps) {
   const [pin, setPin] = useState<string[]>(['', '', '', '', '', '']);
   const [error, setError] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [isValidating, setIsValidating] = useState(false);
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
   useEffect(() => {
@@ -58,19 +57,38 @@ export default function AdminPinAuth({ onSuccess }: AdminPinAuthProps) {
     }
   };
 
-  const validatePin = (candidate: string) => {
-    if (candidate === CORRECT_PIN) {
-      sessionStorage.setItem('novaesweb_admin_auth', 'authenticated');
-      onSuccess();
-    } else {
+  const validatePin = async (candidate: string) => {
+    if (isValidating) return;
+    setIsValidating(true);
+    try {
+      const res = await fetch('/api/admin/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: candidate }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        sessionStorage.setItem('novaesweb_admin_auth', 'authenticated');
+        if (data.token) {
+          sessionStorage.setItem('novaesweb_admin_token', data.token);
+        }
+        onSuccess();
+        return;
+      }
       setError(true);
-      setErrorMessage('Código de acesso incorreto. Tente novamente.');
-      // Limpa os inputs e refoca no primeiro
-      setTimeout(() => {
-        setPin(['', '', '', '', '', '']);
-        inputRefs.current[0]?.focus();
-      }, 500);
+      setErrorMessage(data.error || 'Código de acesso incorreto. Tente novamente.');
+    } catch {
+      setError(true);
+      setErrorMessage('Falha ao validar acesso com o servidor. Tente novamente.');
+    } finally {
+      setIsValidating(false);
     }
+
+    // Limpa os inputs e refoca no primeiro
+    setTimeout(() => {
+      setPin(['', '', '', '', '', '']);
+      inputRefs.current[0]?.focus();
+    }, 500);
   };
 
   const handleKeypadPress = (num: string) => {
@@ -122,6 +140,7 @@ export default function AdminPinAuth({ onSuccess }: AdminPinAuthProps) {
                 type="password"
                 inputMode="numeric"
                 maxLength={1}
+                disabled={isValidating}
                 value={digit}
                 onChange={e => handleDigitChange(idx, e.target.value)}
                 onKeyDown={e => handleKeyDown(idx, e)}
@@ -150,6 +169,7 @@ export default function AdminPinAuth({ onSuccess }: AdminPinAuthProps) {
             <button
               key={num}
               type="button"
+              disabled={isValidating}
               onClick={() => handleKeypadPress(num)}
               className="h-12 rounded-xl bg-zinc-950/60 hover:bg-zinc-800 active:scale-95 border border-zinc-800/80 text-white font-extrabold text-lg transition flex items-center justify-center shadow-sm"
             >
@@ -158,6 +178,7 @@ export default function AdminPinAuth({ onSuccess }: AdminPinAuthProps) {
           ))}
           <button
             type="button"
+            disabled={isValidating}
             onClick={() => setPin(['', '', '', '', '', ''])}
             className="h-12 rounded-xl bg-zinc-950/40 hover:bg-zinc-800 text-zinc-500 hover:text-zinc-300 text-xs font-bold transition flex items-center justify-center border border-zinc-800/60"
           >
@@ -165,6 +186,7 @@ export default function AdminPinAuth({ onSuccess }: AdminPinAuthProps) {
           </button>
           <button
             type="button"
+            disabled={isValidating}
             onClick={() => handleKeypadPress('0')}
             className="h-12 rounded-xl bg-zinc-950/60 hover:bg-zinc-800 active:scale-95 border border-zinc-800/80 text-white font-extrabold text-lg transition flex items-center justify-center shadow-sm"
           >
@@ -172,6 +194,7 @@ export default function AdminPinAuth({ onSuccess }: AdminPinAuthProps) {
           </button>
           <button
             type="button"
+            disabled={isValidating}
             onClick={handleKeypadBackspace}
             className="h-12 rounded-xl bg-zinc-950/40 hover:bg-zinc-800 text-zinc-400 hover:text-white text-xs font-bold transition flex items-center justify-center border border-zinc-800/60"
             title="Apagar"

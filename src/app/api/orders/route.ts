@@ -1,96 +1,280 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/server';
+import { verifyAdminRequest } from '@/lib/auth/tokens';
 import crypto from 'crypto';
 
 export const dynamic = 'force-dynamic';
 
-// Armazenamento em memória com sincronização em nuvem (Supabase Storage + PostgreSQL)
-let liveOrders: any[] = [];
+const DEFAULT_STORE_ID = 'store_bella_pizza';
+const DEFAULT_STORE_UUID = '11111111-1111-1111-1111-111111111111';
 
-// Helper para ler pedidos persistentes
-async function fetchCurrentOrders(): Promise<any[]> {
-  const storeId = process.env.NEXT_PUBLIC_DEFAULT_STORE_ID || '11111111-1111-1111-1111-111111111111';
-
-  // 1. Tentar buscar do banco relacional Supabase se as tabelas existirem
-  try {
-    const { data: dbOrders, error } = await supabaseAdmin
-      .from('orders')
-      .select(`
-        id,
-        order_number,
-        tracking_token,
-        status,
-        address_snapshot_json,
-        subtotal,
-        delivery_fee,
-        total,
-        customer_notes,
-        created_at,
-        customers ( name, phone ),
-        payments ( method, status )
-      `)
-      .eq('store_id', storeId)
-      .order('created_at', { ascending: false });
-
-    if (dbOrders && dbOrders.length > 0) {
-      const formatted = dbOrders.map(o => ({
-        id: o.id,
-        orderNumber: Number(o.order_number),
-        customerName: (o.customers as any)?.name || 'Cliente',
-        phone: (o.customers as any)?.phone || '',
-        address: `${(o.address_snapshot_json as any)?.street || ''}, ${(o.address_snapshot_json as any)?.number || ''}`,
-        region: (o.address_snapshot_json as any)?.region || 'Região Central',
-        itemsSummary: 'Pizza Artesanal Selecionada',
-        total: Number(o.total),
-        status: o.status,
-        paymentMethod: (o.payments as any)?.[0]?.method || 'pix_manual',
-        paymentStatus: (o.payments as any)?.[0]?.status || 'aguardando_conferencia',
-        deliveryPin: '****',
-        createdAt: new Date(o.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
-      }));
-      return formatted;
-    }
-  } catch (e) {
-    // Tabela relacional ainda não disponível
+function normalizeStoreId(raw?: string | null): string {
+  if (!raw) return DEFAULT_STORE_ID;
+  const trimmed = raw.trim();
+  if (
+    !trimmed ||
+    trimmed === DEFAULT_STORE_UUID ||
+    trimmed === 'store_bella_pizza' ||
+    trimmed === 'bella-pizza'
+  ) {
+    return DEFAULT_STORE_ID;
   }
-
-  // 2. Tentar buscar do Supabase Storage (nuvem persistente universal)
-  try {
-    const { data: fileData } = await supabaseAdmin.storage
-      .from('novaesweb_store')
-      .download('orders.json');
-    if (fileData) {
-      const text = await fileData.text();
-      const parsed = JSON.parse(text);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        liveOrders = parsed;
-        return parsed;
-      }
-    }
-  } catch (e) {
-    // Storage inacessível
-  }
-
-  return liveOrders;
+  return trimmed;
 }
 
-// Helper para salvar pedidos de forma persistente
-async function persistOrders(ordersList: any[]): Promise<void> {
-  liveOrders = ordersList;
+function isSameStore(a?: string | null, b?: string | null): boolean {
+  return normalizeStoreId(a) === normalizeStoreId(b);
+}
+
+function getOrdersStoragePath(storeId?: string | null): string {
+  const norm = normalizeStoreId(storeId);
+  if (norm === DEFAULT_STORE_ID) {
+    return 'orders.json';
+  }
+  return `stores/${norm}/orders.json`;
+}
+
+const gOrders = globalThis as unknown as {
+  __novaesweb_orders__?: any[];
+  __novaesweb_orders_updated_at__?: number;
+  __novaesweb_orders_by_store__?: Record<string, any[]>;
+  __novaesweb_orders_by_store_updated_at__?: Record<string, number>;
+};
+
+if (!gOrders.__novaesweb_orders_by_store__) {
+  gOrders.__novaesweb_orders_by_store__ = {};
+  gOrders.__novaesweb_orders_by_store_updated_at__ = {};
+}
+
+
+const STATUS_HIERARCHY: Record<string, number> = {
+  'recebido': 1,
+  'preparando': 2,
+  'pronto': 3,
+  'em_entrega': 4,
+  'concluido': 5,
+  'cancelado': 99,
+};
+
+function mergeOrdersLists(localOrders: any[], incomingOrders: any[]): any[] {
+  const map = new Map<string, any>();
+
+  // 1. Insere pedidos recebidos do Storage
+  for (const inc of incomingOrders || []) {
+    if (inc && inc.id) {
+      map.set(String(inc.id), inc);
+      if (inc.orderNumber) {
+        map.set(String(inc.orderNumber).replace('#', ''), inc);
+      }
+    }
+  }
+
+  // 2. Mescla com pedidos locais garantindo que status mais avançados nunca regridam
+  for (const loc of localOrders || []) {
+    if (!loc || !loc.id) continue;
+    const key = String(loc.id);
+    const inc = map.get(key) || (loc.orderNumber ? map.get(String(loc.orderNumber).replace('#', '')) : null);
+
+    if (!inc) {
+      // Pedido novo em memoria que o CDN do Storage ainda nao propagou: PRESERVA!
+      map.set(key, loc);
+    } else {
+      const locRank = STATUS_HIERARCHY[loc.status] || 0;
+      const incRank = STATUS_HIERARCHY[inc.status] || 0;
+
+      // Preserva sempre o status mais avancado (NUNCA regride de concluido para recebido ou preparando para recebido)
+      let finalStatus = inc.status;
+      if (loc.status === 'cancelado' || inc.status === 'cancelado') {
+        finalStatus = 'cancelado';
+      } else if (locRank > incRank) {
+        finalStatus = loc.status;
+      }
+
+      const merged = {
+        ...inc,
+        ...loc,
+        status: finalStatus,
+        dispatchStatus: loc.dispatchStatus || inc.dispatchStatus,
+        assignedDriverName: loc.assignedDriverName || inc.assignedDriverName,
+        driverName: loc.driverName || inc.driverName,
+        deliveryPin: loc.deliveryPin || inc.deliveryPin,
+        trackingToken: loc.trackingToken || inc.trackingToken,
+      };
+      map.set(key, merged);
+    }
+  }
+
+  // Remove chaves de orderNumber duplicadas e retorna lista de pedidos unicos
+  const uniqueList: any[] = [];
+  const seenIds = new Set<string>();
+  for (const item of map.values()) {
+    if (item && item.id && !seenIds.has(String(item.id))) {
+      seenIds.add(String(item.id));
+      uniqueList.push(item);
+    }
+  }
+
+  return uniqueList.sort((a, b) => {
+    const tA = new Date(a.createdAtISO || a.createdAt || 0).getTime() || 0;
+    const tB = new Date(b.createdAtISO || b.createdAt || 0).getTime() || 0;
+    return tB - tA;
+  });
+}
+
+async function fetchCurrentOrders(targetStoreId?: string | null): Promise<any[]> {
+  const storeId = normalizeStoreId(targetStoreId);
+  const cacheMap = gOrders.__novaesweb_orders_by_store__ || {};
+  const timeMap = gOrders.__novaesweb_orders_by_store_updated_at__ || {};
+  const localList = Array.isArray(cacheMap[storeId]) ? cacheMap[storeId] : (storeId === DEFAULT_STORE_ID && Array.isArray(gOrders.__novaesweb_orders__) ? gOrders.__novaesweb_orders__ : []);
+
+  // Se houve gravacao recente local (ultimos 30 segundos), mantem a versao local fresca
+  if (localList.length > 0 && timeMap[storeId] && Date.now() - timeMap[storeId] < 30000) {
+    return localList;
+  }
+
+  const filePath = getOrdersStoragePath(storeId);
+  try {
+    const { data: fileData, error } = await supabaseAdmin.storage
+      .from('novaesweb_store')
+      .download(filePath);
+    if (!error && fileData) {
+      const text = await fileData.text();
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) {
+        // FUSAO INTELIGENTE: Mescla com o estado local preservando pedidos novos e status avancados
+        const merged = mergeOrdersLists(localList, parsed);
+        cacheMap[storeId] = merged;
+        timeMap[storeId] = Date.now();
+        if (storeId === DEFAULT_STORE_ID) {
+          gOrders.__novaesweb_orders__ = merged;
+          gOrders.__novaesweb_orders_updated_at__ = Date.now();
+        }
+        return merged;
+      }
+    }
+  } catch {}
+
+  return localList;
+}
+
+async function persistOrders(ordersList: any[], targetStoreId?: string | null): Promise<void> {
+  const storeId = normalizeStoreId(targetStoreId);
+  const cacheMap = gOrders.__novaesweb_orders_by_store__ || {};
+  const timeMap = gOrders.__novaesweb_orders_by_store_updated_at__ || {};
+
+  const nowMs = Date.now();
+  cacheMap[storeId] = ordersList;
+  timeMap[storeId] = nowMs;
+
+  // Sincroniza em todos os caches globais da memória
+  gOrders.__novaesweb_orders__ = ordersList;
+  gOrders.__novaesweb_orders_updated_at__ = nowMs;
+  const gAll = globalThis as any;
+  gAll.__novaesweb_orders__ = ordersList;
+  gAll.__novaesweb_orders_updated_at__ = nowMs;
+  if (!gAll.__novaesweb_orders_by_store__) gAll.__novaesweb_orders_by_store__ = {};
+  if (!gAll.__novaesweb_orders_by_store_updated_at__) gAll.__novaesweb_orders_by_store_updated_at__ = {};
+  gAll.__novaesweb_orders_by_store__[storeId] = ordersList;
+  gAll.__novaesweb_orders_by_store_updated_at__[storeId] = nowMs;
+
+  if (storeId === DEFAULT_STORE_ID) {
+    gOrders.__novaesweb_orders__ = ordersList;
+    gOrders.__novaesweb_orders_updated_at__ = Date.now();
+  }
+
+  const filePath = getOrdersStoragePath(storeId);
   try {
     const payload = JSON.stringify(ordersList);
     await supabaseAdmin.storage
       .from('novaesweb_store')
-      .upload('orders.json', payload, { upsert: true, contentType: 'application/json' });
+      .upload(filePath, payload, { upsert: true, contentType: 'application/json' });
+
+    // Se for Bella Pizza, também mantém sincronizado o arquivo raiz orders.json
+    if (storeId === DEFAULT_STORE_ID && filePath !== 'orders.json') {
+      await supabaseAdmin.storage
+        .from('novaesweb_store')
+        .upload('orders.json', payload, { upsert: true, contentType: 'application/json' });
+    }
   } catch (e) {
-    console.error('Erro ao persistir no Supabase Storage:', e);
+    console.error(`Erro ao persistir ${filePath} no Supabase Storage:`, e);
+  }
+}
+
+async function cleanLogisticsForOrder(
+  orderId: string,
+  mode: 'cancel_dispatch' | 'cancel_order' | 'delete_order'
+): Promise<void> {
+  try {
+    const { data: fileData } = await supabaseAdmin.storage
+      .from('novaesweb_store')
+      .download('logistics.json');
+    if (!fileData) return;
+
+    const state = JSON.parse(await fileData.text());
+    let changed = false;
+    const targetStr = String(orderId);
+
+    if (Array.isArray(state.offers)) {
+      const beforeLen = state.offers.length;
+      state.offers = state.offers.filter((off: any) => {
+        const directMatch = String(off.orderId) === targetStr || String(off.orderNumber).replace('#', '') === targetStr;
+        const nestedMatch =
+          Array.isArray(off.orders) &&
+          off.orders.some(
+            (item: any) =>
+              String(item.id || item.orderId) === targetStr ||
+              String(item.orderNumber).replace('#', '') === targetStr
+          );
+        const idsMatch =
+          Array.isArray(off.orderIds) && off.orderIds.some((id: any) => String(id) === targetStr);
+        return !(directMatch || nestedMatch || idsMatch);
+      });
+      if (state.offers.length !== beforeLen) {
+        changed = true;
+      }
+    }
+
+    if (Array.isArray(state.assignments)) {
+      if (mode === 'delete_order') {
+        const beforeLen = state.assignments.length;
+        state.assignments = state.assignments.filter(
+          (asg: any) =>
+            String(asg.orderId) !== targetStr &&
+            String(asg.orderNumber).replace('#', '') !== targetStr
+        );
+        if (state.assignments.length !== beforeLen) changed = true;
+      } else if (mode === 'cancel_order' || mode === 'cancel_dispatch') {
+        state.assignments.forEach((asg: any) => {
+          if (
+            (String(asg.orderId) === targetStr ||
+              String(asg.orderNumber).replace('#', '') === targetStr) &&
+            asg.status !== 'entregue' &&
+            asg.status !== 'delivered'
+          ) {
+            asg.status = 'canceled_by_store';
+            changed = true;
+          }
+        });
+      }
+    }
+
+    if (changed) {
+      await supabaseAdmin.storage
+        .from('novaesweb_store')
+        .upload('logistics.json', JSON.stringify(state), {
+          upsert: true,
+          contentType: 'application/json',
+        });
+    }
+  } catch (e) {
+    console.warn('Erro ao sincronizar logistics.json após atualização do pedido:', e);
   }
 }
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-store-id',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-store-id, x-admin-token',
 };
 
 export async function OPTIONS() {
@@ -102,10 +286,56 @@ export async function OPTIONS() {
 
 export async function GET(req: NextRequest) {
   try {
-    const orders = await fetchCurrentOrders();
-    return NextResponse.json({ success: true, orders });
+    const token = req.nextUrl.searchParams.get('token')?.trim();
+    const adminCheck = verifyAdminRequest(req);
+    const isAdmin = adminCheck.valid;
+    const requestedStore = normalizeStoreId(
+      req.headers.get('x-store-id') ||
+      req.nextUrl.searchParams.get('storeId') ||
+      adminCheck.storeId ||
+      process.env.NEXT_PUBLIC_STORE_ID
+    );
+    const orders = await fetchCurrentOrders(requestedStore);
+
+    // 1. Consulta pública individual por token de acompanhamento (/pedido/[token])
+    if (token) {
+      const found = orders.find(
+        (o: any) =>
+          o.trackingToken === token ||
+          o.id === token ||
+          (isAdmin && String(o.orderNumber) === token.replace('#', ''))
+      );
+      if (!found) {
+        return NextResponse.json(
+          { success: false, error: 'Pedido não encontrado', orders: [] },
+          { status: 404, headers: corsHeaders }
+        );
+      }
+      return NextResponse.json(
+        { success: true, order: found, orders: [found] },
+        { headers: corsHeaders }
+      );
+    }
+
+    // 2. Listagem completa de pedidos: exige autenticação de Admin (Painel do Lojista)
+    if (!isAdmin) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Não autorizado. Desbloqueie o painel do lojista com o PIN.',
+          orders: [],
+        },
+        { status: 401, headers: corsHeaders }
+      );
+    }
+
+    const storeOrders = orders.filter((o: any) => isSameStore(o.storeId, requestedStore));
+    return NextResponse.json({ success: true, orders: storeOrders }, { headers: corsHeaders });
   } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message, orders: liveOrders }, { status: 500 });
+    return NextResponse.json(
+      { success: false, error: err.message, orders: [] },
+      { status: 500, headers: corsHeaders }
+    );
   }
 }
 
@@ -114,96 +344,137 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { customer, address, items, subtotal, deliveryFee, total, payment } = body;
 
-    // Respeita os dados que o cliente ja viu na tela de confirmacao (quando validos)
-    const providedPin = typeof body.deliveryPin === 'string' && /^\d{4}$/.test(body.deliveryPin) ? body.deliveryPin : null;
-    const providedNumber = Number.isInteger(Number(body.orderNumber)) && Number(body.orderNumber) >= 1000 && Number(body.orderNumber) <= 999999
-      ? Number(body.orderNumber)
-      : null;
-    const providedToken = typeof body.trackingToken === 'string' && body.trackingToken.length >= 8 && body.trackingToken.length <= 80
-      ? body.trackingToken
-      : null;
+    if (!customer?.name || !customer?.phone || !address?.street || !Array.isArray(items) || items.length === 0) {
+      return NextResponse.json(
+        { success: false, error: 'Dados obrigatórios do pedido ausentes.' },
+        { status: 400, headers: corsHeaders }
+      );
+    }
 
-    const trackingToken = providedToken || crypto.randomUUID();
+    const providedPin =
+      typeof body.deliveryPin === 'string' && /^\d{4}$/.test(body.deliveryPin)
+        ? body.deliveryPin
+        : null;
+    const providedNumber =
+      Number.isInteger(Number(body.orderNumber)) &&
+      Number(body.orderNumber) >= 1000 &&
+      Number(body.orderNumber) <= 999999
+        ? Number(body.orderNumber)
+        : null;
+    const providedToken =
+      typeof body.trackingToken === 'string' &&
+      body.trackingToken.length >= 8 &&
+      body.trackingToken.length <= 80
+        ? body.trackingToken
+        : null;
+
+    const trackingToken = providedToken || `tk-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
     const pin = providedPin || String(Math.floor(1000 + Math.random() * 9000));
     const pinHash = crypto.createHash('sha256').update(pin).digest('hex');
-    const storeId = process.env.NEXT_PUBLIC_DEFAULT_STORE_ID || '11111111-1111-1111-1111-111111111111';
+    const storeId = normalizeStoreId(
+      body.storeId ||
+      req.headers.get('x-store-id') ||
+      process.env.NEXT_PUBLIC_STORE_ID ||
+      process.env.NEXT_PUBLIC_DEFAULT_STORE_ID
+    );
     const orderNumber = providedNumber || Math.floor(1000 + Math.random() * 9000);
 
-    const itemsSummary = items.map((i: any) => {
-      if (i.type === 'pizza') {
-        const flvs = i.flavors ? i.flavors.map((f: any) => f.name).join(' + ') : 'Pizza Personalizada';
-        return `${i.quantity}x Pizza ${i.size?.name || ''} (${flvs})`;
-      }
-      return `${i.quantity}x ${i.name}`;
-    }).join(' • ');
+    const itemsSummary = items
+      .map((i: any) => {
+        if (i.type === 'pizza') {
+          const flvs = i.flavors
+            ? i.flavors.map((f: any) => f.name).join(' + ')
+            : 'Pizza Personalizada';
+          return `${i.quantity}x Pizza ${i.size?.name || ''} (${flvs})`;
+        }
+        return `${i.quantity}x ${i.name}`;
+      })
+      .join(' • ');
 
-    // Itens detalhados para o painel do lojista (sem alterar o itemsSummary usado pelo despacho)
     const itemsDetail = items.map((i: any) => ({
       type: i.type,
-      name: i.type === 'pizza' ? 'Pizza' : (i.name || 'Item'),
+      name: i.type === 'pizza' ? 'Pizza' : i.name || 'Item',
       quantity: Number(i.quantity) || 1,
       size: i.size?.name || null,
       flavors: Array.isArray(i.flavors) ? i.flavors.map((f: any) => f.name) : [],
       crust: i.crust?.name || null,
       unitPrice: Number(i.unitPrice) || 0,
-      totalPrice: Number(i.totalPrice) || 0
+      totalPrice: Number(i.totalPrice) || 0,
     }));
 
     const newOrderObj = {
       id: `ord-${Date.now()}-${orderNumber}`,
       orderNumber,
+      storeId,
       customerName: customer.name,
       phone: customer.phone,
       address: `${address.street}, ${address.number} ${address.complement ? '- ' + address.complement : ''}`,
-      region: address.region || 'Bairro Atendido',
+      region: address.neighborhood || address.region || 'Centro',
+      city: address.city || 'Canoas',
+      state: address.state || 'RS',
+      cep: address.cep || '',
       itemsSummary,
-      total,
+      total: Number(total) || 0,
       status: 'recebido',
-      paymentMethod: payment.method,
-      paymentStatus: payment.method === 'pix_manual' ? 'aguardando_conferencia' : 'pendente',
+      dispatchStatus: 'disponivel',
+      paymentMethod: payment?.method || 'pix_manual',
+      paymentStatus:
+        payment?.method === 'pix_manual' ? 'aguardando_conferencia' : 'pendente',
       deliveryPin: pin,
       trackingToken,
       driverName: null,
-      createdAt: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
-      // Detalhes completos do pedido
+      assignedDriverName: null,
+      createdAt: new Date().toLocaleTimeString('pt-BR', {
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
       createdAtISO: new Date().toISOString(),
       notes: typeof body.notes === 'string' ? body.notes.slice(0, 500) : '',
       subtotal: Number(subtotal) || 0,
       deliveryFee: Number(deliveryFee) || 0,
-      changeFor: payment.changeFor ?? null,
+      changeFor: payment?.changeFor ?? null,
       addressDetail: {
         street: address.street || '',
         number: address.number || '',
         complement: address.complement || '',
         reference: address.reference || '',
-        region: address.region || ''
+        region: address.neighborhood || address.region || '',
+        neighborhood: address.neighborhood || address.region || '',
+        city: address.city || 'Canoas',
+        state: address.state || 'RS',
+        cep: address.cep || '',
       },
-      items: itemsDetail
+      items: itemsDetail,
     };
 
+    const current = await fetchCurrentOrders(storeId);
 
-    // Atualiza pedidos existentes e grava no Supabase Storage
-    const current = await fetchCurrentOrders();
-
-    // Idempotencia: se o mesmo pedido (numero + telefone) ja existe, nao duplica
-    const duplicate = current.find(o => Number(o.orderNumber) === orderNumber && String(o.phone) === String(customer.phone));
+    // Idempotência: se o mesmo pedido (número + telefone) já existe, não duplica
+    const duplicate = current.find(
+      (o) =>
+        Number(o.orderNumber) === orderNumber &&
+        String(o.phone) === String(customer.phone)
+    );
     if (duplicate) {
-      return NextResponse.json({
-        success: true,
-        orderId: duplicate.id,
-        orderNumber: duplicate.orderNumber,
-        trackingToken: duplicate.trackingToken,
-        deliveryPin: duplicate.deliveryPin,
-        status: duplicate.status,
-        duplicate: true,
-        createdAt: new Date().toISOString()
-      });
+      return NextResponse.json(
+        {
+          success: true,
+          orderId: duplicate.id,
+          orderNumber: duplicate.orderNumber,
+          trackingToken: duplicate.trackingToken,
+          deliveryPin: duplicate.deliveryPin,
+          status: duplicate.status,
+          duplicate: true,
+          createdAt: new Date().toISOString(),
+        },
+        { headers: corsHeaders }
+      );
     }
 
-    const updated = [newOrderObj, ...current.filter(o => o.id !== newOrderObj.id)];
-    await persistOrders(updated);
+    const updated = [newOrderObj, ...current.filter((o) => o.id !== newOrderObj.id)];
+    await persistOrders(updated, storeId);
 
-    // Tentar persistir no PostgreSQL do Supabase se as tabelas existirem
+    // Tenta persistir nas tabelas relacionais se existirem
     try {
       const { data: customerData } = await supabaseAdmin
         .from('customers')
@@ -225,7 +496,7 @@ export async function POST(req: NextRequest) {
             subtotal,
             delivery_fee: deliveryFee,
             total,
-            customer_notes: body.notes || null
+            customer_notes: body.notes || null,
           })
           .select()
           .single();
@@ -233,108 +504,160 @@ export async function POST(req: NextRequest) {
         if (orderData) {
           await supabaseAdmin
             .from('delivery_confirmation_secrets')
-            .insert({ store_id: storeId, order_id: orderData.id, pin_hash: pinHash, max_attempts: 5 });
-
-          await supabaseAdmin
-            .from('payments')
             .insert({
               store_id: storeId,
               order_id: orderData.id,
-              method: payment.method,
-              status: payment.method === 'pix_manual' ? 'aguardando_conferencia' : 'pendente',
-              amount: total,
-              change_for: payment.changeFor || null
+              pin_hash: pinHash,
+              max_attempts: 5,
             });
+
+          await supabaseAdmin.from('payments').insert({
+            store_id: storeId,
+            order_id: orderData.id,
+            method: payment?.method || 'pix_manual',
+            status:
+              payment?.method === 'pix_manual' ? 'aguardando_conferencia' : 'pendente',
+            amount: total,
+            change_for: payment?.changeFor || null,
+          });
         }
       }
-    } catch (dbErr) {
+    } catch {
       // Fallback garantido pelo Supabase Storage
     }
 
-    return NextResponse.json({
-      success: true,
-      orderId: newOrderObj.id,
-      orderNumber,
-      trackingToken,
-      deliveryPin: pin,
-      status: 'recebido',
-      createdAt: new Date().toISOString()
-    });
+    return NextResponse.json(
+      {
+        success: true,
+        orderId: newOrderObj.id,
+        orderNumber,
+        trackingToken,
+        deliveryPin: pin,
+        status: 'recebido',
+        createdAt: new Date().toISOString(),
+      },
+      { headers: corsHeaders }
+    );
   } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 400 });
+    return NextResponse.json(
+      { success: false, error: err.message },
+      { status: 400, headers: corsHeaders }
+    );
   }
 }
 
 export async function PATCH(req: NextRequest) {
   try {
-    const { 
-      orderId, 
-      status, 
-      paymentStatus, 
-      driverName, 
-      dispatchStatus, 
-      assignedDriverName, 
+    if (!verifyAdminRequest(req).valid) {
+      return NextResponse.json(
+        { success: false, error: 'Não autorizado. Faça login no painel do lojista.' },
+        { status: 401, headers: corsHeaders }
+      );
+    }
+
+    const {
+      orderId: rawOrderId,
+      id: rawId,
+      status,
+      paymentStatus,
+      driverName,
+      dispatchStatus,
+      assignedDriverName,
       offerGroupId,
       cancellationReason,
-      canceledAt
+      canceledAt,
     } = await req.json();
+    const orderId = rawOrderId || rawId;
 
-    const current = await fetchCurrentOrders();
-    const orderIndex = current.findIndex(o => o.id === orderId || String(o.orderNumber) === String(orderId));
+    const patchStoreId = normalizeStoreId(
+      req.headers.get('x-store-id') ||
+      req.nextUrl.searchParams.get('storeId') ||
+      process.env.NEXT_PUBLIC_STORE_ID
+    );
+    let current = await fetchCurrentOrders(patchStoreId);
+    let orderIndex = current.findIndex(
+      (o) => o.id === orderId || String(o.orderNumber).replace('#', '') === String(orderId).replace('#', '')
+    );
+
+    // Se nao achou no arquivo da loja especifica, busca no arquivo raiz orders.json
+    if (orderIndex === -1 && patchStoreId !== DEFAULT_STORE_ID) {
+      const rootOrders = await fetchCurrentOrders(DEFAULT_STORE_ID);
+      const rootIdx = rootOrders.findIndex(
+        (o) => o.id === orderId || String(o.orderNumber).replace('#', '') === String(orderId).replace('#', '')
+      );
+      if (rootIdx !== -1) {
+        current = rootOrders;
+        orderIndex = rootIdx;
+      }
+    }
 
     if (orderIndex !== -1) {
       if (status) current[orderIndex].status = status;
       if (paymentStatus) current[orderIndex].paymentStatus = paymentStatus;
       if (driverName !== undefined) current[orderIndex].driverName = driverName;
-      if (dispatchStatus !== undefined) current[orderIndex].dispatchStatus = dispatchStatus;
-      if (assignedDriverName !== undefined) current[orderIndex].assignedDriverName = assignedDriverName;
+      if (dispatchStatus !== undefined)
+        current[orderIndex].dispatchStatus = dispatchStatus;
+      if (assignedDriverName !== undefined)
+        current[orderIndex].assignedDriverName = assignedDriverName;
       if (offerGroupId !== undefined) current[orderIndex].offerGroupId = offerGroupId;
-      if (cancellationReason !== undefined) current[orderIndex].cancellationReason = cancellationReason;
+      if (cancellationReason !== undefined)
+        current[orderIndex].cancellationReason = cancellationReason;
       if (canceledAt !== undefined) current[orderIndex].canceledAt = canceledAt;
-      await persistOrders(current);
+      await persistOrders(current, patchStoreId);
     }
 
-    // Tentar atualizar no PostgreSQL do Supabase
-    try {
-      if (status) {
-        await supabaseAdmin
-          .from('orders')
-          .update({ status })
-          .eq('id', orderId);
-      }
-      if (paymentStatus) {
-        await supabaseAdmin
-          .from('payments')
-          .update({ status: paymentStatus })
-          .eq('order_id', orderId);
-      }
-    } catch (e) {
-      // Fallback garantido pelo Supabase Storage
+    // Sincroniza cancelamentos de pedido ou de despacho no logistics.json no servidor
+    if (status === 'cancelado') {
+      await cleanLogisticsForOrder(orderId, 'cancel_order');
+    } else if (dispatchStatus === 'disponivel') {
+      await cleanLogisticsForOrder(orderId, 'cancel_dispatch');
     }
 
-    return NextResponse.json({ success: true, message: 'Pedido atualizado com sucesso' });
+    return NextResponse.json(
+      { success: true, message: 'Pedido atualizado com sucesso' },
+      { headers: corsHeaders }
+    );
   } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+    return NextResponse.json(
+      { success: false, error: err.message },
+      { status: 500, headers: corsHeaders }
+    );
   }
 }
 
 export async function DELETE(req: NextRequest) {
   try {
-    const { orderId } = await req.json();
+    if (!verifyAdminRequest(req).valid) {
+      return NextResponse.json(
+        { success: false, error: 'Não autorizado. Faça login no painel do lojista.' },
+        { status: 401, headers: corsHeaders }
+      );
+    }
+
+    const body = await req.json().catch(() => ({}));
+    const orderId = body?.orderId || req.nextUrl.searchParams.get('id');
+    if (!orderId) {
+      return NextResponse.json(
+        { success: false, error: 'orderId é obrigatório' },
+        { status: 400, headers: corsHeaders }
+      );
+    }
+
     const current = await fetchCurrentOrders();
-    const filtered = current.filter(o => o.id !== orderId && String(o.orderNumber) !== String(orderId));
+    const filtered = current.filter(
+      (o) => o.id !== orderId && String(o.orderNumber) !== String(orderId)
+    );
     await persistOrders(filtered);
+    await cleanLogisticsForOrder(orderId, 'delete_order');
 
-    try {
-      await supabaseAdmin
-        .from('orders')
-        .delete()
-        .eq('id', orderId);
-    } catch (e) {}
-
-    return NextResponse.json({ success: true, message: 'Pedido removido com sucesso' });
+    return NextResponse.json(
+      { success: true, message: 'Pedido removido com sucesso' },
+      { headers: corsHeaders }
+    );
   } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+    return NextResponse.json(
+      { success: false, error: err.message },
+      { status: 500, headers: corsHeaders }
+    );
   }
 }
-

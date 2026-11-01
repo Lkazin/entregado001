@@ -34,10 +34,16 @@ export default function CartCheckoutDrawer({
   onOrderSuccess
 }: CartCheckoutDrawerProps) {
   const [step, setStep] = useState<'cart' | 'checkout'>('cart');
-  
+
   // Dados do Cliente e Endereço
   const [customerName, setCustomerName] = useState('');
   const [customerPhone, setCustomerPhone] = useState('');
+  const [cep, setCep] = useState('');
+  const [isCepLoading, setIsCepLoading] = useState(false);
+  const [cepNeighborhood, setCepNeighborhood] = useState('');
+  const [cepCity, setCepCity] = useState('');
+  const [cepState, setCepState] = useState('');
+  const [cepError, setCepError] = useState<string | null>(null);
   const [street, setStreet] = useState('');
   const [number, setNumber] = useState('');
   const [complement, setComplement] = useState('');
@@ -45,6 +51,49 @@ export default function CartCheckoutDrawer({
   const [selectedRegion, setSelectedRegion] = useState<DeliveryRegionMock | null>(DELIVERY_REGIONS[0]);
   const [isOutsideArea, setIsOutsideArea] = useState(false);
   const [notes, setNotes] = useState('');
+
+  // Busca automática de endereço por CEP (ViaCEP)
+  const handleCepLookup = async (cepInput: string) => {
+    setCep(cepInput);
+    setCepError(null);
+    const clean = cepInput.replace(/\D/g, '');
+    if (clean.length === 8) {
+      setIsCepLoading(true);
+      try {
+        const res = await fetch(`/api/v1/logistics/viacep-lookup?cep=${clean}`);
+        if (res.ok) {
+          const data = await res.json().catch(() => null);
+          if (data && data.success) {
+            if (data.street) {
+              setStreet(data.street);
+            }
+            if (data.neighborhood) setCepNeighborhood(data.neighborhood);
+            if (data.city) setCepCity(data.city);
+            if (data.state) setCepState(data.state);
+
+            if (data.neighborhood) {
+              const match = DELIVERY_REGIONS.find(r =>
+                r.name.toLowerCase().includes(data.neighborhood.toLowerCase()) ||
+                data.neighborhood.toLowerCase().includes(r.name.toLowerCase())
+              );
+              if (match) {
+                setSelectedRegion(match);
+                setIsOutsideArea(false);
+              }
+            }
+          } else {
+            setCepError('CEP não localizado no ViaCEP. Você pode preencher a rua manualmente.');
+          }
+        } else {
+          setCepError('CEP não localizado. Preencha o endereço manualmente.');
+        }
+      } catch (e) {
+        setCepError('Falha ao consultar o CEP. Preencha o endereço manualmente.');
+      } finally {
+        setIsCepLoading(false);
+      }
+    }
+  };
 
   // Forma de Pagamento
   const [paymentMethod, setPaymentMethod] = useState<'pix_manual' | 'cash_delivery' | 'card_terminal'>('pix_manual');
@@ -110,9 +159,9 @@ export default function CartCheckoutDrawer({
     setIsSubmitting(true);
 
     try {
-      // Simulação / Criação do pedido com token seguro
       const trackingToken = `tk-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
       const orderNumber = Math.floor(1000 + Math.random() * 9000);
+      const effectiveRegion = cepNeighborhood || selectedRegion.name;
 
       const orderPayload = {
         orderNumber,
@@ -123,7 +172,11 @@ export default function CartCheckoutDrawer({
           number,
           complement,
           reference,
-          region: selectedRegion.name,
+          region: effectiveRegion,
+          neighborhood: cepNeighborhood || selectedRegion.name,
+          city: cepCity || 'Canoas',
+          state: cepState || 'RS',
+          cep: cep.replace(/\D/g, ''),
           fee: deliveryFee
         },
         items,
@@ -135,12 +188,10 @@ export default function CartCheckoutDrawer({
           status: paymentMethod === 'pix_manual' ? 'aguardando_conferencia' : 'pendente',
           changeFor: needsChange ? parseFloat(changeFor.replace(',', '.')) : null
         },
-        deliveryPin: String(Math.floor(1000 + Math.random() * 9000)), // PIN de 4 dígitos para teste
+        deliveryPin: String(Math.floor(1000 + Math.random() * 9000)),
         createdAt: new Date().toISOString()
       };
 
-      // Envia o pedido ao servidor para que ele chegue ao painel do lojista (qualquer dispositivo).
-      // Se falhar, o pedido continua salvo localmente como reserva (comportamento anterior).
       let serverOrderId: string | null = null;
       try {
         const res = await fetch('/api/orders', {
@@ -148,7 +199,7 @@ export default function CartCheckoutDrawer({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ...orderPayload, notes })
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => null);
         if (res.ok && data?.success && data.orderId) {
           serverOrderId = String(data.orderId);
         }
@@ -156,7 +207,6 @@ export default function CartCheckoutDrawer({
         console.warn('Nao foi possivel enviar o pedido ao servidor, mantendo copia local:', e);
       }
 
-      // Salvar em localStorage para sincronização imediata com o painel do lojista
       if (typeof window !== 'undefined') {
         try {
           const cached = localStorage.getItem('novaesweb_orders');
@@ -167,26 +217,38 @@ export default function CartCheckoutDrawer({
             customerName: customerName,
             phone: customerPhone,
             address: `${street}, ${number} ${complement ? '- ' + complement : ''}`,
-            region: selectedRegion.name,
+            region: effectiveRegion,
+            city: cepCity || 'Canoas',
+            state: cepState || 'RS',
+            cep: cep.replace(/\D/g, ''),
             itemsSummary: items.map((i: any) => `${i.quantity}x ${i.name || 'Pizza'}`).join(' • '),
             total,
             status: 'recebido' as const,
             paymentMethod: paymentMethod,
             paymentStatus: paymentMethod === 'pix_manual' ? 'aguardando_conferencia' : 'pendente',
             deliveryPin: orderPayload.deliveryPin,
-            trackingToken: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
+            trackingToken: orderPayload.trackingToken,
             driverName: null,
             createdAt: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
             notes,
             subtotal,
             deliveryFee,
             changeFor: orderPayload.payment.changeFor,
-            addressDetail: { street, number, complement, reference, region: selectedRegion.name }
+            addressDetail: {
+              street,
+              number,
+              complement,
+              reference,
+              region: effectiveRegion,
+              neighborhood: cepNeighborhood || selectedRegion.name,
+              city: cepCity || 'Canoas',
+              state: cepState || 'RS',
+              cep: cep.replace(/\D/g, '')
+            }
           };
           localStorage.setItem('novaesweb_orders', JSON.stringify([newOrder, ...current.filter((o: any) => o.id !== newOrder.id)]));
         } catch (e) {}
       }
-
 
       onOrderSuccess(orderPayload);
     } catch (err: any) {
@@ -199,14 +261,14 @@ export default function CartCheckoutDrawer({
   return (
     <div className="fixed inset-0 z-50 overflow-hidden">
       {/* Backdrop */}
-      <div 
-        className="absolute inset-0 bg-black/80 backdrop-blur-sm transition-opacity" 
+      <div
+        className="absolute inset-0 bg-black/80 backdrop-blur-sm transition-opacity"
         onClick={onClose}
       />
 
       <div className="fixed inset-y-0 right-0 max-w-full flex pl-10">
         <div className="w-screen max-w-md bg-zinc-950 border-l border-zinc-800 text-white flex flex-col shadow-2xl">
-          
+
           {/* Header */}
           <div className="p-5 border-b border-zinc-800 flex items-center justify-between bg-zinc-900/60">
             <h2 className="text-lg font-bold text-white flex items-center gap-2">
@@ -233,9 +295,8 @@ export default function CartCheckoutDrawer({
 
           {/* Conteúdo Dinâmico */}
           <div className="flex-1 overflow-y-auto p-5 space-y-6">
-            
+
             {step === 'cart' ? (
-              /* ETAPA 1: LISTAGEM DE ITENS */
               items.length === 0 ? (
                 <div className="text-center py-16 text-zinc-500">
                   <p className="text-sm">Seu carrinho está vazio.</p>
@@ -274,14 +335,14 @@ export default function CartCheckoutDrawer({
 
                       <div className="mt-3 pt-3 border-t border-zinc-800/60 flex items-center justify-between">
                         <div className="flex items-center gap-2 bg-zinc-950 px-2.5 py-1 rounded-md border border-zinc-800 text-xs">
-                          <button 
+                          <button
                             onClick={() => onUpdateQty(item.id, -1)}
                             className="text-zinc-400 hover:text-white font-bold px-1"
                           >
                             -
                           </button>
                           <span className="font-bold text-white">{item.quantity}</span>
-                          <button 
+                          <button
                             onClick={() => onUpdateQty(item.id, 1)}
                             className="text-zinc-400 hover:text-white font-bold px-1"
                           >
@@ -298,9 +359,8 @@ export default function CartCheckoutDrawer({
                 </div>
               )
             ) : (
-              /* ETAPA 2: FORMULÁRIO DE CHECKOUT */
               <form id="checkout-form" onSubmit={handleCheckoutSubmit} className="space-y-5 text-xs">
-                
+
                 {/* Dados Pessoais */}
                 <div className="space-y-3">
                   <h3 className="font-bold text-zinc-200 text-sm flex items-center gap-2">
@@ -337,7 +397,7 @@ export default function CartCheckoutDrawer({
                     <span className="w-5 h-5 rounded-full bg-red-600 text-white flex items-center justify-center text-xs">2</span>
                     Endereço de Entrega
                   </h3>
-                  
+
                   {/* Seletor de Região/Bairro atendido */}
                   <div>
                     <label className="text-zinc-400 block mb-1">Bairro / Região</label>
@@ -369,6 +429,39 @@ export default function CartCheckoutDrawer({
                       ⚠️ Não realizamos entregas na sua região no momento.
                     </div>
                   )}
+
+                  {/* Busca Rápida por CEP (ViaCEP) */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-zinc-400 block">CEP (Preenchimento Automático)</label>
+                      {isCepLoading && (
+                        <span className="text-[10px] text-amber-400 font-bold flex items-center gap-1">
+                          Consultando ViaCEP...
+                        </span>
+                      )}
+                    </div>
+                    <div className="relative">
+                      <input
+                        type="text"
+                        maxLength={9}
+                        value={cep}
+                        onChange={(e) => handleCepLookup(e.target.value)}
+                        placeholder="Ex: 01001-000"
+                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-red-500 font-mono"
+                      />
+                    </div>
+                    {cepCity && (
+                      <p className="text-[11px] text-emerald-400 mt-1 flex items-center gap-1">
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>
+                          Localizado: {cepNeighborhood ? `${cepNeighborhood}, ` : ''}{cepCity}/{cepState}
+                        </span>
+                      </p>
+                    )}
+                    {cepError && (
+                      <p className="text-[11px] text-amber-400 mt-1">{cepError}</p>
+                    )}
+                  </div>
 
                   <div className="grid grid-cols-3 gap-2">
                     <div className="col-span-2">
@@ -430,11 +523,10 @@ export default function CartCheckoutDrawer({
                     <button
                       type="button"
                       onClick={() => setPaymentMethod('pix_manual')}
-                      className={`p-3 rounded-xl border text-center transition ${
-                        paymentMethod === 'pix_manual'
+                      className={`p-3 rounded-xl border text-center transition ${paymentMethod === 'pix_manual'
                           ? 'bg-red-950/40 border-red-600 text-white'
                           : 'bg-zinc-900/40 border-zinc-800 text-zinc-400 hover:text-white'
-                      }`}
+                        }`}
                     >
                       <QrCode className="w-5 h-5 mx-auto mb-1 text-emerald-400" />
                       <span className="font-semibold block text-[11px]">Pix Manual</span>
@@ -443,11 +535,10 @@ export default function CartCheckoutDrawer({
                     <button
                       type="button"
                       onClick={() => setPaymentMethod('cash_delivery')}
-                      className={`p-3 rounded-xl border text-center transition ${
-                        paymentMethod === 'cash_delivery'
+                      className={`p-3 rounded-xl border text-center transition ${paymentMethod === 'cash_delivery'
                           ? 'bg-red-950/40 border-red-600 text-white'
                           : 'bg-zinc-900/40 border-zinc-800 text-zinc-400 hover:text-white'
-                      }`}
+                        }`}
                     >
                       <Banknote className="w-5 h-5 mx-auto mb-1 text-amber-400" />
                       <span className="font-semibold block text-[11px]">Dinheiro</span>
@@ -456,18 +547,16 @@ export default function CartCheckoutDrawer({
                     <button
                       type="button"
                       onClick={() => setPaymentMethod('card_terminal')}
-                      className={`p-3 rounded-xl border text-center transition ${
-                        paymentMethod === 'card_terminal'
+                      className={`p-3 rounded-xl border text-center transition ${paymentMethod === 'card_terminal'
                           ? 'bg-red-950/40 border-red-600 text-white'
                           : 'bg-zinc-900/40 border-zinc-800 text-zinc-400 hover:text-white'
-                      }`}
+                        }`}
                     >
                       <CreditCard className="w-5 h-5 mx-auto mb-1 text-blue-400" />
                       <span className="font-semibold block text-[11px]">Cartão</span>
                     </button>
                   </div>
 
-                  {/* Detalhes Pix Manual */}
                   {paymentMethod === 'pix_manual' && (
                     <div className="p-3 bg-zinc-900 rounded-xl border border-zinc-800 space-y-2">
                       <p className="font-semibold text-zinc-200">Chave Pix CNPJ:</p>
@@ -484,7 +573,6 @@ export default function CartCheckoutDrawer({
                     </div>
                   )}
 
-                  {/* Detalhes Dinheiro */}
                   {paymentMethod === 'cash_delivery' && (
                     <div className="p-3 bg-zinc-900 rounded-xl border border-zinc-800 space-y-2">
                       <label className="flex items-center gap-2 text-zinc-300">
@@ -511,7 +599,6 @@ export default function CartCheckoutDrawer({
                     </div>
                   )}
 
-                  {/* Detalhes Cartão na entrega */}
                   {paymentMethod === 'card_terminal' && (
                     <div className="p-3 bg-zinc-900 rounded-xl border border-zinc-800 text-[11px] text-zinc-300">
                       O entregador levará a maquininha (Débito, Crédito ou Refeição) até a sua porta.

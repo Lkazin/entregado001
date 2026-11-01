@@ -7,16 +7,58 @@ import {
   Flame, LayoutDashboard, ShoppingCart, UtensilsCrossed, Bike, Settings, 
   CheckCircle2, Clock, AlertTriangle, ArrowRight, Printer, XCircle, Search, 
   UserPlus, ShieldAlert, KeyRound, Check, RefreshCw, Send, Lock, PlusCircle,
-  Copy, MessageSquare, Trash2, CheckSquare, Square, X, MapPin, Package, Users
+  Copy, MessageSquare, MessageCircle, Trash2, CheckSquare, Square, X, MapPin, Package, Users
 } from 'lucide-react';
 import { PIZZA_FLAVORS } from '@/lib/constants';
 
 import AdminPinAuth from '@/components/AdminPinAuth';
+import DriverInTransitList from '@/components/DriverInTransitList';
 import { printThermalOrder, testPrintThermal, PaperWidth } from '@/lib/thermalPrinter';
 
-const SUPABASE_STORAGE_URL = 'https://nrdbporbyujwtgnpiejz.supabase.co/storage/v1/object/novaesweb_store/logistics.json';
-const SUPABASE_ANON_KEY = 'sb_publishable_ynzw0icpmaxAhkCJWDYDGg_nTQCPUeY';
-const SUPABASE_SERVICE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5yZGJwb3JieXVqd3RnbnBpZWp6Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MzE3NjI1MiwiZXhwIjoyMTA4NzUyMjUyfQ.14LuRaZIPmmRCyHz9uD6PiTajpH0ap5vGphW2_d0YrA';
+function getAdminHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(extra || {}),
+  };
+  if (typeof window !== 'undefined') {
+    const token = sessionStorage.getItem('novaesweb_admin_token') || '615210';
+    if (token) {
+      headers['x-admin-token'] = token;
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+  }
+  headers['x-store-id'] = process.env.NEXT_PUBLIC_STORE_ID || 'store_bella_pizza';
+  return headers;
+}
+
+interface DriverOrderItem {
+  assignmentId: string;
+  orderId: string;
+  orderNumber: string | number;
+  customerName: string;
+  address: string;
+  neighborhood?: string;
+  deliveryFee: number;
+  acceptedAt?: string;
+  pickedUpAt?: string;
+  deliveredAt?: string;
+  forcedDelivery?: boolean;
+  forcedDeliveryReason?: string | null;
+}
+
+interface StoreDispatchSettings {
+  storeId: string;
+  distributionMode: 'fixed_driver' | 'broadcast_enabled';
+  fixedDriverId: string | null;
+  maxConcurrentDeliveries: number;
+  offerTimeoutSeconds: number;
+  storeName?: string;
+  storeAddress?: string;
+  storeCity?: string;
+  storeState?: string;
+  storeLatitude?: number;
+  storeLongitude?: number;
+}
 
 interface AdminOrder {
   id: string;
@@ -57,22 +99,43 @@ interface AdminOrder {
 
 interface AdminDriver {
   id: string;
+  storeId?: string;
   inviteCode: string;
   driverName: string | null;
   name: string | null;
   phone: string | null;
   vehiclePlate: string | null;
   driverId?: string | null;
-  status: 'aguardando_motoboy' | 'ativo' | 'bloqueado';
-  shiftStatus?: 'aguardando_motoboy' | 'em_plantao' | 'plantao_encerrado';
+  status: 'aguardando_motoboy' | 'aguardando_vinculo' | 'ativo' | 'bloqueado' | 'revogado' | 'vinculo_removido' | 'expirado';
+  effectiveStatus?: string;
+  isExpired?: boolean;
+  shiftStatus?: 'aguardando_motoboy' | 'em_plantao' | 'plantao_encerrado' | 'revogado' | 'vinculo_removido';
   presence: 'disponivel' | 'indisponivel';
   activeDeliveries: number;
+  waitingPickupCount?: number;
+  inTransitCount?: number;
+  completedDeliveriesCount?: number;
+  waitingPickupOrders?: DriverOrderItem[];
+  inTransitOrders?: DriverOrderItem[];
+  deliveredOrders?: DriverOrderItem[];
+  hasAuthorizedTracking?: boolean;
   maxDeliveries: number;
   validityDays: number;
   inviteExpiryDays?: number;
   expiresAt?: string;
   createdAt?: string;
+  revokedAt?: string;
+  unlinkedAt?: string;
 }
+
+const STATUS_HIERARCHY: Record<string, number> = {
+  'recebido': 1,
+  'preparando': 2,
+  'pronto': 3,
+  'em_entrega': 4,
+  'concluido': 5,
+  'cancelado': 99
+};
 
 export default function AdminDashboardPage() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
@@ -82,6 +145,29 @@ export default function AdminDashboardPage() {
   // Estado REAL sem dados fakes (carregados da API e do banco)
   const [orders, setOrders] = useState<AdminOrder[]>([]);
   const [drivers, setDrivers] = useState<AdminDriver[]>([]);
+  const [storeSettings, setStoreSettings] = useState<StoreDispatchSettings>({
+    storeId: 'store_bella_pizza',
+    distributionMode: 'broadcast_enabled',
+    fixedDriverId: null,
+    maxConcurrentDeliveries: 5,
+    offerTimeoutSeconds: 900,
+    storeName: 'Bella Pizza',
+    storeAddress: 'Rua Quinze de Janeiro, 150 - Centro, Canoas / RS',
+    storeCity: 'Canoas',
+    storeState: 'RS',
+  });
+  // Enquanto o lojista edita configurações, o polling não pode sobrescrever a escolha (causa do "entregador fixo trocar sozinho")
+  const settingsDirtyRef = React.useRef(false);
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [settingsSavedMsg, setSettingsSavedMsg] = useState<string | null>(null);
+  const [completedPeriodFilter, setCompletedPeriodFilter] = useState<'today' | '7d' | '30d' | 'all'>('all');
+  const [focusedRouteDriverId, setFocusedRouteDriverId] = useState<string | null>(null);
+  const [newDriverName, setNewDriverName] = useState('');
+  const [newDriverPhone, setNewDriverPhone] = useState('');
+  const [newDriverPlate, setNewDriverPlate] = useState('');
+  const [newDriverBindImmediately, setNewDriverBindImmediately] = useState(false);
+  const [dispatchModeChoice, setDispatchModeChoice] = useState<'fixed_driver' | 'broadcast_enabled'>('broadcast_enabled');
+  const [dispatchWarningBanner, setDispatchWarningBanner] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
@@ -224,6 +310,9 @@ export default function AdminDashboardPage() {
   // Estados de Despacho e Seleção Múltipla
   const [selectedOrderIds, setSelectedOrderIds] = useState<string[]>([]);
   const [isDispatchDrawerOpen, setIsDispatchDrawerOpen] = useState(false);
+  const [orderToCancel, setOrderToCancel] = useState<AdminOrder | null>(null);
+  const [cancelReasonInput, setCancelReasonInput] = useState('Cancelado pelo lojista');
+  const [isCancelingOrder, setIsCancelingOrder] = useState(false);
   const [driverSearchQuery, setDriverSearchQuery] = useState('');
   const [isInlineInviteOpen, setIsInlineInviteOpen] = useState(false);
   const [selectedOrderToDispatch, setSelectedOrderToDispatch] = useState<AdminOrder | null>(null);
@@ -243,9 +332,15 @@ export default function AdminDashboardPage() {
     if (!silent) setIsRefreshing(true);
     try {
       // 1. Buscar Pedidos Reais
-      const resOrders = await fetch('/api/orders');
-      const dataOrders = await resOrders.json();
-      if (dataOrders.success && Array.isArray(dataOrders.orders)) {
+      const resOrders = await fetch(`/api/orders?t=${Date.now()}`, {
+        headers: getAdminHeaders(),
+      });
+      if (!resOrders.ok) {
+        console.warn('[Admin] Não autorizado ou falha ao buscar pedidos da API:', resOrders.status);
+        return;
+      }
+      const dataOrders = await resOrders.json().catch(() => null);
+      if (dataOrders && dataOrders.success && Array.isArray(dataOrders.orders)) {
         setOrders(prevOrders => {
           // Filtrar quaisquer pedidos de demonstração remanescentes
           const incoming: AdminOrder[] = dataOrders.orders.filter((o: any) => 
@@ -255,55 +350,43 @@ export default function AdminDashboardPage() {
             !o.customerName?.includes('Maria')
           );
           
-          // Se a API retornou vazia mas temos pedidos locais, mantemos os locais
-          if (incoming.length === 0 && prevOrders.length > 0) {
-            return prevOrders;
-          }
-
-          // Mesclar pedidos garantindo que nenhum status avançado seja perdido
-          const mergedMap = new Map<string, AdminOrder>();
-          
-          // Carregar do localStorage se existir
-          let localSaved: AdminOrder[] = [];
-          if (typeof window !== 'undefined') {
-            try {
-              const c = localStorage.getItem('novaesweb_orders');
-              if (c) localSaved = JSON.parse(c);
-            } catch (e) {}
-          }
-
-          [...localSaved, ...prevOrders].forEach(o => mergedMap.set(o.id, o));
-
-          // Atualizar com pedidos que vieram do servidor preservando substatus de despacho
-          incoming.forEach(o => {
-            const existing = mergedMap.get(o.id);
-            if (existing) {
-              // Se o estado local já está mais avançado, preserva o local
-              const sequence: AdminOrder['status'][] = ['recebido', 'preparando', 'pronto', 'em_entrega', 'concluido', 'cancelado'];
-              const localIdx = sequence.indexOf(existing.status);
-              const serverIdx = sequence.indexOf(o.status);
-              if (localIdx > serverIdx) {
-                mergedMap.set(o.id, { 
-                  ...o, 
-                  status: existing.status,
-                  dispatchStatus: existing.dispatchStatus || o.dispatchStatus,
-                  assignedDriverName: existing.assignedDriverName || o.assignedDriverName || o.driverName,
-                  offerGroupId: existing.offerGroupId || o.offerGroupId
-                });
-              } else {
-                mergedMap.set(o.id, {
-                  ...o,
-                  dispatchStatus: o.dispatchStatus || existing.dispatchStatus,
-                  assignedDriverName: o.assignedDriverName || existing.assignedDriverName || o.driverName || existing.driverName,
-                  offerGroupId: o.offerGroupId || existing.offerGroupId
-                });
-              }
-            } else {
-              mergedMap.set(o.id, o);
+          // Se a lista no servidor estiver vazia (ex: limpeza de demonstração pelo lojista), limpa tudo
+          if (incoming.length === 0) {
+            if (typeof window !== 'undefined') {
+              localStorage.removeItem('novaesweb_orders');
             }
+            return [];
+          }
+
+          // Ordem de progressão natural do status (anti-regressão garantida pelo módulo)
+
+          const result = incoming.map(o => {
+            const existing = prevOrders.find(p => p.id === o.id || String(p.orderNumber).replace('#', '') === String(o.orderNumber).replace('#', ''));
+            if (existing) {
+              const currentRank = STATUS_HIERARCHY[existing.status] || 0;
+              const incomingRank = STATUS_HIERARCHY[o.status] || 0;
+
+              // Se o status local já avançou (ex: lojista clicou em preparar/pronto ou motoboy concluiu),
+              // e a resposta do servidor veio com status anterior por latência/cache,
+              // preserva sempre o status mais avançado (NUNCA regride de concluído para recebido ou de preparando para recebido!)
+              let resolvedStatus = o.status;
+              if (o.status === 'cancelado' || existing.status === 'cancelado') {
+                resolvedStatus = 'cancelado';
+              } else if (currentRank > incomingRank) {
+                resolvedStatus = existing.status;
+              }
+
+              return {
+                ...o,
+                status: resolvedStatus,
+                dispatchStatus: existing.dispatchStatus || o.dispatchStatus,
+                assignedDriverName: existing.assignedDriverName || o.assignedDriverName,
+                offerGroupId: existing.offerGroupId || o.offerGroupId
+              };
+            }
+            return o;
           });
 
-          const result = Array.from(mergedMap.values());
           if (typeof window !== 'undefined') {
             localStorage.setItem('novaesweb_orders', JSON.stringify(result));
           }
@@ -311,19 +394,32 @@ export default function AdminDashboardPage() {
         });
       }
 
-      // 2. Sincronização em Tempo Real com o Supabase Logistics (Ofertas, Entregadores e Entregas)
+      // 2. Sincronização em Tempo Real com o Backend Logístico Seguro (Ofertas, Entregadores, Entregas e Configurações)
       try {
-        const cloudRes = await fetch(`${SUPABASE_STORAGE_URL}?t=${Date.now()}`, {
-          headers: {
-          }
+        const cloudRes = await fetch(`/api/v1/logistics/drivers?t=${Date.now()}`, {
+          headers: getAdminHeaders(),
         });
         if (cloudRes.ok) {
-          const cloudData = await cloudRes.json();
+          const cloudData = await cloudRes.json().catch(() => null);
+          if (cloudData && cloudData.settings && !settingsDirtyRef.current) {
+            setStoreSettings(cloudData.settings);
+          }
           if (Array.isArray(cloudData.drivers)) {
-            const validDrivers = cloudData.drivers.filter((d: any) => !d.name?.includes('Rodrigo Silva'));
+            // Entregadores com vínculo removido/convite revogado são tratados como excluídos (histórico segue preservado no servidor)
+            const validDrivers: AdminDriver[] = cloudData.drivers.filter(
+              (d: any) =>
+                !d.name?.includes('Rodrigo Silva') &&
+                d.status !== 'vinculo_removido' &&
+                d.status !== 'revogado'
+            );
             setDrivers(validDrivers);
-            if (!selectedDriverId && validDrivers.length > 0) {
-              setSelectedDriverId(validDrivers[0].id);
+            const activeValid = validDrivers.filter(
+              (d) => d.status === 'ativo' && !d.isExpired
+            );
+            if (!selectedDriverId && activeValid.length > 0) {
+              setSelectedDriverId(
+                cloudData.settings?.fixedDriverId || activeValid[0].id
+              );
             }
           }
 
@@ -334,6 +430,11 @@ export default function AdminDashboardPage() {
           setOrders(prevOrders => {
             let hasChanged = false;
             const updated = prevOrders.map(order => {
+              // Pedidos concluídos ou cancelados NUNCA devem regredir para pronto ou recebido!
+              if (order.status === 'cancelado' || order.status === 'concluido') {
+                return order;
+              }
+              const currentRank = STATUS_HIERARCHY[order.status] || 1;
               const orderIdStr = String(order.id);
               const orderNumStr = String(order.orderNumber).replace('#', '');
 
@@ -348,7 +449,7 @@ export default function AdminDashboardPage() {
 
                 // Status: Concluído com validação de PIN
                 if (asg.status === 'delivered' || asg.status === 'entregue') {
-                  if (order.status !== 'concluido' || order.dispatchStatus !== 'concluido') {
+                  if ((order.status as string) !== 'concluido' || order.dispatchStatus !== 'concluido') {
                     hasChanged = true;
                     return {
                       ...order,
@@ -382,9 +483,11 @@ export default function AdminDashboardPage() {
                 if (asg.status === 'waiting_pickup') {
                   if (order.dispatchStatus !== 'aceito_aguardando_retirada' || order.driverName !== asgDriver) {
                     hasChanged = true;
+                    // Mantém status em_entrega se já tiver saído, nunca regride
+                    const resolvedStatus = currentRank >= 4 ? order.status : ('pronto' as const);
                     return {
                       ...order,
-                      status: 'pronto' as const,
+                      status: resolvedStatus,
                       dispatchStatus: 'aceito_aguardando_retirada' as const,
                       driverName: asgDriver,
                       assignedDriverName: asgDriver
@@ -412,9 +515,10 @@ export default function AdminDashboardPage() {
                 if (offer.status === 'atribuida' || offer.status === 'accepted') {
                   if (order.dispatchStatus !== 'aceito_aguardando_retirada' || order.driverName !== offerDriver) {
                     hasChanged = true;
+                    const resolvedStatus = currentRank >= 4 ? order.status : ('pronto' as const);
                     return {
                       ...order,
-                      status: 'pronto' as const,
+                      status: resolvedStatus,
                       dispatchStatus: 'aceito_aguardando_retirada' as const,
                       driverName: offerDriver,
                       assignedDriverName: offerDriver
@@ -427,9 +531,10 @@ export default function AdminDashboardPage() {
                 if (offer.status === 'pendente') {
                   if (order.dispatchStatus !== 'aguardando_aceite') {
                     hasChanged = true;
+                    const resolvedStatus = currentRank >= 4 ? order.status : ('pronto' as const);
                     return {
                       ...order,
-                      status: 'pronto' as const,
+                      status: resolvedStatus,
                       dispatchStatus: 'aguardando_aceite' as const,
                       assignedDriverName: offerDriver,
                       driverName: offerDriver
@@ -442,9 +547,10 @@ export default function AdminDashboardPage() {
                 if (offer.status === 'recusada' || offer.status === 'expirada' || offer.status === 'cancelada') {
                   if (order.dispatchStatus === 'aguardando_aceite') {
                     hasChanged = true;
+                    const resolvedStatus = currentRank >= 4 ? order.status : ('pronto' as const);
                     return {
                       ...order,
-                      status: 'pronto' as const,
+                      status: resolvedStatus,
                       dispatchStatus: 'disponivel' as const,
                       assignedDriverName: null,
                       driverName: null
@@ -503,16 +609,29 @@ export default function AdminDashboardPage() {
       });
 
       try {
-        await fetch('/api/orders', {
+        const patchRes = await fetch('/api/orders', {
           method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getAdminHeaders(),
           body: JSON.stringify({ orderId, status: nextStatus })
         });
+        if (patchRes.ok) {
+          // Atualiza cache local com sucesso garantido
+          if (typeof window !== 'undefined') {
+            const currentCached = localStorage.getItem('novaesweb_orders');
+            if (currentCached) {
+              try {
+                const list = JSON.parse(currentCached);
+                const updated = list.map((o: any) => o.id === orderId ? { ...o, status: nextStatus } : o);
+                localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
+              } catch {}
+            }
+          }
+        }
       } catch (err) {
         console.error('Erro ao comunicar com o servidor:', err);
       }
 
-      setTimeout(() => fetchData(true), 600);
+      setTimeout(() => fetchData(true), 400);
     }
   };
 
@@ -529,89 +648,76 @@ export default function AdminDashboardPage() {
     try {
       await fetch('/api/orders', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAdminHeaders(),
         body: JSON.stringify({ orderId, paymentStatus: 'confirmado_manual' })
       });
     } catch (err) {}
     setTimeout(() => fetchData(true), 600);
   };
 
-  // Cancelar com Justificativa Conectado à API e Sincronizado
-  const handleCancelOrder = async (orderId: string) => {
-    const reason = prompt('Informe a justificativa do cancelamento (opcional):');
-    if (reason !== null) {
-      const cancelReason = reason.trim() || 'Cancelado pelo lojista';
-      const cancelTime = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) + ' - ' + new Date().toLocaleDateString('pt-BR');
+  // Cancelar com Justificativa Conectado à API e Sincronizado (abre modal elegante sem usar window.prompt)
+  const handleOpenCancelModal = (order: AdminOrder) => {
+    setOrderToCancel(order);
+    setCancelReasonInput('Cancelado pelo lojista');
+  };
 
-      setOrders(prev => {
-        const updated = prev.map(o => o.id === orderId ? { 
-          ...o, 
-          status: 'cancelado' as const,
+  const handleConfirmCancelOrder = async () => {
+    if (!orderToCancel) return;
+    const orderId = orderToCancel.id;
+    const cancelReason = cancelReasonInput.trim() || 'Cancelado pelo lojista';
+    const cancelTime = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) + ' - ' + new Date().toLocaleDateString('pt-BR');
+
+    setIsCancelingOrder(true);
+
+    setOrders(prev => {
+      const updated = prev.map(o => o.id === orderId ? { 
+        ...o, 
+        status: 'cancelado' as const,
+        dispatchStatus: 'disponivel' as const,
+        driverName: null,
+        assignedDriverName: null,
+        offerGroupId: null,
+        cancellationReason: cancelReason,
+        canceledAt: cancelTime
+      } : o);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
+      }
+      return updated;
+    });
+
+    setSelectedOrderIds(prev => prev.filter(id => id !== orderId));
+
+    try {
+      await fetch('/api/orders', {
+        method: 'PATCH',
+        headers: getAdminHeaders(),
+        body: JSON.stringify({ 
+          orderId, 
+          status: 'cancelado',
+          dispatchStatus: 'disponivel',
           cancellationReason: cancelReason,
           canceledAt: cancelTime
-        } : o);
-        if (typeof window !== 'undefined') {
-          localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
-        }
-        return updated;
+        })
       });
+    } catch (err) {}
 
-      try {
-        await fetch('/api/orders', {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            orderId, 
-            status: 'cancelado',
-            cancellationReason: cancelReason,
-            canceledAt: cancelTime
-          })
-        });
-      } catch (err) {}
-
-      // Retira ofertas ou entregas ativas deste pedido no Supabase Storage
-      try {
-        const logRes = await fetch(SUPABASE_STORAGE_URL, {
-          headers: { 'apikey': SUPABASE_ANON_KEY }
-        });
-        if (logRes.ok) {
-          const logData = await logRes.json();
-          let changed = false;
-          if (Array.isArray(logData.offers)) {
-            logData.offers = logData.offers.filter((off: any) => {
-              const match = off.orderId === orderId || (Array.isArray(off.orders) && off.orders.some((o: any) => o.id === orderId));
-              if (match) changed = true;
-              return !match;
-            });
-          }
-          if (Array.isArray(logData.assignments)) {
-            logData.assignments.forEach((asg: any) => {
-              if (asg.orderId === orderId) {
-                asg.status = 'canceled_by_store';
-                changed = true;
-              }
-            });
-          }
-          if (changed) {
-            await fetch(SUPABASE_STORAGE_URL, {
-              method: 'PUT',
-              headers: {
-                'apikey': SUPABASE_SERVICE_KEY,
-                'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify(logData)
-            });
-          }
-        }
-      } catch (eLog) {
-        console.warn('Erro ao sincronizar cancelamento na nuvem:', eLog);
-      }
-
-      setDispatchAlert('Pedido cancelado com sucesso e transferido para a aba de Pedidos Cancelados.');
-      setTimeout(() => setDispatchAlert(null), 4000);
-      setTimeout(() => fetchData(true), 600);
+    // Cancela ofertas pendentes deste pedido no backend logístico
+    try {
+      await fetch('/api/v1/logistics/offer-cancel', {
+        method: 'POST',
+        headers: getAdminHeaders(),
+        body: JSON.stringify({ orderId })
+      });
+    } catch (eLog) {
+      console.warn('Erro ao sincronizar cancelamento de oferta:', eLog);
     }
+
+    setIsCancelingOrder(false);
+    setOrderToCancel(null);
+    setDispatchAlert('Pedido cancelado com sucesso e transferido para a aba de Pedidos Cancelados.');
+    setTimeout(() => setDispatchAlert(null), 4000);
+    setTimeout(() => fetchData(true), 600);
   };
 
   // Restaurar Pedido Cancelado de volta para "Recebido"
@@ -635,7 +741,7 @@ export default function AdminDashboardPage() {
     try {
       await fetch('/api/orders', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAdminHeaders(),
         body: JSON.stringify({ 
           orderId, 
           status: 'recebido', 
@@ -666,7 +772,7 @@ export default function AdminDashboardPage() {
     try {
       await fetch('/api/orders', {
         method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAdminHeaders(),
         body: JSON.stringify({ orderId })
       });
     } catch (err) {}
@@ -699,118 +805,32 @@ export default function AdminDashboardPage() {
     }
   };
 
-  const handleOpenDispatchForSingle = (order: AdminOrder) => {
-    setSelectedOrderIds([order.id]);
-    setSelectedOrderToDispatch(order);
-    setIsDispatchDrawerOpen(true);
-  };
-
-  const handleOpenDispatchForSelected = () => {
-    if (selectedOrderIds.length === 0) return;
-    setIsDispatchDrawerOpen(true);
-  };
-
-  // Cancelar ou Retirar Despacho de Pedido em "Aguardando Aceite"
-  const handleCancelDispatch = async (orderId: string) => {
-    if (!confirm('Deseja retirar este pedido do despacho e torná-lo disponível novamente?')) return;
-    
-    // Atualização otimista local
-    setOrders(prev => {
-      const updated = prev.map(o => o.id === orderId ? {
-        ...o,
-        dispatchStatus: 'disponivel' as const,
-        assignedDriverName: null,
-        driverName: null,
-        offerGroupId: null
-      } : o);
-      if (typeof window !== 'undefined') {
-        localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
-      }
-      return updated;
-    });
-
-    try {
-      await fetch('/api/orders', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          orderId,
-          dispatchStatus: 'disponivel',
-          assignedDriverName: null,
-          driverName: null,
-          offerGroupId: null
-        })
-      });
-
-      // Remove a oferta do Supabase Storage
-      const getRes = await fetch(`${SUPABASE_STORAGE_URL}?t=${Date.now()}`, {
-        headers: {
-        }
-      });
-      if (getRes.ok) {
-        const state = await getRes.json();
-        if (Array.isArray(state.offers)) {
-          state.offers = state.offers.filter((off: any) => 
-            off.orderId !== orderId && 
-            (!off.orders || !off.orders.some((item: any) => item.orderId === orderId))
-          );
-          await fetch(SUPABASE_STORAGE_URL, {
-            method: 'POST',
-            headers: {
-              'apikey': SUPABASE_ANON_KEY,
-              'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
-              'x-upsert': 'true',
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(state)
-          });
-        }
-      }
-    } catch (err) {
-      console.error('Erro ao cancelar oferta de despacho:', err);
+  // Despacho inteligente respeitando o Modo de Distribuição configurado na loja:
+  // Modo A (Entregador Fixo): Despacha automaticamente para o entregador fixo sem exigir nova seleção em cada pedido.
+  // Se o entregador fixo estiver bloqueado, expirado ou sem capacidade, avisa o lojista e abre o modal para escolher outro (nunca troca silenciosamente!).
+  // Modo B (Oferta para entregadores habilitados): Abre o painel ou envia oferta para todos os entregadores elegíveis.
+  const executeDispatchOrders = async (
+    targetOrders: AdminOrder[],
+    options?: {
+      modeOverride?: 'fixed_driver' | 'broadcast_enabled';
+      driverIdOverride?: string | null;
+      fromModal?: boolean;
     }
+  ) => {
+    if (targetOrders.length === 0) return;
 
-    setDispatchAlert('Despacho cancelado com sucesso. O pedido está pronto para nova seleção.');
-    setTimeout(() => setDispatchAlert(null), 4000);
-    fetchData(true);
-  };
-
-  // Disparar Oferta de Despacho em Lote (Agrupando 1 ou Vários Pedidos)
-  const handleSendGroupedDispatchOffer = async () => {
-    const selectedOrders = orders.filter(o => selectedOrderIds.includes(o.id));
-    if (selectedOrders.length === 0) {
-      alert('Nenhum pedido selecionado para despacho.');
-      return;
-    }
-
-    const driver = drivers.find(d => d.id === selectedDriverId);
-    if (!driver) {
-      alert('Selecione um entregador para enviar a oferta.');
-      return;
-    }
-
-    const driverName = driver.driverName || driver.name;
-    if (!driverName) {
-      alert('Aguarde o motoboy conectar seu aplicativo através do código de plantão antes de despachar.');
-      return;
-    }
-
-    if (driver.status === 'bloqueado') {
-      alert(`O entregador ${driverName} está bloqueado.`);
-      return;
-    }
-
-    if (driver.activeDeliveries >= driver.maxDeliveries) {
-      alert(`O entregador ${driverName} atingiu a capacidade máxima de ${driver.maxDeliveries} entregas simultâneas!`);
-      return;
-    }
+    const mode = options?.modeOverride || storeSettings.distributionMode || 'broadcast_enabled';
+    const targetDriverId =
+      mode === 'fixed_driver'
+        ? options?.driverIdOverride || storeSettings.fixedDriverId || selectedDriverId
+        : null;
 
     setIsSendingDispatch(true);
-    const feeNum = parseFloat(deliveryFeeOffered.replace(',', '.')) || 12.00;
-    const offerUniqueId = `off_${Date.now()}`;
-    const targetDriverId = driver.driverId || driver.id;
+    setDispatchWarningBanner(null);
 
-    const offerOrders = selectedOrders.map(o => ({
+    const feeNum = parseFloat(deliveryFeeOffered.replace(',', '.')) || 12.0;
+    const offerOrders = targetOrders.map((o) => ({
+      id: o.id,
       orderId: o.id,
       orderNumber: o.orderNumber,
       customerName: o.customerName || 'Cliente',
@@ -820,251 +840,262 @@ export default function AdminDashboardPage() {
       customerNeighborhood: o.region || 'Região Central',
       itemsSummary: o.itemsSummary || '1x Pedido Delivery',
       total: o.total,
-      deliveryFee: Number((feeNum / selectedOrders.length).toFixed(2)),
-      deliveryPin: o.deliveryPin || '****'
+      deliveryFee: Number((feeNum / targetOrders.length).toFixed(2)),
+      deliveryPin: o.deliveryPin || '****',
     }));
 
-    // 1. Tentar API local
     try {
-      await fetch('/api/v1/logistics/offer-create', {
+      const res = await fetch('/api/v1/logistics/offer-create', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAdminHeaders(),
         body: JSON.stringify({
-          orderId: selectedOrders[0].id,
-          orderNumber: selectedOrders[0].orderNumber,
-          orderIds: selectedOrders.map(o => o.id),
+          orderId: targetOrders[0].id,
+          orderNumber: targetOrders[0].orderNumber,
+          orderIds: targetOrders.map((o) => o.id),
           orders: offerOrders,
-          customerAddress: selectedOrders.map(o => `#${o.orderNumber}: ${o.address}`).join(' | '),
-          driverId: targetDriverId,
+          customerAddress: targetOrders.map((o) => `#${o.orderNumber}: ${o.address}`).join(' | '),
+          distributionMode: mode,
+          driverId: mode === 'fixed_driver' ? targetDriverId : null,
           feeOffered: feeNum,
-          totalOrdersGrouped: selectedOrders.length
-        })
+          totalOrdersGrouped: targetOrders.length,
+        }),
       });
-    } catch (e) {
-      console.warn('API local falhou, prosseguindo com nuvem Supabase:', e);
-    }
 
-    // 2. Sincronizar oferta no Supabase Storage (logistics.json)
-    try {
-      const getRes = await fetch(`${SUPABASE_STORAGE_URL}?t=${Date.now()}`, {
-        headers: {
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok || !data.success) {
+        setIsSendingDispatch(false);
+        // Se o entregador fixo estiver bloqueado, expirado ou sem capacidade, avisa e permite escolher outro no modal (sem trocar silenciosamente!)
+        setDispatchWarningBanner(
+          data.error ||
+            'Não foi possível despachar automaticamente. Selecione outro entregador ou modo de distribuição abaixo.'
+        );
+        setSelectedOrderIds(targetOrders.map((o) => o.id));
+        if (targetOrders.length === 1) {
+          setSelectedOrderToDispatch(targetOrders[0]);
         }
-      });
-      let state: { drivers: any[]; offers: any[]; assignments: any[] } = { drivers: [], offers: [], assignments: [] };
-      if (getRes.ok) {
-        state = await getRes.json();
+        setDispatchModeChoice('fixed_driver');
+        setIsDispatchDrawerOpen(true);
+        return;
       }
 
-      const newOffer = {
-        id: offerUniqueId,
-        offerId: offerUniqueId,
-        orderId: selectedOrders[0].id,
-        orderNumber: selectedOrders.map(o => `#${o.orderNumber}`).join(', '),
-        orderIds: selectedOrders.map(o => o.id),
-        orders: offerOrders,
-        customerAddress: selectedOrders.map(o => `#${o.orderNumber}: ${o.address}`).join(' | '),
-        deliveryAddress: selectedOrders.map(o => `#${o.orderNumber}: ${o.address}`).join(' | '),
-        customerNeighborhood: selectedOrders[0].region || 'Bairro Atendido',
-        customerCity: 'São Paulo',
-        customerName: selectedOrders.length === 1 ? selectedOrders[0].customerName : `${selectedOrders.length} Clientes (Lote)`,
-        customerPhone: selectedOrders[0].phone || '',
-        itemsSummary: selectedOrders.map(o => `#${o.orderNumber} (${o.itemsSummary})`).join(' • '),
-        targetDriverId,
-        driverId: targetDriverId,
-        feeOffered: feeNum,
-        deliveryFee: feeNum,
-        estimatedDistanceKm: Number((2.0 + selectedOrders.length * 1.2).toFixed(1)),
-        totalOrdersGrouped: selectedOrders.length,
-        status: 'pendente',
-        expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
-        createdAt: new Date().toISOString()
-      };
+      const assignedLabel =
+        data.offer?.driverName ||
+        (mode === 'broadcast_enabled'
+          ? `Oferta para ${data.notifiedDriversCount || 'todos os'} entregadores habilitados`
+          : 'Entregador Fixo');
 
-      state.offers = [newOffer as any, ...(state.offers || [])];
-
-      await fetch(SUPABASE_STORAGE_URL, {
-        method: 'POST',
-        headers: {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
-          'x-upsert': 'true',
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(state)
-      });
-    } catch (err) {
-      console.warn('Erro ao sincronizar logistics.json no Supabase:', err);
-    }
-
-    // 3. Atualizar pedidos selecionados: dispatchStatus = 'aguardando_aceite'
-    // Preserva status 'pronto' até o motoboy aceitar e retirar
-    setOrders(prev => {
-      const updated = prev.map(o => {
-        if (selectedOrderIds.includes(o.id)) {
-          return {
-            ...o,
-            dispatchStatus: 'aguardando_aceite' as const,
-            assignedDriverName: driverName,
-            driverName: driverName,
-            offerGroupId: offerUniqueId
-          };
+      const selectedIdSet = new Set(targetOrders.map((o) => o.id));
+      setOrders((prev) => {
+        const updated = prev.map((o) =>
+          selectedIdSet.has(o.id)
+            ? {
+                ...o,
+                dispatchStatus: 'aguardando_aceite' as const,
+                assignedDriverName: assignedLabel,
+                driverName: assignedLabel,
+                offerGroupId: data.offer?.offerId || data.offer?.id,
+              }
+            : o
+        );
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
         }
-        return o;
+        return updated;
       });
+
+      setIsSendingDispatch(false);
+      setIsDispatchDrawerOpen(false);
+      setSelectedOrderIds([]);
+      setSelectedOrderToDispatch(null);
+      setDispatchWarningBanner(null);
+      setDispatchAlert(
+        mode === 'fixed_driver'
+          ? `Pedido(s) despachado(s) diretamente para o entregador ${assignedLabel}! Aguardando aceite.`
+          : `Oferta de ${targetOrders.length} pedido(s) enviada para ${data.notifiedDriversCount || 'todos os'} entregador(es) habilitado(s) da loja!`
+      );
+      setTimeout(() => setDispatchAlert(null), 5000);
+      fetchData(true);
+    } catch (err: any) {
+      setIsSendingDispatch(false);
+      setDispatchWarningBanner(err.message || 'Erro de comunicação ao despachar.');
+    }
+  };
+
+  const handleOpenDispatchForSingle = async (order: AdminOrder) => {
+    setDispatchWarningBanner(null);
+    setDispatchModeChoice(storeSettings.distributionMode || 'broadcast_enabled');
+    if (storeSettings.fixedDriverId) {
+      setSelectedDriverId(storeSettings.fixedDriverId);
+    } else {
+      const activeFirst = drivers.find(d => d.status === 'ativo');
+      if (activeFirst) {
+        setSelectedDriverId(activeFirst.driverId || activeFirst.id);
+      }
+    }
+    setSelectedOrderIds([order.id]);
+    setSelectedOrderToDispatch(order);
+    setIsDispatchDrawerOpen(true);
+  };
+
+  const handleOpenDispatchForSelected = async () => {
+    if (selectedOrderIds.length === 0) return;
+    const batchOrders = orders.filter((o) => selectedOrderIds.includes(o.id));
+    if (batchOrders.length === 0) return;
+
+    setDispatchWarningBanner(null);
+    setDispatchModeChoice(storeSettings.distributionMode || 'broadcast_enabled');
+    if (storeSettings.fixedDriverId) {
+      setSelectedDriverId(storeSettings.fixedDriverId);
+    } else {
+      const activeFirst = drivers.find(d => d.status === 'ativo');
+      if (activeFirst) {
+        setSelectedDriverId(activeFirst.driverId || activeFirst.id);
+      }
+    }
+    setIsDispatchDrawerOpen(true);
+  };
+
+  // Cancelar ou Retirar Despacho de Pedido em "Aguardando Aceite"
+  const handleCancelDispatch = async (orderId: string) => {
+    if (!confirm('Deseja retirar este pedido do despacho e torná-lo disponível novamente?')) return;
+
+    setOrders((prev) => {
+      const updated = prev.map((o) =>
+        o.id === orderId
+          ? {
+              ...o,
+              dispatchStatus: 'disponivel' as const,
+              assignedDriverName: null,
+              driverName: null,
+              offerGroupId: null,
+            }
+          : o
+      );
       if (typeof window !== 'undefined') {
         localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
       }
       return updated;
     });
 
-    for (const order of selectedOrders) {
-      try {
-        await fetch('/api/orders', {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            orderId: order.id,
-            dispatchStatus: 'aguardando_aceite',
-            assignedDriverName: driverName,
-            driverName: driverName,
-            offerGroupId: offerUniqueId
-          })
-        });
-      } catch (err) {}
+    try {
+      await fetch('/api/v1/logistics/offer-cancel', {
+        method: 'POST',
+        headers: getAdminHeaders(),
+        body: JSON.stringify({ orderId }),
+      });
+    } catch (err) {
+      console.error('Erro ao cancelar oferta de despacho:', err);
     }
 
-    // Atualiza diretamente no orders.json do Supabase Storage
-    try {
-      const ordersRes = await fetch('https://nrdbporbyujwtgnpiejz.supabase.co/storage/v1/object/novaesweb_store/orders.json', {
-        headers: {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
-        }
-      });
-      if (ordersRes.ok) {
-        let cloudOrders = await ordersRes.json();
-        if (Array.isArray(cloudOrders)) {
-          cloudOrders = cloudOrders.map((o: any) => {
-            if (selectedOrderIds.includes(o.id) || selectedOrderIds.includes(String(o.orderNumber))) {
-              return {
-                ...o,
-                dispatchStatus: 'aguardando_aceite',
-                assignedDriverName: driverName,
-                driverName: driverName,
-                offerGroupId: offerUniqueId
-              };
-            }
-            return o;
-          });
-          await fetch('https://nrdbporbyujwtgnpiejz.supabase.co/storage/v1/object/novaesweb_store/orders.json', {
-            method: 'POST',
-            headers: {
-              'apikey': SUPABASE_ANON_KEY,
-              'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
-              'x-upsert': 'true',
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(cloudOrders)
-          });
-        }
-      }
-    } catch (err) {}
-
-    setIsSendingDispatch(false);
-    setIsDispatchDrawerOpen(false);
-    setSelectedOrderIds([]);
-    setSelectedOrderToDispatch(null);
-    setDispatchAlert(`Oferta de ${selectedOrders.length} pedido(s) enviada para ${driverName}! Aguardando aceite no aplicativo.`);
-    setTimeout(() => setDispatchAlert(null), 5000);
+    setDispatchAlert('Despacho cancelado com sucesso. O pedido está pronto para nova seleção.');
+    setTimeout(() => setDispatchAlert(null), 4000);
     fetchData(true);
+  };
+
+  // Disparar Oferta de Despacho pelo Modal (suporta Modo Entregador Específico/Fixo ou Oferta para Todos Habilitados)
+  const handleSendGroupedDispatchOffer = async () => {
+    const selectedOrders = orders.filter((o) => selectedOrderIds.includes(o.id));
+    if (selectedOrders.length === 0) {
+      alert('Nenhum pedido selecionado para despacho.');
+      return;
+    }
+
+    if (dispatchModeChoice === 'fixed_driver' && !selectedDriverId) {
+      alert('Selecione um entregador para enviar a oferta.');
+      return;
+    }
+
+    await executeDispatchOrders(selectedOrders, {
+      modeOverride: dispatchModeChoice,
+      driverIdOverride: dispatchModeChoice === 'fixed_driver' ? selectedDriverId : null,
+      fromModal: true,
+    });
   };
 
   const handleSendDispatchOffer = async () => {
     if (selectedOrderToDispatch) {
-      setSelectedOrderIds([selectedOrderToDispatch.id]);
+      await executeDispatchOrders([selectedOrderToDispatch], {
+        modeOverride: dispatchModeChoice,
+        driverIdOverride: dispatchModeChoice === 'fixed_driver' ? selectedDriverId : null,
+        fromModal: true,
+      });
+      return;
     }
     await handleSendGroupedDispatchOffer();
   };
 
-  // Gerar Código de Plantão Dinâmico (Uso Único no App do Motoboy)
+  // Salvar Configurações de Distribuição e Despacho da Loja
+  const handleSaveLogisticsSettings = async (customSettings?: Partial<StoreDispatchSettings>) => {
+    setIsSavingSettings(true);
+    setSettingsSavedMsg(null);
+    const nextSettings = {
+      ...storeSettings,
+      ...(customSettings || {}),
+    };
+    try {
+      const res = await fetch('/api/v1/logistics/settings-update', {
+        method: 'POST',
+        headers: getAdminHeaders(),
+        body: JSON.stringify({
+          ...nextSettings,
+          applyLimitToAllDrivers: true,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data && data.success) {
+        settingsDirtyRef.current = false;
+        setStoreSettings(data.settings);
+        setSettingsSavedMsg('Configurações salvas com sucesso!');
+        setTimeout(() => setSettingsSavedMsg(null), 3500);
+        fetchData(true);
+      }
+    } catch (e) {
+      console.error('Erro ao salvar configurações:', e);
+    } finally {
+      setIsSavingSettings(false);
+    }
+  };
+
+  // Altera configuração e já salva no servidor (evita que o polling reverta a escolha)
+  const updateAndSaveSettings = (patch: Partial<StoreDispatchSettings>) => {
+    settingsDirtyRef.current = true;
+    setStoreSettings((prev) => ({ ...prev, ...patch }));
+    handleSaveLogisticsSettings(patch);
+  };
+
+  // Cadastrar / Convidar Entregador e Gerar Código de Vínculo (funciona mesmo sem pedidos)
   const handleGenerateShiftCode = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setIsGeneratingShiftCode(true);
-    let codeGenerated: string | null = null;
-    const days = parseInt(shiftValidity) || 1;
-    const expiresAt = new Date(Date.now() + days * 86400000).toISOString();
+    const days = parseInt(shiftValidity) || 7;
 
-    // 1. Tenta API local
     try {
       const res = await fetch('/api/v1/logistics/invite-issue', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ validityDays: days })
+        headers: getAdminHeaders(),
+        body: JSON.stringify({
+          validityDays: days,
+          bindImmediately: false,
+          maxDeliveries: storeSettings.maxConcurrentDeliveries || 5,
+        }),
       });
       if (res.ok) {
-        const data = await res.json();
-        if (data.success && data.inviteCode) {
-          codeGenerated = data.inviteCode;
+        const data = await res.json().catch(() => ({}));
+        if (data && data.success && data.inviteCode) {
+          setGeneratedShiftCode(data.inviteCode);
+          setNewDriverName('');
+          setNewDriverPhone('');
+          setNewDriverPlate('');
+          setNewDriverBindImmediately(false);
+          fetchData(true);
         }
       }
     } catch (err) {
-      console.warn('API local invite-issue falhou, gerando na nuvem Supabase...');
+      console.error('Erro ao emitir código de vínculo:', err);
+    } finally {
+      setIsGeneratingShiftCode(false);
     }
-
-    // 2. Se a API local não retornou código, grava direto na nuvem Supabase
-    if (!codeGenerated) {
-      try {
-        const rawToken = `NW-${Math.floor(100000 + Math.random() * 900000)}`;
-        const getRes = await fetch(`${SUPABASE_STORAGE_URL}?t=${Date.now()}`, {
-          headers: {
-          }
-        });
-        let state: { drivers: any[]; offers: any[]; assignments: any[] } = { drivers: [], offers: [], assignments: [] };
-        if (getRes.ok) {
-          state = await getRes.json();
-        }
-
-        const newShift = {
-          id: `shift-${Date.now()}`,
-          inviteCode: rawToken,
-          driverName: null,
-          name: null,
-          phone: null,
-          vehiclePlate: null,
-          driverId: null,
-          status: 'aguardando_motoboy',
-          shiftStatus: 'aguardando_motoboy',
-          presence: 'indisponivel',
-          activeDeliveries: 0,
-          maxDeliveries: 3,
-          validityDays: days,
-          expiresAt,
-          createdAt: new Date().toISOString()
-        };
-        state.drivers.unshift(newShift as any);
-
-        await fetch(SUPABASE_STORAGE_URL, {
-          method: 'POST',
-          headers: {
-            'apikey': SUPABASE_ANON_KEY,
-            'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
-            'x-upsert': 'true',
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(state)
-        });
-
-        codeGenerated = rawToken;
-      } catch (cloudErr) {
-        console.error('Erro ao salvar código no Supabase Cloud:', cloudErr);
-      }
-    }
-
-    if (codeGenerated) {
-      setGeneratedShiftCode(codeGenerated);
-      fetchData(true);
-    }
-    setIsGeneratingShiftCode(false);
   };
 
   const handleCopyCode = (code: string) => {
@@ -1076,30 +1107,109 @@ export default function AdminDashboardPage() {
   };
 
   const getWhatsAppShareUrl = (code: string) => {
-    const text = `Olá! Seu código de plantão para hoje na Bella Pizza é: ${code}. Abra seu app NovaesWeb Entregador e insira o código para iniciar.`;
+    const text = `Olá! Seu código de vínculo/plantão na Bella Pizza é: ${code}. Abra seu app NovaesWeb Entregador e insira o código para iniciar.`;
     return `https://wa.me/?text=${encodeURIComponent(text)}`;
   };
 
-  // Alternar Bloqueio do Entregador
+  // Ativar ou Bloquear o recebimento de novas ofertas pelo entregador
   const handleToggleBlockDriver = async (driverId: string) => {
     await fetch('/api/v1/logistics/driver-toggle-block', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ driverId })
+      headers: getAdminHeaders(),
+      body: JSON.stringify({ driverId }),
     });
     fetchData(true);
   };
 
-  // Remover Código de Plantão
+  // Revogar convite pendente
+  const handleRevokeInvite = async (driverId: string) => {
+    if (!confirm('Deseja revogar este convite? O código não poderá mais ser utilizado.')) return;
+    await fetch('/api/v1/logistics/invite-revoke', {
+      method: 'POST',
+      headers: getAdminHeaders(),
+      body: JSON.stringify({ driverId }),
+    });
+    fetchData(true);
+  };
+
+  // Remover vínculo de um entregador com a loja (preservando conta pessoal e histórico, exigindo tratamento se houver entregas em andamento)
   const handleDeleteDriverShift = async (driverId: string) => {
-    if (confirm('Deseja realmente remover este código de plantão / entregador?')) {
-      await fetch('/api/v1/logistics/driver-delete', {
+    const targetDrv = drivers.find((d) => d.id === driverId || d.driverId === driverId);
+    const label = targetDrv?.driverName || targetDrv?.name || targetDrv?.inviteCode || 'este entregador';
+
+    if (
+      !confirm(
+        `Deseja remover o vínculo de "${label}" com a loja?\n\nA conta pessoal do entregador e o histórico de entregas concluídas serão preservados.`
+      )
+    ) {
+      return;
+    }
+
+    const res = await fetch('/api/v1/logistics/driver-unlink', {
+      method: 'POST',
+      headers: getAdminHeaders(),
+      body: JSON.stringify({ driverId }),
+    });
+
+    const data = await res.json().catch(() => ({}));
+
+    // Se houver entregas em andamento, exige tratamento explícito antes da remoção
+    if (res.status === 409 && data.requiresExplicitHandling) {
+      const confirmReturn = confirm(
+        `ATENÇÃO: ${data.error}\n\nDeseja devolver os ${data.activeDeliveriesCount} pedido(s) em andamento para a fila de despacho da loja ("Pronto / Disponível") e concluir a remoção do vínculo agora?`
+      );
+      if (!confirmReturn) return;
+
+      const retryRes = await fetch('/api/v1/logistics/driver-unlink', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ driverId })
+        headers: getAdminHeaders(),
+        body: JSON.stringify({
+          driverId,
+          handleActiveDeliveries: 'return_to_queue',
+        }),
       });
-      if (generatedShiftCode === driverId) setGeneratedShiftCode(null);
-      fetchData(true);
+      const retryData = await retryRes.json().catch(() => ({}));
+      if (retryRes.ok && retryData.success) {
+        setDispatchAlert(
+          `Vínculo removido. ${retryData.returnedOrdersCount || 0} pedido(s) ativo(s) devolvido(s) à fila da loja e histórico preservado.`
+        );
+        setTimeout(() => setDispatchAlert(null), 5000);
+      }
+    } else if (res.ok && data.success) {
+      setDispatchAlert('Vínculo com a loja removido com sucesso (histórico preservado).');
+      setTimeout(() => setDispatchAlert(null), 4000);
+    }
+
+    if (generatedShiftCode === driverId) setGeneratedShiftCode(null);
+    fetchData(true);
+  };
+
+  // Zerar todos os pedidos e demonstrações (Limpeza total do painel para operação real)
+  const handleWipeAllOrdersAndDemos = async () => {
+    if (
+      !confirm(
+        'ATENÇÃO: Deseja realmente excluir TODOS os pedidos e demonstrações do painel?\n\nEsta ação limpa o banco de dados e o histórico local, deixando o painel zerado para iniciar pedidos reais.'
+      )
+    ) {
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/v1/logistics/admin-clean-demo', {
+        method: 'POST',
+        headers: getAdminHeaders(),
+      });
+      if (res.ok) {
+        if (typeof window !== 'undefined') {
+          localStorage.removeItem('novaesweb_orders');
+        }
+        setOrders([]);
+        setDispatchAlert('Todos os pedidos e demonstrações foram excluídos com sucesso. Painel 100% limpo!');
+        setTimeout(() => setDispatchAlert(null), 4000);
+        fetchData(true);
+      }
+    } catch (e) {
+      alert('Erro ao limpar pedidos do servidor.');
     }
   };
 
@@ -1635,7 +1745,7 @@ export default function AdminDashboardPage() {
                                 <Printer className="w-3.5 h-3.5" />
                               </button>
                               <button
-                                onClick={() => handleCancelOrder(order.id)}
+                                onClick={() => handleOpenCancelModal(order)}
                                 className="text-zinc-500 hover:text-red-400 p-1 text-[10px]"
                                 title="Cancelar Pedido"
                               >
@@ -1654,10 +1764,19 @@ export default function AdminDashboardPage() {
                                     <span>Trocar Motoboy</span>
                                   </button>
                                 ) : order.dispatchStatus === 'aceito_aguardando_retirada' ? (
-                                  <span className="text-[10px] text-blue-400 font-bold px-2 py-1 rounded bg-blue-950/60 border border-blue-900 flex items-center gap-1">
-                                    <Clock className="w-3 h-3 animate-spin" />
-                                    <span>Aguardando Retirada...</span>
-                                  </span>
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-[10px] text-blue-400 font-bold px-2 py-1 rounded bg-blue-950/60 border border-blue-900 flex items-center gap-1">
+                                      <Clock className="w-3 h-3 animate-spin" />
+                                      <span>Aguardando Retirada...</span>
+                                    </span>
+                                    <button
+                                      onClick={() => handleCancelDispatch(order.id)}
+                                      className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-[10px] font-semibold transition"
+                                      title="Trocar motoboy deste pedido"
+                                    >
+                                      Trocar
+                                    </button>
+                                  </div>
                                 ) : (
                                   <button
                                     onClick={() => handleOpenDispatchForSingle(order)}
@@ -1668,13 +1787,37 @@ export default function AdminDashboardPage() {
                                   </button>
                                 )
                               ) : col.key !== 'concluido' ? (
-                                <button
-                                  onClick={() => handleAdvanceStatus(order.id, order.status)}
-                                  className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 hover:text-white font-bold text-[10px] flex items-center gap-1 transition"
-                                >
-                                  <span>Avançar</span>
-                                  <ArrowRight className="w-3 h-3" />
-                                </button>
+                                <div className="flex items-center gap-1">
+                                  {col.key === 'em_entrega' && (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        const phoneDigits = (order.phone || '').replace(/\D/g, '');
+                                        const origin = typeof window !== 'undefined' ? window.location.origin : '';
+                                        const trackUrl = `${origin}/pedido/${order.trackingToken || order.id}`;
+                                        const driverMsg = order.driverName ? ` com o entregador ${order.driverName}` : '';
+                                        const text = `🍕 *Bella Pizza:* Olá ${order.customerName || 'Cliente'}! Seu pedido #${order.orderNumber} está a caminho da sua casa${driverMsg}.\n\n📍 *Acompanhe em tempo real pelo mapa:*\n${trackUrl}\n\nObrigado pela preferência!`;
+                                        const waUrl = phoneDigits
+                                          ? `https://wa.me/55${phoneDigits}?text=${encodeURIComponent(text)}`
+                                          : `https://wa.me/?text=${encodeURIComponent(text)}`;
+                                        window.open(waUrl, '_blank');
+                                      }}
+                                      className="px-2 py-1 rounded-md bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-700/60 text-emerald-300 font-bold text-[10px] flex items-center gap-1 transition shadow-sm"
+                                      title="Enviar link de rastreamento no WhatsApp do cliente"
+                                    >
+                                      <MessageCircle className="w-3 h-3 text-emerald-400" />
+                                      <span>WhatsApp Rastreio</span>
+                                    </button>
+                                  )}
+                                  <button
+                                    onClick={() => handleAdvanceStatus(order.id, order.status)}
+                                    className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 hover:text-white font-bold text-[10px] flex items-center gap-1 transition"
+                                  >
+                                    <span>Avançar</span>
+                                    <ArrowRight className="w-3 h-3" />
+                                  </button>
+                                </div>
                               ) : null}
                             </div>
 
@@ -1708,253 +1851,313 @@ export default function AdminDashboardPage() {
         {/* ABA 2: MÓDULO DE LOGÍSTICA */}
         {activeTab === 'logistics' && (
           <div className="space-y-8">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div>
-                <h2 className="text-xl font-black text-white">Módulo Integrado de Logística</h2>
+                <h2 className="text-xl font-black text-white">Visão dos Entregadores da Loja & Logística</h2>
                 <p className="text-xs text-zinc-400">
-                  Gerencie os motoboys e envie ofertas de corrida diretamente para o aplicativo do entregador.
+                  Acompanhe os entregadores vinculados à loja, pedidos aceitos aguardando retirada, em percurso e entregues.
                 </p>
               </div>
 
-              <div className="text-xs font-semibold text-zinc-400">
-                Entregadores conectados: <strong className="text-emerald-400">{drivers.length}</strong>
+              <div className="flex items-center gap-3">
+                <div className="px-3 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-xs font-semibold text-zinc-300">
+                  Modo de distribuição:{' '}
+                  <strong className="text-amber-400">
+                    {storeSettings.distributionMode === 'fixed_driver' ? 'Entregador Fixo' : 'Oferta p/ Habilitados (Broadcast)'}
+                  </strong>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('settings')}
+                  className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-bold flex items-center gap-1.5 transition"
+                >
+                  <Settings className="w-3.5 h-3.5" />
+                  <span>Configurar Despacho</span>
+                </button>
               </div>
             </div>
 
-            {/* ÁREA DE DESPACHO MANUAL DE PEDIDO */}
-            {selectedOrderToDispatch ? (
-              <div className="p-6 rounded-2xl bg-red-950/30 border border-red-800/60 shadow-xl space-y-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="font-extrabold text-base text-white flex items-center gap-2">
-                    <Send className="w-4 h-4 text-red-400" />
-                    <span>Despachar Pedido #{selectedOrderToDispatch.orderNumber}</span>
-                  </h3>
-                  <button
-                    onClick={() => setSelectedOrderToDispatch(null)}
-                    className="text-xs text-zinc-400 hover:text-white"
-                  >
-                    Fechar
-                  </button>
-                </div>
+            {/* RASTREAMENTO AO VIVO: MOTOBBOYS EM PERCURSO */}
+            <div id="live-route-map-section">
+              <DriverInTransitList
+                focusedDriverId={focusedRouteDriverId}
+                onOpenOrderDetail={(orderId) => setDetailOrderId(orderId)}
+              />
+            </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-                  <div className="p-3 bg-zinc-900 rounded-xl border border-zinc-800">
-                    <span className="text-zinc-500 block mb-1">Cliente & Destino:</span>
-                    <p className="font-bold text-white">{selectedOrderToDispatch.customerName}</p>
-                    <p className="text-zinc-300">{selectedOrderToDispatch.address}</p>
-                    <p className="text-zinc-400">{selectedOrderToDispatch.region}</p>
-                  </div>
-
-                  <div className="p-3 bg-zinc-900 rounded-xl border border-zinc-800">
-                    <label className="text-zinc-400 block mb-1">Selecione o Entregador Elegível:</label>
-                    <select
-                      value={selectedDriverId}
-                      onChange={(e) => setSelectedDriverId(e.target.value)}
-                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2 text-white font-semibold"
-                    >
-                      {drivers.filter(d => d.driverName && d.status === 'ativo').length === 0 ? (
-                        <option value="">Nenhum motoboy com app conectado ativo</option>
-                      ) : (
-                        drivers.filter(d => d.driverName && d.status === 'ativo').map((drv) => (
-                          <option key={drv.id} value={drv.id}>
-                            {drv.driverName || drv.name} ({drv.vehiclePlate || 'Sem placa'}) — {drv.activeDeliveries}/{drv.maxDeliveries} corridas ({drv.presence === 'disponivel' ? '🟢 Online' : '⚪ Offline'})
-                          </option>
-                        ))
-                      )}
-                    </select>
-                  </div>
-
-                  <div className="p-3 bg-zinc-900 rounded-xl border border-zinc-800">
-                    <label className="text-zinc-400 block mb-1">Valor da Corrida (Opcional):</label>
-                    <input
-                      type="text"
-                      value={deliveryFeeOffered}
-                      onChange={(e) => setDeliveryFeeOffered(e.target.value)}
-                      placeholder="Ex: 12,00"
-                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2 text-white font-bold"
-                    />
-                    <span className="text-[10px] text-zinc-500 mt-1 block">
-                      Enviado na notificação da oferta ao motoboy.
-                    </span>
-                  </div>
-                </div>
-
-                <div className="flex justify-end gap-3 pt-2">
-                  <button
-                    onClick={() => setSelectedOrderToDispatch(null)}
-                    className="px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-zinc-300"
-                  >
-                    Cancelar
-                  </button>
-                  <button
-                    onClick={handleSendDispatchOffer}
-                    className="px-6 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs flex items-center gap-2 shadow-lg shadow-red-600/30"
-                  >
-                    <Send className="w-3.5 h-3.5" />
-                    Enviar Oferta em Tempo Real (Timeout 60s)
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="p-4 rounded-xl bg-zinc-900/60 border border-zinc-800 flex items-center justify-between text-xs">
-                <span className="text-zinc-400">
-                  Para despachar um pedido, selecione o botão <strong>"Despachar"</strong> na coluna "Pronto / Despacho" do Kanban.
-                </span>
-                <button
-                  onClick={() => setActiveTab('kanban')}
-                  className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-white font-bold"
-                >
-                  Ir para o Kanban
-                </button>
-              </div>
-            )}
-
-            {/* TABELA DE ENTREGADORES CONECTADOS EM TEMPO REAL */}
+            {/* VISÃO DOS ENTREGADORES DA LOJA (SEÇÃO 5) */}
             <div className="space-y-4">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
-                  <h3 className="font-extrabold text-base text-white">Equipe de Entregadores & Códigos de Plantão</h3>
+                  <h3 className="font-extrabold text-base text-white flex items-center gap-2">
+                    <Users className="w-4 h-4 text-amber-400" />
+                    <span>Visão dos Entregadores da Loja ({drivers.length})</span>
+                  </h3>
                   <span className="text-xs text-zinc-400">
-                    Sincronizado em tempo real com o aplicativo do entregador
+                    Contagem individual de pedidos por entregador (apenas dados desta loja)
                   </span>
                 </div>
+
+                {/* Filtro por período para os concluídos */}
+                <div className="flex items-center gap-1.5 bg-zinc-900 p-1 rounded-xl border border-zinc-800">
+                  <span className="text-[10px] font-bold text-zinc-500 px-2 uppercase">Concluídos:</span>
+                  {[
+                    { id: 'today', label: 'Hoje' },
+                    { id: '7d', label: '7 dias' },
+                    { id: '30d', label: '30 dias' },
+                    { id: 'all', label: 'Todos' },
+                  ].map((period) => (
+                    <button
+                      key={period.id}
+                      type="button"
+                      onClick={() => setCompletedPeriodFilter(period.id as 'today' | '7d' | '30d' | 'all')}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition ${
+                        completedPeriodFilter === period.id
+                          ? 'bg-red-600 text-white shadow'
+                          : 'text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      {period.label}
+                    </button>
+                  ))}
+                </div>
               </div>
 
-              <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-hidden shadow-xl">
+              <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-x-auto shadow-xl">
                 <table className="w-full text-left text-xs">
                   <thead className="bg-zinc-950/80 border-b border-zinc-800 text-zinc-400 uppercase text-[10px] font-bold">
                     <tr>
-                      <th className="p-4">Código do Plantão</th>
-                      <th className="p-4">Entregador (Nome)</th>
-                      <th className="p-4">WhatsApp / Tel</th>
-                      <th className="p-4">Placa do Veículo</th>
-                      <th className="p-4">Status do Plantão</th>
-                      <th className="p-4">Carga Atual</th>
-                      <th className="p-4">Validade</th>
-                      <th className="p-4 text-right">Ações</th>
+                      <th className="p-4">Entregador & Código</th>
+                      <th className="p-4">Situação do Vínculo</th>
+                      <th className="p-4">Aguardando Retirada</th>
+                      <th className="p-4">Em Percurso</th>
+                      <th className="p-4">Entregues ({completedPeriodFilter === 'today' ? 'Hoje' : completedPeriodFilter === '7d' ? '7 dias' : completedPeriodFilter === '30d' ? '30 dias' : 'Total'})</th>
+                      <th className="p-4 text-right">Rota & Ações</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-800/60">
                     {drivers.length === 0 ? (
                       <tr>
-                        <td colSpan={8} className="p-8 text-center text-zinc-500 text-xs">
-                          Nenhum código de plantão gerado. Use o botão abaixo para gerar o primeiro código e compartilhar com o motoboy.
+                        <td colSpan={6} className="p-8 text-center text-zinc-500 text-xs">
+                          Nenhum entregador vinculado ou código gerado. Cadastre entregadores abaixo ou em Configurações → Entregadores e Despacho.
                         </td>
                       </tr>
                     ) : (
                       drivers.map((drv) => {
-                        const isWaiting = !drv.driverName || drv.status === 'aguardando_motoboy';
+                        const isWaiting = (!drv.driverName && !drv.name) || drv.status === 'aguardando_motoboy' || drv.status === 'aguardando_vinculo';
                         const isBlocked = drv.status === 'bloqueado';
-                        const isOnline = drv.presence === 'disponivel';
+                        const isRevoked = drv.status === 'revogado';
+                        const isUnlinked = drv.status === 'vinculo_removido';
+                        const isExpired = drv.isExpired || drv.status === 'expirado';
+                        const isOnline = drv.presence === 'disponivel' && !isBlocked && !isRevoked && !isUnlinked && !isExpired;
+
+                        const waitingList = drv.waitingPickupOrders || [];
+                        const transitList = drv.inTransitOrders || [];
+                        const allDelivered = drv.deliveredOrders || [];
+
+                        const nowMs = Date.now();
+                        const filteredDelivered = allDelivered.filter((item) => {
+                          if (completedPeriodFilter === 'all') return true;
+                          const rawTs = item.deliveredAt || item.pickedUpAt || item.acceptedAt;
+                          const ts = rawTs ? new Date(rawTs).getTime() : 0;
+                          if (!ts) return true;
+                          if (completedPeriodFilter === 'today') {
+                            const startOfDay = new Date();
+                            startOfDay.setHours(0, 0, 0, 0);
+                            return ts >= startOfDay.getTime();
+                          }
+                          if (completedPeriodFilter === '7d') {
+                            return nowMs - ts <= 7 * 24 * 60 * 60 * 1000;
+                          }
+                          if (completedPeriodFilter === '30d') {
+                            return nowMs - ts <= 30 * 24 * 60 * 60 * 1000;
+                          }
+                          return true;
+                        });
+
+                        const hasRouteActive = transitList.length > 0 || (drv.inTransitCount || 0) > 0;
 
                         return (
-                          <tr key={drv.id} className="hover:bg-zinc-800/30 transition">
-                            {/* Código do Plantão */}
+                          <tr key={drv.id} className="hover:bg-zinc-800/30 transition align-top">
+                            {/* Entregador & Código */}
                             <td className="p-4">
-                              <div className="flex items-center gap-2">
-                                <span className="font-mono font-black text-amber-400 bg-zinc-950 px-2.5 py-1 rounded-lg border border-amber-500/30 text-xs tracking-wider">
-                                  {drv.inviteCode}
-                                </span>
-                                <button
-                                  type="button"
-                                  onClick={() => handleCopyCode(drv.inviteCode)}
-                                  className="p-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition"
-                                  title="Copiar Código"
-                                >
-                                  <Copy className="w-3 h-3" />
-                                </button>
+                              <div className="space-y-1">
+                                <p className="font-bold text-white text-xs">
+                                  {drv.driverName || drv.name || 'Convite Aguardando Vínculo'}
+                                </p>
+                                <div className="flex items-center gap-1.5">
+                                  <span className="font-mono font-black text-amber-400 bg-zinc-950 px-2 py-0.5 rounded border border-amber-500/30 text-[11px]">
+                                    {drv.inviteCode}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCopyCode(drv.inviteCode)}
+                                    className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition"
+                                    title="Copiar Código"
+                                  >
+                                    <Copy className="w-3 h-3" />
+                                  </button>
+                                </div>
+                                {(drv.phone || drv.vehiclePlate) && (
+                                  <p className="text-[11px] text-zinc-400 font-mono">
+                                    {drv.phone || 'Sem tel'} {drv.vehiclePlate ? `• ${drv.vehiclePlate}` : ''}
+                                  </p>
+                                )}
                               </div>
                             </td>
 
-                            {/* Nome do Entregador */}
+                            {/* Situação do Vínculo */}
                             <td className="p-4">
-                              {isWaiting ? (
-                                <span className="text-zinc-600 font-mono text-xs">—</span>
-                              ) : (
-                                <p className="font-bold text-white text-xs">{drv.driverName || drv.name}</p>
-                              )}
+                              <div className="space-y-1">
+                                {isUnlinked ? (
+                                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-zinc-800 border border-zinc-700 text-zinc-400">
+                                    ⚪ Vínculo Removido
+                                  </span>
+                                ) : isRevoked ? (
+                                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-red-950/60 border border-red-800/60 text-red-400">
+                                    🚫 Convite Revogado
+                                  </span>
+                                ) : isExpired ? (
+                                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-zinc-800 border border-zinc-700 text-amber-400">
+                                    ⏰ Código Expirado
+                                  </span>
+                                ) : isBlocked ? (
+                                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-red-950/80 border border-red-800 text-red-300">
+                                    🔴 Bloqueado p/ Ofertas
+                                  </span>
+                                ) : isWaiting ? (
+                                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-950/60 text-amber-300 border border-amber-800/60">
+                                    🟡 Aguardando Vínculo
+                                  </span>
+                                ) : isOnline ? (
+                                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-950/70 text-emerald-300 border border-emerald-800/60">
+                                    🟢 Vínculo Ativo (Online)
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-zinc-800 text-zinc-300 border border-zinc-700">
+                                    🟢 Vínculo Ativo
+                                  </span>
+                                )}
+                                <p className="text-[10px] text-zinc-500">
+                                  Capacidade: <strong className="text-zinc-300">{drv.activeDeliveries || 0}/{drv.maxDeliveries || storeSettings.maxConcurrentDeliveries}</strong> pedidos
+                                </p>
+                              </div>
                             </td>
 
-                            {/* WhatsApp / Tel */}
+                            {/* Pedidos Aceitos Aguardando Retirada */}
                             <td className="p-4">
-                              {isWaiting || !drv.phone ? (
-                                <span className="text-zinc-600 font-mono text-xs">—</span>
-                              ) : (
-                                <a
-                                  href={`https://wa.me/55${drv.phone.replace(/\D/g, '')}`}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="font-mono text-xs text-zinc-300 hover:text-emerald-400 transition underline underline-offset-2"
-                                >
-                                  {drv.phone}
-                                </a>
-                              )}
+                              <div className="space-y-1.5">
+                                <span className={`inline-block font-black text-xs px-2 py-0.5 rounded ${waitingList.length > 0 ? 'bg-blue-950 text-blue-300 border border-blue-800' : 'text-zinc-500'}`}>
+                                  {waitingList.length} {waitingList.length === 1 ? 'pedido' : 'pedidos'}
+                                </span>
+                                {waitingList.length > 0 && (
+                                  <div className="flex flex-wrap gap-1">
+                                    {waitingList.map((ord) => (
+                                      <button
+                                        key={ord.orderId}
+                                        type="button"
+                                        onClick={() => setDetailOrderId(ord.orderId)}
+                                        className="px-2 py-0.5 rounded bg-blue-950/80 hover:bg-blue-900 text-blue-300 border border-blue-800/60 font-mono font-bold text-[10px] transition"
+                                        title={`${ord.customerName} — ${ord.address}`}
+                                      >
+                                        #{ord.orderNumber}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
                             </td>
 
-                            {/* Placa do Veículo */}
+                            {/* Pedidos em Percurso */}
                             <td className="p-4">
-                              {isWaiting || !drv.vehiclePlate ? (
-                                <span className="text-zinc-600 font-mono text-xs">—</span>
-                              ) : (
-                                <span className="font-mono font-bold uppercase text-[11px] px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-200">
-                                  {drv.vehiclePlate}
+                              <div className="space-y-1.5">
+                                <span className={`inline-block font-black text-xs px-2 py-0.5 rounded ${transitList.length > 0 ? 'bg-amber-950 text-amber-300 border border-amber-800' : 'text-zinc-500'}`}>
+                                  {transitList.length} {transitList.length === 1 ? 'pedido' : 'pedidos'}
                                 </span>
-                              )}
+                                {transitList.length > 0 && (
+                                  <div className="flex flex-wrap gap-1">
+                                    {transitList.map((ord) => (
+                                      <button
+                                        key={ord.orderId}
+                                        type="button"
+                                        onClick={() => setDetailOrderId(ord.orderId)}
+                                        className="px-2 py-0.5 rounded bg-amber-950/80 hover:bg-amber-900 text-amber-300 border border-amber-800/60 font-mono font-bold text-[10px] transition"
+                                        title={`${ord.customerName} — ${ord.address}`}
+                                      >
+                                        #{ord.orderNumber}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
                             </td>
 
-                            {/* Status do Plantão */}
+                            {/* Pedidos Entregues (com filtro de período) */}
                             <td className="p-4">
-                              {isBlocked ? (
-                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-red-950/80 border border-red-800 text-red-300">
-                                  <span className="w-2 h-2 rounded-full bg-red-400" />
-                                  🔴 Bloqueado
+                              <div className="space-y-1.5">
+                                <span className={`inline-block font-black text-xs px-2 py-0.5 rounded ${filteredDelivered.length > 0 ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'text-zinc-500'}`}>
+                                  {filteredDelivered.length} {filteredDelivered.length === 1 ? 'entregue' : 'entregues'}
                                 </span>
-                              ) : isWaiting ? (
-                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-950/60 text-amber-300 border border-amber-800/60">
-                                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-                                  🟡 Aguardando Entrada do Motoboy
-                                </span>
-                              ) : isOnline ? (
-                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-950/70 text-emerald-300 border border-emerald-800/60">
-                                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                                  🟢 Em Plantão (Disponível)
-                                </span>
-                              ) : (
-                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-zinc-800 text-zinc-400 border border-zinc-700">
-                                  <span className="w-2 h-2 rounded-full bg-zinc-500" />
-                                  ⚪ Plantão Encerrado / Offline
-                                </span>
-                              )}
+                                {filteredDelivered.length > 0 && (
+                                  <div className="flex flex-wrap gap-1 max-w-[200px]">
+                                    {filteredDelivered.slice(0, 8).map((ord) => (
+                                      <button
+                                        key={ord.orderId}
+                                        type="button"
+                                        onClick={() => setDetailOrderId(ord.orderId)}
+                                        className="px-2 py-0.5 rounded bg-emerald-950/70 hover:bg-emerald-900 text-emerald-300 border border-emerald-800/50 font-mono font-bold text-[10px] transition"
+                                        title={`${ord.customerName} — ${ord.address}`}
+                                      >
+                                        #{ord.orderNumber}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
                             </td>
 
-                            {/* Carga Atual */}
-                            <td className="p-4 font-semibold text-zinc-200">
-                              {drv.activeDeliveries || 0} de {drv.maxDeliveries || 3} pedidos
-                            </td>
-
-                            {/* Validade */}
-                            <td className="p-4 text-zinc-400">
-                              {drv.validityDays ? `${drv.validityDays} dia(s)` : `${drv.inviteExpiryDays || 1} dia(s)`}
-                            </td>
-
-                            {/* Ações */}
+                            {/* Rota & Ações */}
                             <td className="p-4 text-right">
-                              <div className="flex items-center justify-end gap-2">
-                                {isWaiting && (
-                                  <a
-                                    href={getWhatsAppShareUrl(drv.inviteCode)}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="px-2.5 py-1 rounded-lg bg-emerald-950 hover:bg-emerald-900 border border-emerald-800/60 text-emerald-300 text-[11px] font-bold flex items-center gap-1 transition"
-                                    title="Enviar Código no WhatsApp"
+                              <div className="flex items-center justify-end gap-2 flex-wrap">
+                                {hasRouteActive && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setFocusedRouteDriverId(drv.driverId || drv.id);
+                                      const el = document.getElementById('live-route-map-section');
+                                      if (el) el.scrollIntoView({ behavior: 'smooth' });
+                                    }}
+                                    className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-extrabold flex items-center gap-1 shadow-md shadow-emerald-600/20 transition"
                                   >
-                                    <MessageSquare className="w-3 h-3" />
-                                    <span>WhatsApp</span>
-                                  </a>
+                                    <MapPin className="w-3 h-3" />
+                                    <span>Ver rota</span>
+                                  </button>
                                 )}
 
-                                {!isWaiting && (
+                                {isWaiting && !isRevoked && !isUnlinked && (
+                                  <>
+                                    <a
+                                      href={getWhatsAppShareUrl(drv.inviteCode)}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="px-2.5 py-1 rounded-lg bg-emerald-950 hover:bg-emerald-900 border border-emerald-800/60 text-emerald-300 text-[11px] font-bold flex items-center gap-1 transition"
+                                    >
+                                      <MessageSquare className="w-3 h-3" />
+                                      <span>WhatsApp</span>
+                                    </a>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRevokeInvite(drv.id)}
+                                      className="px-2.5 py-1 rounded-lg bg-amber-950/70 hover:bg-amber-900 border border-amber-800/60 text-amber-300 text-[11px] font-bold transition"
+                                    >
+                                      Revogar
+                                    </button>
+                                  </>
+                                )}
+
+                                {!isWaiting && !isUnlinked && !isRevoked && (
                                   <button
+                                    type="button"
                                     onClick={() => handleToggleBlockDriver(drv.id)}
                                     className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition ${
                                       isBlocked
@@ -1962,17 +2165,21 @@ export default function AdminDashboardPage() {
                                         : 'bg-zinc-800 hover:bg-red-950 hover:text-red-300 text-zinc-300'
                                     }`}
                                   >
-                                    {isBlocked ? 'Desbloquear' : 'Bloquear'}
+                                    {isBlocked ? 'Ativar Ofertas' : 'Bloquear'}
                                   </button>
                                 )}
 
-                                <button
-                                  onClick={() => handleDeleteDriverShift(drv.id)}
-                                  className="p-1.5 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-zinc-800 transition"
-                                  title="Remover Código de Plantão"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
+                                {!isUnlinked && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteDriverShift(drv.id)}
+                                    className="px-2 py-1 rounded-lg text-zinc-400 hover:text-red-400 hover:bg-zinc-800 text-[11px] font-semibold flex items-center gap-1 transition"
+                                    title="Remover vínculo com a loja (preserva histórico)"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    <span>Desvincular</span>
+                                  </button>
+                                )}
                               </div>
                             </td>
                           </tr>
@@ -1984,100 +2191,29 @@ export default function AdminDashboardPage() {
               </div>
             </div>
 
-            {/* FORMULÁRIO DE GERAÇÃO DE CÓDIGO DE PLANTÃO */}
-            <div className="p-6 rounded-2xl bg-zinc-900/60 border border-zinc-800 shadow-xl space-y-4">
-              <div className="flex items-center justify-between">
+            {/* BLOCO 4: ZONA DE LIMPEZA OPERACIONAL (ZERAR DEMONSTRAÇÕES) */}
+            <div className="p-6 bg-red-950/30 border border-red-800/50 rounded-2xl space-y-4 shadow-xl">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
-                  <h3 className="font-extrabold text-base text-white flex items-center gap-2">
-                    <KeyRound className="w-4 h-4 text-red-500" />
-                    <span>Gerar Código de Plantão</span>
+                  <h3 className="font-extrabold text-base text-red-400 flex items-center gap-2">
+                    <Trash2 className="w-4 h-4 text-red-500" />
+                    <span>Zona de Limpeza (Zerar Demonstrações e Pedidos de Teste)</span>
                   </h3>
-                  <p className="text-xs text-zinc-400 mt-0.5">
-                    O motoboy conecta seu próprio cadastro e aplicativo através deste código dinâmico.
+                  <p className="text-[11px] text-zinc-400 mt-0.5">
+                    Exclui todos os pedidos, ofertas e histórico do banco para começar do zero em operação real. As contas de motoboys ativos são preservadas.
                   </p>
                 </div>
+
+                <button
+                  type="button"
+                  onClick={handleWipeAllOrdersAndDemos}
+                  className="px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 transition transform active:scale-95 shrink-0"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span>Zerar Todos os Pedidos do Painel</span>
+                </button>
               </div>
-
-              <form onSubmit={handleGenerateShiftCode} className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs items-end">
-                <div className="sm:col-span-2">
-                  <label className="text-zinc-300 font-semibold block mb-1.5">
-                    Validade do Plantão
-                  </label>
-                  <select
-                    value={shiftValidity}
-                    onChange={(e) => setShiftValidity(e.target.value)}
-                    className="w-full bg-zinc-950 border border-zinc-700/80 rounded-xl p-3 text-white font-medium focus:border-red-500 focus:outline-none transition"
-                  >
-                    <option value="1">Hoje / 1 dia</option>
-                    <option value="3">3 dias</option>
-                    <option value="7">7 dias</option>
-                    <option value="30">30 dias</option>
-                  </select>
-                </div>
-
-                <div>
-                  <button
-                    type="submit"
-                    disabled={isGeneratingShiftCode}
-                    className="w-full py-3 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 transition"
-                  >
-                    <KeyRound className="w-4 h-4" />
-                    <span>{isGeneratingShiftCode ? 'Gerando...' : 'Gerar Código de Plantão'}</span>
-                  </button>
-                </div>
-              </form>
-
-              {/* Exibição do Código Gerado com Copiar e Compartilhar no WhatsApp */}
-              {generatedShiftCode && (
-                <div className="mt-4 p-5 rounded-2xl bg-zinc-950 border border-amber-500/40 shadow-2xl space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse" />
-                      <span className="font-bold text-amber-300 text-sm">Código de Plantão Gerado:</span>
-                    </div>
-                    <span className="text-[11px] text-zinc-400 bg-zinc-900 px-2.5 py-1 rounded-full border border-zinc-800">
-                      Validade: {shiftValidity === '1' ? 'Hoje / 1 dia' : `${shiftValidity} dias`}
-                    </span>
-                  </div>
-
-                  <div className="flex flex-col sm:flex-row items-center justify-between gap-4 p-4 rounded-xl bg-zinc-900 border border-zinc-800">
-                    <div className="text-3xl font-mono font-black text-amber-400 tracking-wider select-all">
-                      {generatedShiftCode}
-                    </div>
-
-                    <div className="flex items-center gap-2 w-full sm:w-auto">
-                      <button
-                        type="button"
-                        onClick={() => handleCopyCode(generatedShiftCode)}
-                        className={`px-4 py-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition w-full sm:w-auto ${
-                          codeCopied 
-                            ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/30' 
-                            : 'bg-zinc-800 hover:bg-zinc-700 text-white'
-                        }`}
-                      >
-                        {codeCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                        <span>{codeCopied ? 'Código Copiado!' : 'Copiar Código'}</span>
-                      </button>
-
-                      <a
-                        href={getWhatsAppShareUrl(generatedShiftCode)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/30 transition w-full sm:w-auto text-center"
-                      >
-                        <MessageSquare className="w-4 h-4" />
-                        <span>Compartilhar no WhatsApp</span>
-                      </a>
-                    </div>
-                  </div>
-
-                  <p className="text-xs text-zinc-400 bg-zinc-900/60 p-3 rounded-lg border border-zinc-800/80">
-                    Mensagem enviada: <span className="text-zinc-200 italic">"Olá! Seu código de plantão para hoje na Bella Pizza é: <strong className="text-amber-400">{generatedShiftCode}</strong>. Abra seu app NovaesWeb Entregador e insira o código para iniciar."</span>
-                  </p>
-                </div>
-              )}
             </div>
-
           </div>
         )}
 
@@ -2153,18 +2289,185 @@ export default function AdminDashboardPage() {
           </div>
         )}
 
-        {/* ABA 5: CONFIGURAÇÕES */}
+        {/* ABA 5: CONFIGURAÇÕES — ENTREGADORES E DESPACHO */}
         {activeTab === 'settings' && (
-          <div className="space-y-6 text-xs max-w-3xl">
-            <h2 className="text-xl font-black text-white">Parâmetros Operacionais da Pizzaria</h2>
-            
-            <div className="p-6 bg-zinc-900/60 border border-zinc-800 rounded-2xl space-y-4">
-              <h3 className="font-bold text-sm text-white">Regras de Negócio e Entrega</h3>
-              
-              <div className="grid grid-cols-2 gap-4">
+          <div className="space-y-8 text-xs max-w-5xl">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <h2 className="text-xl font-black text-white">Configurações • Entregadores e Despacho</h2>
+                <p className="text-xs text-zinc-400">
+                  Cadastre ou convide entregadores, gere códigos de vínculo, defina o modo de distribuição e gerencie os vínculos com a loja (mesmo sem pedidos cadastrados).
+                </p>
+              </div>
+            </div>
+
+            {/* BLOCO 0: ENDEREÇO DA LOJA */}
+            <div className="p-6 bg-zinc-900/60 border border-zinc-800 rounded-2xl space-y-4 shadow-xl">
+              <div>
+                <h3 className="font-extrabold text-base text-white flex items-center gap-2">
+                  <MapPin className="w-4 h-4 text-red-500" />
+                  <span>Endereço e Localização da Loja</span>
+                </h3>
+                <p className="text-[11px] text-zinc-400 mt-0.5">
+                  Ponto de retirada usado no mapa e nas rotas. Padrão: Centro de Canoas - RS.
+                </p>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
+                <div className="sm:col-span-2">
+                  <label className="text-zinc-300 font-semibold block mb-1">Endereço</label>
+                  <input
+                    type="text"
+                    value={storeSettings.storeAddress || ''}
+                    onChange={(e) => { settingsDirtyRef.current = true; setStoreSettings(prev => ({ ...prev, storeAddress: e.target.value })); }}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-white"
+                  />
+                </div>
                 <div>
-                  <label className="text-zinc-400 block mb-1">Regra de Preço Pizza Multissabor</label>
-                  <select className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2.5 text-white font-semibold">
+                  <label className="text-zinc-300 font-semibold block mb-1">Cidade</label>
+                  <input
+                    type="text"
+                    value={storeSettings.storeCity || ''}
+                    onChange={(e) => { settingsDirtyRef.current = true; setStoreSettings(prev => ({ ...prev, storeCity: e.target.value })); }}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-white"
+                  />
+                </div>
+                <div>
+                  <label className="text-zinc-300 font-semibold block mb-1">UF</label>
+                  <input
+                    type="text"
+                    maxLength={2}
+                    value={storeSettings.storeState || ''}
+                    onChange={(e) => { settingsDirtyRef.current = true; setStoreSettings(prev => ({ ...prev, storeState: e.target.value.toUpperCase() })); }}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-white uppercase"
+                  />
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => handleSaveLogisticsSettings()}
+                  disabled={isSavingSettings}
+                  className="py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-extrabold text-xs flex items-center gap-2"
+                >
+                  <Check className="w-4 h-4" />
+                  <span>{isSavingSettings ? 'Salvando...' : 'Salvar Endereço da Loja'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    settingsDirtyRef.current = true;
+                    setStoreSettings(prev => ({ ...prev, storeAddress: 'Rua Quinze de Janeiro, 150 - Centro, Canoas / RS', storeCity: 'Canoas', storeState: 'RS' }));
+                  }}
+                  className="py-2.5 px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white font-bold text-xs"
+                >
+                  Usar Centro de Canoas
+                </button>
+                {settingsSavedMsg && <span className="text-emerald-400 font-bold">{settingsSavedMsg}</span>}
+              </div>
+            </div>
+
+            {/* BLOCO 1: MODOS DE DISTRIBUIÇÃO E CAPACIDADE */}
+            <div className="p-6 bg-zinc-900/60 border border-zinc-800 rounded-2xl space-y-5 shadow-xl">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="font-extrabold text-base text-white flex items-center gap-2">
+                    <Bike className="w-4 h-4 text-amber-400" />
+                    <span>Modos de Distribuição e Despacho</span>
+                  </h3>
+                  <p className="text-[11px] text-zinc-400 mt-0.5">
+                    Define quem recebe a oferta quando você clicar em <strong>"Despachar"</strong> em pedidos prontos. Pedidos recém-recebidos ou em preparo nunca são despachados automaticamente.
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Modo A: Entregador Fixo */}
+                <div
+                  onClick={() => updateAndSaveSettings({ distributionMode: 'fixed_driver' })}
+                  className={`p-4 rounded-2xl border cursor-pointer transition space-y-2 ${
+                    storeSettings.distributionMode === 'fixed_driver'
+                      ? 'bg-red-950/30 border-red-500 shadow-lg shadow-red-600/10'
+                      : 'bg-zinc-950 border-zinc-800 hover:border-zinc-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-extrabold text-sm text-white">A. Entregador Fixo</span>
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                      storeSettings.distributionMode === 'fixed_driver' ? 'bg-red-600 text-white' : 'bg-zinc-800 text-zinc-400'
+                    }`}>
+                      {storeSettings.distributionMode === 'fixed_driver' ? 'Ativo ✓' : 'Selecionar'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-zinc-400 leading-relaxed">
+                    Seleciona previamente o entregador responsável. Ao despachar, envia direto para ele sem exigir nova seleção a cada pedido. Se estiver bloqueado, expirado ou sem capacidade, o sistema avisa antes e permite escolher outro.
+                  </p>
+
+                  {storeSettings.distributionMode === 'fixed_driver' && (
+                    <div className="pt-2" onClick={(e) => e.stopPropagation()}>
+                      <label className="text-[11px] font-bold text-amber-300 block mb-1">
+                        Entregador Fixo Responsável:
+                      </label>
+                      <select
+                        value={storeSettings.fixedDriverId || ''}
+                        onChange={(e) => updateAndSaveSettings({ distributionMode: 'fixed_driver', fixedDriverId: e.target.value || null })}
+                        className="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-2.5 text-white font-semibold"
+                      >
+                        <option value="">-- Selecione um entregador vinculado --</option>
+                        {drivers
+                          .filter(d => d.status !== 'vinculo_removido' && d.status !== 'revogado')
+                          .map((drv) => (
+                            <option key={drv.id} value={drv.driverId || drv.id}>
+                              {drv.driverName || drv.name || `Código ${drv.inviteCode}`} ({drv.status === 'ativo' ? 'Ativo' : drv.status}) — {drv.activeDeliveries || 0}/{drv.maxDeliveries || storeSettings.maxConcurrentDeliveries} entregas
+                            </option>
+                          ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+
+                {/* Modo B: Oferta para os entregadores habilitados */}
+                <div
+                  onClick={() => updateAndSaveSettings({ distributionMode: 'broadcast_enabled' })}
+                  className={`p-4 rounded-2xl border cursor-pointer transition space-y-2 ${
+                    storeSettings.distributionMode === 'broadcast_enabled'
+                      ? 'bg-red-950/30 border-red-500 shadow-lg shadow-red-600/10'
+                      : 'bg-zinc-950 border-zinc-800 hover:border-zinc-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-extrabold text-sm text-white">B. Oferta para os Entregadores Habilitados</span>
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                      storeSettings.distributionMode === 'broadcast_enabled' ? 'bg-red-600 text-white' : 'bg-zinc-800 text-zinc-400'
+                    }`}>
+                      {storeSettings.distributionMode === 'broadcast_enabled' ? 'Ativo ✓' : 'Selecionar'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-zinc-400 leading-relaxed">
+                    Ao despachar um pedido ou conjunto, notifica todos os entregadores elegíveis vinculados à loja. O primeiro aceite validado pelo servidor fica com toda a oferta e retira imediatamente dos demais aplicativos.
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2 border-t border-zinc-800/80 items-end">
+                <div>
+                  <label className="text-zinc-300 font-semibold block mb-1">
+                    Limite Simultâneo de Pedidos por Entregador
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={10}
+                    value={storeSettings.maxConcurrentDeliveries}
+                    onChange={(e) => { settingsDirtyRef.current = true; setStoreSettings(prev => ({ ...prev, maxConcurrentDeliveries: Number(e.target.value) || 3 })); }}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-white font-bold"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-zinc-300 font-semibold block mb-1">
+                    Regra de Preço Pizza Multissabor
+                  </label>
+                  <select className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-white font-semibold">
                     <option value="maior_valor">Maior Valor entre os sabores (Padrão)</option>
                     <option value="media">Média dos sabores</option>
                     <option value="soma_proporcional">Soma Proporcional das frações</option>
@@ -2172,24 +2475,257 @@ export default function AdminDashboardPage() {
                 </div>
 
                 <div>
-                  <label className="text-zinc-400 block mb-1">Timeout de Oferta de Entrega</label>
-                  <select className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2.5 text-white font-semibold">
-                    <option value="45">45 segundos</option>
-                    <option value="60">60 segundos (Recomendado)</option>
-                    <option value="90">90 segundos</option>
+                  <button
+                    type="button"
+                    onClick={() => handleSaveLogisticsSettings()}
+                    disabled={isSavingSettings}
+                    className="w-full py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-extrabold text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/20 transition"
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>{isSavingSettings ? 'Salvando...' : 'Salvar Modo de Distribuição'}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* BLOCO 2: CADASTRAR OU CONVIDAR ENTREGADORES & GERAR CÓDIGOS DE VÍNCULO */}
+            <div className="p-6 rounded-2xl bg-zinc-900/60 border border-zinc-800 shadow-xl space-y-4">
+              <div>
+                <h3 className="font-extrabold text-base text-white flex items-center gap-2">
+                  <UserPlus className="w-4 h-4 text-red-500" />
+                  <span>Cadastrar Entregador ou Gerar Código de Vínculo</span>
+                </h3>
+                <p className="text-xs text-zinc-400 mt-0.5">
+                  Cadastre um entregador já vinculado à loja ou gere um código de convite exclusivo (<code className="text-amber-400">NW-XXXXXX</code>) para o motoboy ativar no app.
+                </p>
+              </div>
+
+              <form onSubmit={handleGenerateShiftCode} className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end max-w-xl">
+                <div>
+                  <label className="text-zinc-300 font-semibold block mb-1">
+                    Validade do Código
+                  </label>
+                  <select
+                    value={shiftValidity}
+                    onChange={(e) => setShiftValidity(e.target.value)}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-white font-semibold"
+                  >
+                    <option value="1">1 dia (24h)</option>
+                    <option value="3">3 dias</option>
+                    <option value="7">7 dias</option>
+                    <option value="30">30 dias</option>
                   </select>
+                </div>
+                <div>
+                  <button
+                    type="submit"
+                    disabled={isGeneratingShiftCode}
+                    className="w-full py-2.5 px-4 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-extrabold text-xs flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 transition"
+                  >
+                    <KeyRound className="w-4 h-4" />
+                    <span>{isGeneratingShiftCode ? 'Gerando...' : 'Gerar Código de Vínculo'}</span>
+                  </button>
+                </div>
+              </form>
+
+              {generatedShiftCode && (
+                <div className="mt-4 p-4 rounded-2xl bg-zinc-950 border border-amber-500/40 flex flex-col sm:flex-row items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-bold text-amber-300">Código gerado:</span>
+                    <span className="text-2xl font-mono font-black text-amber-400 tracking-wider select-all">
+                      {generatedShiftCode}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleCopyCode(generatedShiftCode)}
+                      className="px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white font-bold text-xs flex items-center gap-1.5"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>{codeCopied ? 'Copiado!' : 'Copiar Código'}</span>
+                    </button>
+                    <a
+                      href={getWhatsAppShareUrl(generatedShiftCode)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5"
+                    >
+                      <MessageSquare className="w-3.5 h-3.5" />
+                      <span>Compartilhar no WhatsApp</span>
+                    </a>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* BLOCO 3: LISTA DE ENTREGADORES E CÓDIGOS DE VÍNCULO DA LOJA */}
+            <div className="p-6 rounded-2xl bg-zinc-900/60 border border-zinc-800 shadow-xl space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="font-extrabold text-base text-white">Entregadores Vinculados e Códigos de Convite</h3>
+                  <p className="text-xs text-zinc-400">
+                    Consulte a validade e situação dos códigos, revogue convites pendentes, ative/bloqueie o recebimento de ofertas ou remova o vínculo com a loja (preservando a conta e o histórico).
+                  </p>
                 </div>
               </div>
 
-              <div>
-                <label className="text-zinc-400 block mb-1">Limite Máximo de Pedidos Simultâneos por Motoboy</label>
-                <input
-                  type="number"
-                  defaultValue={3}
-                  min={1}
-                  max={6}
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2.5 text-white font-bold"
-                />
+              <div className="overflow-x-auto rounded-xl border border-zinc-800">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-zinc-950 border-b border-zinc-800 text-zinc-400 uppercase text-[10px] font-bold">
+                    <tr>
+                      <th className="p-3.5">Código</th>
+                      <th className="p-3.5">Entregador</th>
+                      <th className="p-3.5">Contato / Placa</th>
+                      <th className="p-3.5">Validade</th>
+                      <th className="p-3.5">Situação</th>
+                      <th className="p-3.5 text-right">Ações</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-800/60">
+                    {drivers.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="p-6 text-center text-zinc-500">
+                          Nenhum entregador ou código cadastrado nesta loja ainda.
+                        </td>
+                      </tr>
+                    ) : (
+                      drivers.map((drv) => {
+                        const isWaiting = (!drv.driverName && !drv.name) || drv.status === 'aguardando_motoboy' || drv.status === 'aguardando_vinculo';
+                        const isBlocked = drv.status === 'bloqueado';
+                        const isRevoked = drv.status === 'revogado';
+                        const isUnlinked = drv.status === 'vinculo_removido';
+                        const isExpired = drv.isExpired || drv.status === 'expirado';
+
+                        return (
+                          <tr key={drv.id} className="hover:bg-zinc-800/30 transition">
+                            <td className="p-3.5">
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-mono font-black text-amber-400 bg-zinc-950 px-2 py-0.5 rounded border border-amber-500/30">
+                                  {drv.inviteCode}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleCopyCode(drv.inviteCode)}
+                                  className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white"
+                                >
+                                  <Copy className="w-3 h-3" />
+                                </button>
+                              </div>
+                            </td>
+                            <td className="p-3.5 font-bold text-white">
+                              {drv.driverName || drv.name || <span className="text-zinc-500 font-normal italic">Aguardando ativação</span>}
+                              {storeSettings.distributionMode === 'fixed_driver' && (storeSettings.fixedDriverId === drv.id || storeSettings.fixedDriverId === drv.driverId) && (
+                                <span className="ml-2 px-2 py-0.5 rounded-full bg-red-600/30 border border-red-500/50 text-red-300 text-[10px]">
+                                  Fixo
+                                </span>
+                              )}
+                            </td>
+                            <td className="p-3.5 text-zinc-400 font-mono text-[11px]">
+                              {drv.phone || '—'} {drv.vehiclePlate ? `• ${drv.vehiclePlate}` : ''}
+                            </td>
+                            <td className="p-3.5 text-zinc-400 text-[11px]">
+                              {drv.validityDays || drv.inviteExpiryDays || 1} dia(s)
+                              {drv.expiresAt && (
+                                <span className="block text-[10px] text-zinc-500">
+                                  Até {new Date(drv.expiresAt).toLocaleDateString('pt-BR')}
+                                </span>
+                              )}
+                            </td>
+                            <td className="p-3.5">
+                              {isUnlinked ? (
+                                <span className="px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400 font-bold text-[10px]">
+                                  Vínculo Removido
+                                </span>
+                              ) : isRevoked ? (
+                                <span className="px-2 py-0.5 rounded-full bg-red-950 text-red-400 border border-red-800 font-bold text-[10px]">
+                                  Convite Revogado
+                                </span>
+                              ) : isExpired ? (
+                                <span className="px-2 py-0.5 rounded-full bg-amber-950 text-amber-400 border border-amber-800 font-bold text-[10px]">
+                                  Expirado
+                                </span>
+                              ) : isBlocked ? (
+                                <span className="px-2 py-0.5 rounded-full bg-red-950 text-red-300 border border-red-800 font-bold text-[10px]">
+                                  Bloqueado p/ Ofertas
+                                </span>
+                              ) : isWaiting ? (
+                                <span className="px-2 py-0.5 rounded-full bg-amber-950/60 text-amber-300 border border-amber-800 font-bold text-[10px]">
+                                  Aguardando Vínculo
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-800 font-bold text-[10px]">
+                                  Ativo (Recebendo Ofertas)
+                                </span>
+                              )}
+                            </td>
+                            <td className="p-3.5 text-right">
+                              <div className="flex items-center justify-end gap-2">
+                                {isWaiting && !isRevoked && !isUnlinked && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRevokeInvite(drv.id)}
+                                    className="px-2.5 py-1 rounded-lg bg-amber-950/80 hover:bg-amber-900 text-amber-300 border border-amber-800/60 font-bold text-[11px]"
+                                  >
+                                    Revogar Convite
+                                  </button>
+                                )}
+
+                                {!isWaiting && !isRevoked && !isUnlinked && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleBlockDriver(drv.id)}
+                                    className={`px-2.5 py-1 rounded-lg font-bold text-[11px] ${
+                                      isBlocked
+                                        ? 'bg-emerald-900/70 hover:bg-emerald-800 text-emerald-200'
+                                        : 'bg-zinc-800 hover:bg-red-950 text-zinc-300 hover:text-red-300'
+                                    }`}
+                                  >
+                                    {isBlocked ? 'Ativar Ofertas' : 'Bloquear Ofertas'}
+                                  </button>
+                                )}
+
+                                {!isUnlinked && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteDriverShift(drv.id)}
+                                    className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-red-950 text-zinc-400 hover:text-red-300 font-bold text-[11px]"
+                                  >
+                                    Remover Vínculo
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* BLOCO 4: ZONA DE LIMPEZA OPERACIONAL (ZERAR DEMONSTRAÇÕES) */}
+            <div className="p-6 bg-red-950/30 border border-red-800/50 rounded-2xl space-y-4 shadow-xl">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <h3 className="font-extrabold text-base text-red-400 flex items-center gap-2">
+                    <Trash2 className="w-4 h-4 text-red-500" />
+                    <span>Zona de Limpeza (Zerar Demonstrações e Pedidos de Teste)</span>
+                  </h3>
+                  <p className="text-[11px] text-zinc-400 mt-0.5">
+                    Exclui todos os pedidos, ofertas e histórico do banco para começar do zero em operação real. As contas de motoboys ativos são preservadas.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleWipeAllOrdersAndDemos}
+                  className="px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 transition transform active:scale-95 shrink-0"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span>Zerar Todos os Pedidos do Painel</span>
+                </button>
               </div>
             </div>
           </div>
@@ -2423,6 +2959,19 @@ export default function AdminDashboardPage() {
 
             {/* Corpo do Modal com Scroll */}
             <div className="p-6 overflow-y-auto space-y-6 flex-1 text-xs">
+
+              {/* Alerta de Indisponibilidade do Entregador Fixo (Não troca silenciosamente) */}
+              {dispatchWarningBanner && (
+                <div className="p-4 rounded-2xl bg-amber-950/70 border border-amber-500/60 text-amber-200 space-y-1.5 shadow-lg">
+                  <div className="flex items-center gap-2 font-extrabold text-amber-300 text-xs uppercase">
+                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                    <span>Atenção: Entregador Fixo Indisponível</span>
+                  </div>
+                  <p className="text-xs text-amber-100 leading-relaxed">
+                    {dispatchWarningBanner}
+                  </p>
+                </div>
+              )}
               
               {/* Seção 1: Lista dos Pedidos Selecionados */}
               <div>
@@ -2575,6 +3124,34 @@ export default function AdminDashboardPage() {
                   />
                 </div>
 
+                {/* Opção de Oferta para todos os entregadores habilitados (Broadcast) */}
+                <div
+                  onClick={() => {
+                    setDispatchModeChoice('broadcast_enabled');
+                    setSelectedDriverId('__BROADCAST__');
+                  }}
+                  className={`p-3 rounded-2xl border transition text-xs cursor-pointer flex items-center justify-between ${
+                    dispatchModeChoice === 'broadcast_enabled' || selectedDriverId === '__BROADCAST__'
+                      ? 'bg-amber-950/40 border-amber-500 shadow-md shadow-amber-600/20'
+                      : 'bg-zinc-950 border-zinc-800 hover:border-zinc-700'
+                  }`}
+                >
+                  <div>
+                    <p className="font-extrabold text-amber-300 flex items-center gap-1.5">
+                      <Users className="w-3.5 h-3.5" />
+                      <span>Oferta para todos os entregadores habilitados (Broadcast)</span>
+                    </p>
+                    <p className="text-[11px] text-zinc-400">
+                      Notifica todos os entregadores elegíveis vinculados à loja; o primeiro a aceitar leva todo o lote.
+                    </p>
+                  </div>
+                  {(dispatchModeChoice === 'broadcast_enabled' || selectedDriverId === '__BROADCAST__') && (
+                    <span className="px-2.5 py-1 rounded-full bg-amber-500 text-black font-extrabold text-[10px] shrink-0">
+                      Broadcast ✓
+                    </span>
+                  )}
+                </div>
+
                 {/* Grid / Lista de Entregadores */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-56 overflow-y-auto pr-1">
                   {drivers
@@ -2586,18 +3163,20 @@ export default function AdminDashboardPage() {
                       return name.includes(q) || plate.includes(q) || phone.includes(q);
                     })
                     .map((drv) => {
-                      const isSelected = selectedDriverId === drv.id;
-                      const isWaiting = !drv.driverName || drv.status === 'aguardando_motoboy';
-                      const isBlocked = drv.status === 'bloqueado';
+                      const targetKey = drv.driverId || drv.id;
+                      const isSelected = dispatchModeChoice === 'fixed_driver' && (selectedDriverId === drv.id || selectedDriverId === drv.driverId);
+                      const isWaiting = (!drv.driverName && !drv.name) || drv.status === 'aguardando_motoboy' || drv.status === 'aguardando_vinculo';
+                      const isBlocked = drv.status === 'bloqueado' || drv.status === 'revogado' || drv.status === 'vinculo_removido';
                       const isOnline = drv.presence === 'disponivel';
-                      const isMaxReached = (drv.activeDeliveries || 0) >= (drv.maxDeliveries || 3);
+                      const isMaxReached = (drv.activeDeliveries || 0) >= (drv.maxDeliveries || storeSettings.maxConcurrentDeliveries || 3);
 
                       return (
                         <div
                           key={drv.id}
                           onClick={() => {
                             if (!isBlocked && !isWaiting) {
-                              setSelectedDriverId(drv.id);
+                              setDispatchModeChoice('fixed_driver');
+                              setSelectedDriverId(targetKey);
                             }
                           }}
                           className={`p-3 rounded-2xl border transition text-xs cursor-pointer relative ${
@@ -2632,19 +3211,19 @@ export default function AdminDashboardPage() {
                             <div className="flex items-center justify-between">
                               <span>Carga ativa:</span>
                               <span className={`font-bold ${isMaxReached ? 'text-red-400' : 'text-zinc-200'}`}>
-                                {drv.activeDeliveries || 0} de {drv.maxDeliveries || 3} corridas
+                                {drv.activeDeliveries || 0} de {drv.maxDeliveries || storeSettings.maxConcurrentDeliveries || 3} corridas
                               </span>
                             </div>
                           </div>
 
                           {isWaiting && (
                             <p className="text-[10px] text-amber-400/90 mt-1 font-semibold">
-                              Código: {drv.inviteCode} (Aguardando login no app)
+                              Código: {drv.inviteCode} (Aguardando vínculo)
                             </p>
                           )}
                           {isBlocked && (
                             <p className="text-[10px] text-red-400 mt-1 font-semibold">
-                              🔴 Entregador bloqueado
+                              🔴 Indisponível ({drv.status})
                             </p>
                           )}
                         </div>
@@ -2705,7 +3284,7 @@ export default function AdminDashboardPage() {
                 <button
                   type="button"
                   onClick={handleSendGroupedDispatchOffer}
-                  disabled={isSendingDispatch || selectedOrders.length === 0 || !selectedDriverId}
+                  disabled={isSendingDispatch || selectedOrders.length === 0 || (dispatchModeChoice === 'fixed_driver' && !selectedDriverId)}
                   className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-red-600 to-red-500 hover:from-red-500 hover:to-red-600 disabled:opacity-50 text-white font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 transition transform active:scale-95 flex-1 sm:flex-none"
                 >
                   <Send className={`w-4 h-4 ${isSendingDispatch ? 'animate-spin' : ''}`} />
@@ -2746,7 +3325,7 @@ export default function AdminDashboardPage() {
 
         const handleRejectTopOrder = async () => {
           setPendingNewOrders(prev => prev.filter(o => o.id !== topOrder.id));
-          await handleCancelOrder(topOrder.id);
+          handleOpenCancelModal(topOrder);
         };
 
         return (
@@ -2984,14 +3563,30 @@ export default function AdminDashboardPage() {
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-zinc-300">{detail.phone || 'Sem telefone'}</span>
                     {phoneDigits && (
-                      <a
-                        href={`https://wa.me/55${phoneDigits}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 hover:bg-emerald-900 transition"
-                      >
-                        WhatsApp
-                      </a>
+                      <div className="flex items-center gap-1.5">
+                        <a
+                          href={`https://wa.me/55${phoneDigits}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 hover:bg-emerald-900 transition"
+                        >
+                          WhatsApp
+                        </a>
+                        {detail.trackingToken && (
+                          <a
+                            href={`https://wa.me/55${phoneDigits}?text=${encodeURIComponent(
+                              `🍕 *Bella Pizza:* Olá ${detail.customerName || 'Cliente'}! Acompanhe a entrega do seu pedido #${detail.orderNumber} em tempo real pelo mapa:\n${typeof window !== 'undefined' ? window.location.origin : ''}/pedido/${detail.trackingToken}`
+                            )}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-900/60 text-emerald-300 border border-emerald-700/60 hover:bg-emerald-800 transition flex items-center gap-1"
+                            title="Enviar mensagem com link de rastreamento GPS"
+                          >
+                            <MapPin className="w-2.5 h-2.5" />
+                            <span>Enviar Rastreio</span>
+                          </a>
+                        )}
+                      </div>
                     )}
                   </div>
                 </section>
@@ -3141,6 +3736,73 @@ export default function AdminDashboardPage() {
           </div>
         );
       })()}
+
+      {/* MODAL PERSONALIZADO DE CANCELAMENTO DE PEDIDO (SEM USAR PROMPT) */}
+      {orderToCancel && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in"
+          onClick={() => !isCancelingOrder && setOrderToCancel(null)}
+        >
+          <div
+            className="bg-zinc-900 border border-zinc-700/80 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+              <div className="flex items-center gap-2 text-red-500 font-black text-base">
+                <XCircle className="w-5 h-5" />
+                <span>Cancelar Pedido #{orderToCancel.orderNumber}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => !isCancelingOrder && setOrderToCancel(null)}
+                className="p-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-zinc-300">
+              Cliente: <strong className="text-white">{orderToCancel.customerName}</strong>
+              <br />
+              Total: <strong className="text-amber-400">R$ {orderToCancel.total.toFixed(2).replace('.', ',')}</strong>
+            </p>
+
+            <div className="space-y-1.5">
+              <label className="text-[11px] font-bold text-zinc-400 uppercase">
+                Motivo / Justificativa do Cancelamento:
+              </label>
+              <textarea
+                value={cancelReasonInput}
+                onChange={(e) => setCancelReasonInput(e.target.value)}
+                placeholder="Ex: Cliente desistiu, endereço incorreto, etc."
+                rows={3}
+                autoFocus
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs text-white placeholder-zinc-500 focus:border-red-500 focus:outline-none transition resize-none"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-800">
+              <button
+                type="button"
+                disabled={isCancelingOrder}
+                onClick={() => setOrderToCancel(null)}
+                className="px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold transition"
+              >
+                Voltar
+              </button>
+              <button
+                type="button"
+                disabled={isCancelingOrder}
+                onClick={handleConfirmCancelOrder}
+                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold transition flex items-center gap-1.5 shadow-lg shadow-red-600/30"
+              >
+                <XCircle className="w-4 h-4" />
+                <span>{isCancelingOrder ? 'Cancelando...' : 'Confirmar Cancelamento'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );
