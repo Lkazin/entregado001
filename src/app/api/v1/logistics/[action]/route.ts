@@ -342,12 +342,7 @@ async function loadLogisticsState(_forceCloud = false) {
         liveSettingsByStore = parsed.settingsByStore;
       }
       if (Array.isArray(parsed.drivers)) {
-        liveDrivers = parsed.drivers
-          .filter(
-            (d: any) =>
-              !d.name?.includes('Rodrigo Silva') && !d.driverName?.includes('Rodrigo Silva')
-          )
-          .map((d: any) => {
+        liveDrivers = parsed.drivers.map((d: any) => {
             const isExpired =
               d.expiresAt &&
               new Date(d.expiresAt).getTime() < Date.now() &&
@@ -403,11 +398,9 @@ async function persistLogisticsState(mutationId?: string): Promise<string> {
   const mutId = mutationId || crypto.randomUUID();
   try {
     recomputeDriverCounters();
-    liveStateVersion = Math.max(1, liveStateVersion) + 1;
-    lastLocalLogisticsPersistAt = Date.now();
-    lastMutationId = mutId;
+    const nextVersion = Math.max(1, liveStateVersion) + 1;
     const payload = JSON.stringify({
-      stateVersion: liveStateVersion,
+      stateVersion: nextVersion,
       lastMutationId: mutId,
       updatedAt: new Date().toISOString(),
       settingsByStore: liveSettingsByStore,
@@ -416,11 +409,26 @@ async function persistLogisticsState(mutationId?: string): Promise<string> {
       assignments: liveAssignments,
       tracking: liveTracking,
     });
-    await supabaseAdmin.storage
+    const { error } = await supabaseAdmin.storage
       .from('novaesweb_store')
       .upload('logistics.json', payload, { upsert: true, contentType: 'application/json' });
-  } catch (e) {
-    console.warn('[route.ts] Erro ao persistir logistics.json:', e);
+    if (error) throw error;
+    liveStateVersion = nextVersion;
+    lastLocalLogisticsPersistAt = Date.now();
+    lastMutationId = mutId;
+  } catch {
+    // Descarta a mutação não confirmada e restaura somente o estado persistido.
+    // Sem isso, um convite não salvo poderia continuar válido nesta instância.
+    liveDrivers = [];
+    liveOffers = [];
+    liveAssignments = [];
+    liveTracking = {};
+    liveSettingsByStore = {};
+    liveStateVersion = 0;
+    lastLocalLogisticsPersistAt = 0;
+    lastMutationId = '';
+    await loadLogisticsState(true);
+    throw new Error('Não foi possível salvar os dados de logística. Tente novamente.');
   }
   return mutId;
 }
