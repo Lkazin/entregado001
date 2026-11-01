@@ -1111,6 +1111,23 @@ export default function AdminDashboardPage() {
     return `https://wa.me/?text=${encodeURIComponent(text)}`;
   };
 
+  const handleLinkDriverAccount = async (driver: AdminDriver) => {
+    const phone = window.prompt('Telefone com DDD da conta que o entregador criou no aplicativo:', driver.phone || '');
+    if (!phone?.trim()) return;
+    try {
+      const payload = {membershipId:driver.id,phone};
+      const previewResponse = await fetch('/api/v1/logistics/account-link-existing',{method:'POST',headers:getAdminHeaders(),body:JSON.stringify(payload)});
+      const preview = await previewResponse.json();
+      if (!previewResponse.ok || !preview.success) throw new Error(preview.error || 'Não foi possível conferir a conta.');
+      if (!window.confirm('Associar o vínculo e o histórico de ' + (driver.driverName || driver.name || 'este entregador') + ' à conta ' + preview.preview.name + ' (' + preview.preview.phone + ')? Confirme pessoalmente com o entregador.')) return;
+      const response = await fetch('/api/v1/logistics/account-link-existing',{method:'POST',headers:getAdminHeaders(),body:JSON.stringify({...payload,confirmed:true})});
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.error || 'Não foi possível associar a conta.');
+      window.alert('Conta associada. O entregador pode atualizar o aplicativo para recuperar o vínculo e o histórico.');
+      fetchData(true);
+    } catch (error) { window.alert(error instanceof Error ? error.message : 'Não foi possível associar a conta.'); }
+  };
+
   // Ativar ou Bloquear o recebimento de novas ofertas pelo entregador
   const handleToggleBlockDriver = async (driverId: string) => {
     await fetch('/api/v1/logistics/driver-toggle-block', {
@@ -1998,6 +2015,7 @@ export default function AdminDashboardPage() {
                                     <Copy className="w-3 h-3" />
                                   </button>
                                 </div>
+                                <button type="button" onClick={() => handleLinkDriverAccount(drv)} className="text-[11px] text-sky-300 hover:text-sky-100 underline">Associar conta cadastrada</button>
                                 {(drv.phone || drv.vehiclePlate) && (
                                   <p className="text-[11px] text-zinc-400 font-mono">
                                     {drv.phone || 'Sem tel'} {drv.vehiclePlate ? `• ${drv.vehiclePlate}` : ''}
@@ -3216,6 +3234,7 @@ export default function AdminDashboardPage() {
                             </div>
                           </div>
 
+                          <button type="button" onClick={(event) => {event.stopPropagation();handleLinkDriverAccount(drv);}} className="text-[11px] text-sky-300 underline">Associar conta cadastrada</button>
                           {isWaiting && (
                             <p className="text-[10px] text-amber-400/90 mt-1 font-semibold">
                               Código: {drv.inviteCode} (Aguardando vínculo)

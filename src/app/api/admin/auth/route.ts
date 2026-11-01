@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { supabaseAdmin } from '@/lib/supabase/server';
+import crypto from 'node:crypto';
 import {
   ADMIN_COOKIE_NAME,
   signAdminToken,
@@ -33,6 +35,11 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const ip = getClientIp(req);
+    const {data: allowed,error: limitError} = await supabaseAdmin.rpc('driver_auth_consume_limit',{
+      p_key:crypto.createHash('sha256').update('admin:'+ip).digest('hex'),p_limit:10,p_window_seconds:900,
+    });
+    if (limitError) return NextResponse.json({success:false,error:'Não foi possível validar o acesso agora.'},{status:503});
+    if (allowed !== true) return NextResponse.json({success:false,error:'Muitas tentativas. Aguarde 15 minutos.'},{status:429});
     const now = Date.now();
     const record = attemptsByIp.get(ip);
 
@@ -48,8 +55,9 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json().catch(() => ({}));
     const candidatePin = String(body?.pin || '').trim();
-    const expectedPin = (process.env.ADMIN_ACCESS_PIN || '615210').trim();
+    const expectedPin = (process.env.ADMIN_ACCESS_PIN || '').trim();
 
+    if (!expectedPin) return NextResponse.json({success:false,error:'O acesso administrativo precisa ser configurado pelo responsável.'},{status:503});
     if (!candidatePin || candidatePin !== expectedPin) {
       const nextCount = record && now < record.resetAt ? record.count + 1 : 1;
       attemptsByIp.set(ip, { count: nextCount, resetAt: now + 60_000 });

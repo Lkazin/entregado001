@@ -3,9 +3,15 @@ import { supabaseAdmin } from '@/lib/supabase/server';
 import {
   signDriverToken,
   verifyAdminRequest,
-  verifyDriverRequest,
+  verifyDriverRequest as verifySignedDriverRequest,
+  verifyDriverToken,
+  extractBearerToken,
 } from '@/lib/auth/tokens';
 import crypto from 'crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { readLogisticsState, writeLogisticsState, StateStoreError } from '@/lib/logistics/state-store';
+import { AccountSessionError, normalizeDriverPhone } from '@/lib/auth/driver-account';
+import { prepareDriverAccount, driverAccountContext, bindAccountMembership } from '@/lib/auth/driver-account-logistics';
 
 export const dynamic = 'force-dynamic';
 
@@ -74,6 +80,8 @@ let liveSettingsByStore: Record<string, StoreLogisticsSettings> = {};
 let liveStateVersion = 0;
 let lastLocalLogisticsPersistAt = 0;
 let lastMutationId = '';
+let databaseRevision = 0;
+const mutationRequest = new AsyncLocalStorage<NextRequest>();
 
 const gShared = globalThis as unknown as {
   __novaesweb_orders__?: any[];
@@ -322,12 +330,9 @@ async function loadLogisticsState(_forceCloud = false) {
     return;
   }
   try {
-    const { data: fileData, error } = await supabaseAdmin.storage
-      .from('novaesweb_store')
-      .download('logistics.json');
-    if (!error && fileData) {
-      const text = await fileData.text();
-      const parsed = JSON.parse(text);
+    const {state: parsed, revision} = await readLogisticsState();
+    databaseRevision = revision;
+    {
       const cloudVersion = typeof parsed.stateVersion === 'number' ? parsed.stateVersion : 1;
 
       if (!_forceCloud && cloudVersion < liveStateVersion) {
@@ -391,7 +396,7 @@ async function loadLogisticsState(_forceCloud = false) {
       }
       recomputeDriverCounters();
     }
-  } catch {}
+  } catch (error) { throw error; }
 }
 
 async function persistLogisticsState(mutationId?: string): Promise<string> {
@@ -409,14 +414,15 @@ async function persistLogisticsState(mutationId?: string): Promise<string> {
       assignments: liveAssignments,
       tracking: liveTracking,
     });
-    const { error } = await supabaseAdmin.storage
-      .from('novaesweb_store')
-      .upload('logistics.json', payload, { upsert: true, contentType: 'application/json' });
-    if (error) throw error;
+    const req = mutationRequest.getStore();
+    const account = req?.headers.get('x-account-session') ? driverAccountContext(req).account : null;
+    databaseRevision = await writeLogisticsState(JSON.parse(payload), databaseRevision, account && req ? {
+      accountId: account.id, sessionHash: crypto.createHash('sha256').update(req.headers.get('x-account-session')!).digest('hex'),
+    } : undefined);
     liveStateVersion = nextVersion;
     lastLocalLogisticsPersistAt = Date.now();
     lastMutationId = mutId;
-  } catch {
+  } catch (persistError) {
     // Descarta a mutação não confirmada e restaura somente o estado persistido.
     // Sem isso, um convite não salvo poderia continuar válido nesta instância.
     liveDrivers = [];
@@ -427,8 +433,8 @@ async function persistLogisticsState(mutationId?: string): Promise<string> {
     liveStateVersion = 0;
     lastLocalLogisticsPersistAt = 0;
     lastMutationId = '';
-    await loadLogisticsState(true);
-    throw new Error('Não foi possível salvar os dados de logística. Tente novamente.');
+    await loadLogisticsState(true).catch(() => {});
+    throw persistError;
   }
   return mutId;
 }
@@ -681,7 +687,7 @@ const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
   'Access-Control-Allow-Headers':
-    'Content-Type, Authorization, x-store-id, x-driver-id, x-invite-code, x-device-fingerprint, x-session-token, x-admin-token, x-idempotency-key',
+    'Content-Type, Authorization, x-store-id, x-driver-id, x-invite-code, x-device-fingerprint, x-session-token, x-admin-token, x-idempotency-key, x-account-session',
   'Access-Control-Max-Age': '86400',
 };
 
@@ -698,9 +704,87 @@ function jsonResponse(data: any, init?: ResponseInit) {
     status: init?.status ?? 200,
     headers: {
       ...corsHeaders,
+      'Cache-Control': 'no-store',
       ...((init?.headers as Record<string, string>) || {}),
     },
   });
+}
+
+const DRIVER_ACTIONS = new Set([
+  'account-bootstrap', 'account-claim', 'invite-activate', 'session-validate', 'offers', 'assignments',
+  'route-current', 'history', 'ratings', 'driver-presence', 'shift-end', 'shift-close', 'offer-respond',
+  'pickup-confirm', 'route-reorder', 'assignment-withdraw', 'delivery-complete', 'delivery-confirm',
+  'delivery-complete-with-pin', 'tracking-location-push', 'tracking-session-start', 'tracking-session-end',
+]);
+
+async function authorizeAccountAction(req: NextRequest, action: string) {
+  if (!DRIVER_ACTIONS.has(action)) return;
+  if (!['account-bootstrap', 'account-claim', 'invite-activate'].includes(action) && verifyAdminRequest(req).valid) return;
+  await prepareDriverAccount(req);
+}
+
+function verifyDriverRequest(req: NextRequest, drivers: any[], body?: any) {
+  const auth = verifySignedDriverRequest(req, drivers, body);
+  if (!auth.valid || verifyAdminRequest(req).valid) return auth;
+  const { account, memberships } = driverAccountContext(req);
+  const owned = memberships.some(m => m.account_id === account.id && m.membership_id === auth.membershipId &&
+    m.driver_id === auth.driverId && isSameStore(m.store_id, auth.storeId));
+  if (!owned) return { valid: false, status: 403, error: 'Este vínculo pertence a outra conta de entregador.' };
+  return auth;
+}
+
+function ownsAssignment(auth: ReturnType<typeof verifyDriverRequest>, assignment: any) {
+  return Boolean(assignment && auth.valid && isSameStore(assignment.storeId,auth.storeId) &&
+    [auth.driverId,auth.membershipId].filter(Boolean).includes(assignment.driverId));
+}
+
+function assertOwnedTargets(req: NextRequest, action: string, body: any) {
+  if (!['pickup-confirm','route-reorder','assignment-withdraw','delivery-complete','delivery-confirm','delivery-complete-with-pin','tracking-location-push','tracking-session-start'].includes(action)) return;
+  const auth = verifyDriverRequest(req,liveDrivers,body);
+  if (!auth.valid) throw new AccountSessionError(auth.error || 'Acesso negado.',auth.status || 401,'DRIVER_SESSION_INVALID');
+  const keys: any[] = action === 'pickup-confirm' ? (body.assignmentIds || body.orderIds || [body.assignmentId || body.orderId]).filter(Boolean) :
+    action === 'route-reorder' ? (body.stops || []).map((stop:any) => stop.assignmentId) : [body.assignmentId || body.orderId].filter(Boolean);
+  if (keys.length === 0 && !action.startsWith('tracking-')) throw new AccountSessionError('Informe uma entrega válida.',400,'INVALID_ASSIGNMENT');
+  for (const key of keys) {
+    const clean = String(key).replace(/^asg_/,'').replace(/^#/,'');
+    const targets = liveAssignments.filter(a => [a.id,a.assignmentId,a.orderId,a.orderNumber].filter(x => x != null).some(x => String(x).replace(/^asg_/,'').replace(/^#/,'') === clean));
+    if (!targets.length || targets.some(a => !ownsAssignment(auth,a))) throw new AccountSessionError('Esta entrega não pertence à sua conta e loja.',403,'ASSIGNMENT_FORBIDDEN');
+  }
+}
+
+function accountBootstrap(req: NextRequest) {
+  const { account, memberships } = driverAccountContext(req);
+  const ownedDrivers = liveDrivers.filter(d => memberships.some(m => m.membership_id === d.id &&
+    m.driver_id === (d.driverId || d.id) && isSameStore(m.store_id, d.storeId)));
+  const belongs = (a: any, d: any) => isSameStore(a.storeId, d.storeId) &&
+    (a.driverId === (d.driverId || d.id) || a.driverId === d.id);
+  const open = (a: any) => ['accepted','assigned','waiting_pickup','picked_up','in_transit','em_rota'].includes(a.status);
+  const eligible = ownedDrivers.filter(d => d.status === 'ativo' && (!d.expiresAt || Date.parse(d.expiresAt) > Date.now()) &&
+    (d.shiftStatus !== 'plantao_encerrado' || liveAssignments.some(a => belongs(a, d) && open(a))));
+  eligible.sort((a,b) => Number(liveAssignments.some(x => belongs(x,b) && open(x))) - Number(liveAssignments.some(x => belongs(x,a) && open(x))) ||
+    Date.parse(b.activatedAt || b.createdAt || 0) - Date.parse(a.activatedAt || a.createdAt || 0));
+  const driver = eligible[0];
+  const ledger = Array.from(new Set(ownedDrivers.map(d => normalizeStoreId(d.storeId)))).map(storeId => {
+    const records = ownedDrivers.filter(d => isSameStore(d.storeId, storeId));
+    const deliveries = liveAssignments.filter(a => records.some(d => belongs(a,d)));
+    const completed = deliveries.filter(a => ['delivered','entregue'].includes(a.status));
+    const settings = getStoreSettings(storeId);
+    return {storeId,storeName:settings.storeName || records[0].storeName,storeAddress:settings.storeAddress,
+      completedCount:completed.length,canceledCount:deliveries.filter(a => ['withdrawn','canceled_by_store','cancelada','cancelled','canceled'].includes(a.status)).length,
+      totalToReceive:completed.reduce((sum,a) => sum + Number(a.feeOffered ?? a.deliveryFee ?? 0),0),
+      lastShiftDate:records.map(d => d.activatedAt || d.createdAt).sort().at(-1),isActiveShift:eligible.some(d => isSameStore(d.storeId,storeId))};
+  });
+  const settings = driver ? getStoreSettings(driver.storeId) : null;
+  const existingToken = driver?.sessionToken;
+  const existingPayload = verifyDriverToken(existingToken);
+  const reusableToken = existingPayload.valid && existingPayload.membershipId === driver?.id && existingPayload.driverId === (driver?.driverId || driver?.id) && isSameStore(existingPayload.storeId,driver?.storeId) ? existingToken : null;
+  const session = driver ? {
+    token:reusableToken || signDriverToken({driverId:driver.driverId || driver.id,membershipId:driver.id,storeId:driver.storeId,ttlMs:Math.max(1,Math.min(30*86400000,Date.parse(driver.expiresAt || new Date(Date.now()+86400000).toISOString())-Date.now()))}),
+    driverId:driver.driverId || driver.id,driverName:account.name,phone:account.phone,vehiclePlate:account.vehiclePlate,
+    deviceFingerprint:'',storeId:driver.storeId,storeName:settings?.storeName || driver.storeName,storeAddress:settings?.storeAddress,
+    membershipId:driver.id,role:'entregador_plantao',expiresAt:driver.expiresAt,isActivated:true,shiftStartedAt:driver.activatedAt,
+  } : null;
+  return jsonResponse({success:true,account,session,ledger,presence:{manualEnabled:driver?.presence === 'disponivel',isOnline:true,lastHeartbeat:new Date().toISOString()}});
 }
 
 async function handleSessionValidate(req: NextRequest, body: any, storeId: string) {
@@ -777,8 +861,9 @@ export async function GET(
   { params }: { params: Promise<{ action: string }> }
 ) {
   try {
-    await loadLogisticsState();
     const { action } = await params;
+    await authorizeAccountAction(req, action);
+    await loadLogisticsState(action === 'account-bootstrap');
     const storeHeader =
       req.headers.get('x-store-id') ||
       req.nextUrl.searchParams.get('storeId') ||
@@ -786,6 +871,7 @@ export async function GET(
     const storeId = normalizeStoreId(storeHeader);
 
     switch (action) {
+      case 'account-bootstrap': return accountBootstrap(req);
       // 1. Painel do Lojista: Estado Logístico Completo Isolado por Loja (Entregadores, Ofertas, Entregas, GPS e Configurações)
       case 'drivers':
       case 'settings-get': {
@@ -979,8 +1065,7 @@ export async function GET(
               (a.driverId === auth.driverId ||
                 a.driverId === auth.membershipId ||
                 a.driverId === auth.driverRecord?.driverId ||
-                a.driverId === auth.driverRecord?.id ||
-                (drvName && a.driverName === drvName)) &&
+                a.driverId === auth.driverRecord?.id) &&
               a.status !== 'delivered' &&
               a.status !== 'entregue' &&
               a.status !== 'canceled_by_store' &&
@@ -1010,8 +1095,7 @@ export async function GET(
             (a) =>
               isSameStore(a.storeId, driverStore) &&
               (a.driverId === auth.driverId ||
-                a.driverId === auth.membershipId ||
-                (!a.driverId && drvName && a.driverName === drvName)) &&
+                a.driverId === auth.membershipId) &&
               a.status !== 'delivered' &&
               a.status !== 'entregue' &&
               a.status !== 'canceled_by_store' &&
@@ -1059,8 +1143,7 @@ export async function GET(
           (a) =>
             isSameStore(a.storeId, driverStore) &&
             (a.driverId === auth.driverId ||
-              a.driverId === auth.membershipId ||
-              (!a.driverId && drvName && a.driverName === drvName)) &&
+              a.driverId === auth.membershipId) &&
             (a.status === 'entregue' || a.status === 'delivered')
         );
 
@@ -1627,7 +1710,8 @@ export async function GET(
         );
     }
   } catch (err: any) {
-    return jsonResponse({ success: false, error: err.message }, { status: 500 });
+    if (err instanceof AccountSessionError || err instanceof StateStoreError) return jsonResponse({success:false,error:err.message,code:err.code},{status:err.status});
+    return jsonResponse({ success: false, error: 'Não foi possível concluir a operação de logística. Tente novamente.' }, { status: 500 });
   }
 }
 
@@ -1646,10 +1730,31 @@ export async function POST(
     const storeId = normalizeStoreId(storeHeader);
 
     // Todas as mutações POST passam pelo lock atômico + reload do estado atualizado
-    return await withAtomicLogisticsLock(async () => {
+    return await withAtomicLogisticsLock(() => mutationRequest.run(req, async () => {
+      await authorizeAccountAction(req, action);
+      const adminTenant = verifyAdminRequest(req);
+      if (adminTenant.valid && body.storeId && !isSameStore(body.storeId,adminTenant.storeId)) throw new AccountSessionError('Acesso negado à loja solicitada.',403,'STORE_FORBIDDEN');
       await loadLogisticsState();
+      assertOwnedTargets(req, action, body);
 
       switch (action) {
+        case 'account-claim': {
+          return jsonResponse({success:false,code:'LEGACY_MIGRATION_REQUIRES_STORE',error:'Peça ao lojista para associar sua conta cadastrada ao vínculo antigo.'},{status:409});
+        }
+        case 'account-link-existing': {
+          const admin = verifyAdminRequest(req);
+          if (!admin.valid) return jsonResponse({success:false,error:'Acesso restrito ao lojista.'},{status:401});
+          const driver = liveDrivers.find(d => d.id === body.membershipId && isSameStore(d.storeId,admin.storeId));
+          if (!driver) return jsonResponse({success:false,error:'Vínculo não encontrado nesta loja.'},{status:404});
+          const phone = normalizeDriverPhone(body.phone);
+          const {data: row,error} = await supabaseAdmin.from('driver_accounts').select('id,name,phone,vehicle_plate,vehicle_model,created_at').eq('phone',phone).maybeSingle();
+          if (error) throw new AccountSessionError('Não foi possível conferir a conta.',503,'ACCOUNT_UNAVAILABLE');
+          if (!row) return jsonResponse({success:false,error:'O entregador precisa criar sua conta primeiro.'},{status:404});
+          const account = {id:row.id,name:row.name,phone:row.phone,vehiclePlate:row.vehicle_plate,vehicleModel:row.vehicle_model,createdAt:row.created_at};
+          if (body.confirmed !== true) return jsonResponse({success:true,preview:{name:account.name,phone:account.phone.replace(/.(?=.{4})/g,'*'),driverName:driver.driverName || driver.name,storeName:driver.storeName}});
+          await bindAccountMembership(account,driver);
+          return jsonResponse({success:true,message:'Conta associada ao vínculo e histórico existentes.'});
+        }
         case 'session-validate': {
           return handleSessionValidate(req, body, storeId);
         }
@@ -1844,8 +1949,7 @@ export async function POST(
                 (a.driverId === auth.driverId ||
                   a.driverId === auth.membershipId ||
                   a.driverId === auth.driverRecord?.driverId ||
-                  a.driverId === auth.driverRecord?.id ||
-                  (drvName && a.driverName === drvName)) &&
+                  a.driverId === auth.driverRecord?.id) &&
                 a.status !== 'delivered' &&
                 a.status !== 'entregue' &&
                 a.status !== 'canceled_by_store' &&
@@ -1878,8 +1982,7 @@ export async function POST(
               (a) =>
                 isSameStore(a.storeId, driverStore) &&
                 (a.driverId === auth.driverId ||
-                  a.driverId === auth.membershipId ||
-                  (!a.driverId && drvName && a.driverName === drvName)) &&
+                  a.driverId === auth.membershipId) &&
                 a.status !== 'delivered' &&
                 a.status !== 'entregue' &&
                 a.status !== 'canceled_by_store' &&
@@ -1965,6 +2068,7 @@ export async function POST(
             storeId: effectiveStoreId,
             storeName: body.storeName || 'Bella Pizza',
             inviteCode: rawToken,
+            accountInviteVersion: 1,
             tokenHash,
             sessionToken: preSignedSessionToken,
             driverName: prefilledName,
@@ -2190,8 +2294,14 @@ export async function POST(
 
         // 2. Ativação do Convite / Código de Vínculo pelo App do Entregador (Validação Estrita no Servidor)
         case 'invite-activate': {
-          const { inviteCode, deviceFingerprint, driverId, driverName, phone, vehiclePlate } =
-            body;
+          const {account} = driverAccountContext(req);
+          const {data: allowed,error: limitError} = await supabaseAdmin.rpc('driver_auth_consume_limit',{
+            p_key:crypto.createHash('sha256').update('invite:'+account.id).digest('hex'),p_limit:10,p_window_seconds:900,
+          });
+          if (limitError) throw new AccountSessionError('Não foi possível validar o código agora.',503,'ACCOUNT_UNAVAILABLE');
+          if (allowed !== true) throw new AccountSessionError('Muitas tentativas de código. Aguarde 15 minutos.',429,'RATE_LIMITED');
+          const { inviteCode, deviceFingerprint } = body;
+          const driverId = account.id, driverName = account.name, phone = account.phone, vehiclePlate = account.vehiclePlate;
           if (!inviteCode) {
             return jsonResponse(
               { success: false, error: 'Código de vínculo obrigatório.' },
@@ -2216,6 +2326,11 @@ export async function POST(
               },
               { status: 404 }
             );
+          }
+
+          const {memberships} = driverAccountContext(req);
+          if (shift.accountInviteVersion !== 1 && !memberships.some(m => m.membership_id === shift.id)) {
+            return jsonResponse({success:false,code:'LEGACY_MIGRATION_REQUIRES_STORE',error:'Este vínculo é antigo. Peça ao lojista para associar sua conta cadastrada.'},{status:409});
           }
 
           if (shift.status === 'revogado') {
@@ -2258,27 +2373,12 @@ export async function POST(
             );
           }
 
-          // Se o código já foi ativado por outro entregador diferente, impede sequestro do código
-          if (
-            shift.status === 'ativo' &&
-            shift.driverId &&
-            shift.driverId !== resolvedDriverId &&
-            shift.phone &&
-            phone &&
-            shift.phone.replace(/\D/g, '') !== phone.replace(/\D/g, '')
-          ) {
-            return jsonResponse(
-              {
-                success: false,
-                error: 'Este código já está vinculado a outro entregador.',
-              },
-              { status: 409 }
-            );
-          }
-
           const shiftStoreId = normalizeStoreId(shift.storeId || storeId);
           shift.storeId = shiftStoreId;
           shift.driverId = shift.driverId || resolvedDriverId;
+          // A posse do convite permite a primeira associação. Depois, só a conta
+          // proprietária pode reativá-lo, independentemente do telefone informado.
+          await bindAccountMembership(account, shift);
           shift.driverName = driverName || shift.driverName || 'Entregador';
           shift.name = shift.driverName;
           shift.phone = phone || shift.phone || null;
@@ -3320,7 +3420,6 @@ export async function POST(
 
           liveAssignments.forEach((a) => {
             const matchesDriver =
-              !a.driverId ||
               a.driverId === drvId ||
               a.driverId === auth.membershipId ||
               a.driverId === auth.driverRecord?.id ||
@@ -3339,7 +3438,7 @@ export async function POST(
               targetIds.includes(a.assignmentId) ||
               targetIds.includes(a.orderId);
 
-            if (matchesId && (matchesDriver || isSameStore(a.storeId, driverStore))) {
+            if (matchesId && matchesDriver && isSameStore(a.storeId, driverStore)) {
               a.status = 'picked_up';
               a.pickedUpAt = nowISO;
               a.pickupConfirmedAt = nowISO;
@@ -3360,9 +3459,7 @@ export async function POST(
               const oNum = String(o.orderNumber || '').replace('#', '');
               if (
                 pickedIdSet.has(oId) ||
-                pickedNumSet.has(oNum) ||
-                targetSet.has(oId) ||
-                targetSet.has(oNum)
+                pickedNumSet.has(oNum)
               ) {
                 o.status = 'em_entrega';
                 o.dispatchStatus = 'em_entrega';
@@ -3668,6 +3765,7 @@ export async function POST(
         case 'tracking-location-push': {
           await loadLogisticsState();
           const auth = verifyDriverRequest(req, liveDrivers, body);
+          if (!auth.valid) return jsonResponse({success:false,error:auth.error},{status:auth.status || 401});
           const {
             assignmentId,
             latitude: rawLat,
@@ -3790,6 +3888,7 @@ export async function POST(
         // 15. Início de Sessão de Rota com GPS
         case 'tracking-session-start': {
           const auth = verifyDriverRequest(req, liveDrivers, body);
+          if (!auth.valid) return jsonResponse({success:false,error:auth.error},{status:auth.status || 401});
           const { assignmentId, initialLocation } = body;
           const validDriverId =
             auth.driverId || body.driverId || req.headers.get('x-driver-id') || 'drv_active';
@@ -3831,6 +3930,7 @@ export async function POST(
         // 16. Encerramento de Sessão de Rastreamento
         case 'tracking-session-end': {
           const auth = verifyDriverRequest(req, liveDrivers, body);
+          if (!auth.valid) return jsonResponse({success:false,error:auth.error},{status:auth.status || 401});
           const validDriverId =
             auth.driverId || body.driverId || req.headers.get('x-driver-id');
           if (validDriverId && liveTracking[validDriverId]) {
@@ -3853,8 +3953,9 @@ export async function POST(
             { status: 404 }
           );
       }
-    });
+    }));
   } catch (err: any) {
-    return jsonResponse({ success: false, error: err.message }, { status: 500 });
+    if (err instanceof AccountSessionError || err instanceof StateStoreError) return jsonResponse({success:false,error:err.message,code:err.code},{status:err.status});
+    return jsonResponse({ success: false, error: 'Não foi possível concluir a operação de logística. Tente novamente.' }, { status: 500 });
   }
 }

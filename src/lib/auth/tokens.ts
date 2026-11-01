@@ -7,13 +7,24 @@ if (typeof window !== 'undefined') {
 
 export const ADMIN_COOKIE_NAME = 'novaes_admin_token';
 
+function normalizedStoreId(value?: string | null): string {
+  const storeId = typeof value === 'string' ? value.trim() : '';
+  return ['11111111-1111-1111-1111-111111111111','bella-pizza','store_bella_pizza'].includes(storeId)
+    ? 'store_bella_pizza' : storeId;
+}
+
+function adminStoreMatches(req: NextRequest, storeId?: string): boolean {
+  const authorizedStore = normalizedStoreId(storeId);
+  if (!authorizedStore) return false;
+  return [req.headers.get('x-store-id'), req.nextUrl?.searchParams.get('storeId')]
+    .every(requested => !requested || normalizedStoreId(requested) === authorizedStore);
+}
+
 function getHmacSecret(): string {
-  const secret =
-    process.env.ADMIN_SESSION_SECRET ||
-    process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!secret) {
+  const secret = process.env.ADMIN_SESSION_SECRET;
+  if (!secret || secret.length < 32) {
     throw new Error(
-      'Segredo de sessão não configurado no servidor (defina SUPABASE_SERVICE_ROLE_KEY ou ADMIN_SESSION_SECRET).'
+      'Defina ADMIN_SESSION_SECRET privado com pelo menos 32 caracteres no servidor.'
     );
   }
   return secret;
@@ -92,10 +103,10 @@ export function signAdminToken(
 
 export function verifyAdminToken(token?: string | null): { valid: boolean; storeId?: string } {
   const res = verifySignedToken('adm_v1', token);
-  if (!res.valid || res.payload?.role !== 'admin') {
+  if (!res.valid || res.payload?.role !== 'admin' || !normalizedStoreId(res.payload?.storeId)) {
     return { valid: false };
   }
-  return { valid: true, storeId: res.payload.storeId };
+  return { valid: true, storeId: normalizedStoreId(res.payload.storeId) };
 }
 
 export function extractBearerToken(req: NextRequest): string | null {
@@ -110,17 +121,13 @@ export function verifyAdminRequest(req: NextRequest): { valid: boolean; storeId?
   const cookieToken = req.cookies.get(ADMIN_COOKIE_NAME)?.value;
   if (cookieToken) {
     const check = verifyAdminToken(cookieToken);
-    if (check.valid) return check;
+    if (check.valid && adminStoreMatches(req, check.storeId)) return check;
   }
 
   const headerToken = req.headers.get('x-admin-token') || extractBearerToken(req);
   if (headerToken) {
-    const expectedPin = (process.env.ADMIN_ACCESS_PIN || '615210').trim();
-    if (headerToken.trim() === expectedPin) {
-      return { valid: true, storeId: 'store_bella_pizza' };
-    }
     const check = verifyAdminToken(headerToken);
-    if (check.valid) return check;
+    if (check.valid && adminStoreMatches(req, check.storeId)) return check;
   }
 
   return { valid: false };
@@ -203,198 +210,32 @@ export function verifyDriverRequest(
     body?.inviteCode ||
     null;
 
-  // 1. Token assinado novo (drv_v1.*)
-  if (rawToken && rawToken.startsWith('drv_v1.')) {
-    const verified = verifyDriverToken(rawToken);
-    if (!verified.valid) {
-      return {
-        valid: false,
-        error: 'Sessão do entregador inválida ou expirada. Reconecte o código de plantão.',
-        status: 401,
-      };
+  // Operações logísticas exigem um token assinado exato do vínculo.
+  // A sessão exclusiva da conta é verificada separadamente em cada requisição.
+  const admin = verifyAdminRequest(req);
+  if (admin.valid) {
+    const authorizedStore = normalizedStoreId(admin.storeId);
+    if (body?.storeId && normalizedStoreId(body.storeId) !== authorizedStore) {
+      return { valid: false, status: 403, error: 'Acesso negado aos dados de outra loja.' };
     }
-
-    // Prioriza sempre encontrar um registro ativo na loja para este entregador
-    let matched = liveDrivers.find(
-      (d) =>
-        d.status === 'ativo' &&
-        ((verified.membershipId && d.id === verified.membershipId) ||
-          (verified.driverId && (d.driverId === verified.driverId || d.id === verified.driverId)) ||
-          (verified.inviteCode && d.inviteCode === verified.inviteCode))
-    );
-
-    if (!matched) {
-      matched = liveDrivers.find(
-        (d) =>
-          (verified.membershipId && d.id === verified.membershipId) ||
-          (verified.driverId && (d.driverId === verified.driverId || d.id === verified.driverId)) ||
-          (verified.inviteCode && d.inviteCode === verified.inviteCode)
-      );
-    }
-
-    if (!matched) {
-      return {
-        valid: false,
-        error: 'Vínculo não encontrado na loja. Solicite um novo código ao lojista.',
-        status: 403,
-      };
-    }
-
-    if (matched.status === 'bloqueado') {
-      return {
-        valid: false,
-        error: 'Este entregador ou código de plantão foi bloqueado pela loja.',
-        status: 403,
-      };
-    }
-
-    if (matched.status === 'revogado' || matched.status === 'vinculo_removido') {
-      // Reconcilia automaticamente se o entregador possui outro plantão ativo na loja
-      const activeAlternative = liveDrivers.find(
-        (d) =>
-          d.status === 'ativo' &&
-          (d.driverId === verified.driverId ||
-            d.phone === matched.phone ||
-            (matched.driverId && d.driverId === matched.driverId))
-      );
-      if (activeAlternative) {
-        matched = activeAlternative;
-      } else {
-        return {
-          valid: false,
-          error: 'O vínculo deste entregador com a loja foi revogado ou encerrado.',
-          status: 403,
-        };
-      }
-    }
-
-    if (matched.expiresAt && new Date(matched.expiresAt).getTime() < Date.now()) {
-      return {
-        valid: false,
-        error: 'O código de vínculo com a loja expirou. Solicite renovação ao lojista.',
-        status: 403,
-      };
-    }
-
-    // Impede que um entregador acesse dados especificando o ID de outro entregador
-    if (
-      requestedDriverId &&
-      matched &&
-      requestedDriverId !== verified.driverId &&
-      requestedDriverId !== verified.membershipId &&
-      requestedDriverId !== matched.driverId &&
-      requestedDriverId !== matched.id
-    ) {
-      return {
-        valid: false,
-        error: 'Acesso negado aos dados de outro entregador.',
-        status: 403,
-      };
-    }
-
-    return {
-      valid: true,
-      driverId: matched?.driverId || verified.driverId,
-      membershipId: matched?.id || verified.membershipId,
-      storeId: matched?.storeId || verified.storeId,
-      driverRecord: matched || null,
-    };
+    const hasDriverTarget = Boolean(requestedDriverId || requestedMembershipId);
+    const matched = liveDrivers.find(d => normalizedStoreId(d.storeId) === authorizedStore &&
+      (!requestedMembershipId || d.id === requestedMembershipId) &&
+      (!requestedDriverId || d.driverId === requestedDriverId || d.id === requestedDriverId));
+    if (hasDriverTarget && !matched) return { valid: false, status: 403, error: 'Entregador não encontrado na loja autorizada.' };
+    return { valid: true, driverId: matched?.driverId || matched?.id || 'admin', membershipId: matched?.id || 'admin',
+      storeId: authorizedStore, driverRecord: matched || null };
   }
-
-  // 2. Compatibilidade com sessões ativas em dispositivos já logados (sessionToken hex ou jwt_cloud_ / jwt_shift_)
-  if (rawToken) {
-    let matched = liveDrivers.find((d) => d.sessionToken && d.sessionToken === rawToken);
-
-    if (!matched && (rawToken.startsWith('jwt_cloud_') || rawToken.startsWith('jwt_shift_') || /^[0-9a-f]{32,64}$/i.test(rawToken))) {
-      matched = liveDrivers.find(
-        (d) =>
-          (requestedMembershipId && d.id === requestedMembershipId) ||
-          (requestedDriverId && (d.driverId === requestedDriverId || d.id === requestedDriverId)) ||
-          (requestedInviteCode && d.inviteCode === requestedInviteCode)
-      );
-
-      // Se o app antigo chamou sem query param mas há apenas 1 entregador ativo na loja, reconcilia
-      if (!matched && !requestedDriverId && !requestedMembershipId) {
-        const activeList = liveDrivers.filter((d) => d.status === 'ativo');
-        if (activeList.length === 1) {
-          matched = activeList[0];
-        }
-      }
-    }
-
-    if (matched) {
-      if (matched.status === 'bloqueado') {
-        return {
-          valid: false,
-          error: 'Este entregador ou código de plantão foi bloqueado pela loja.',
-          status: 403,
-        };
-      }
-
-      if (matched.status === 'revogado' || matched.status === 'vinculo_removido') {
-        return {
-          valid: false,
-          error: 'O vínculo deste entregador com a loja foi revogado ou encerrado.',
-          status: 403,
-        };
-      }
-
-      if (matched.expiresAt && new Date(matched.expiresAt).getTime() < Date.now()) {
-        return {
-          valid: false,
-          error: 'O código de vínculo com a loja expirou.',
-          status: 403,
-        };
-      }
-
-      return {
-        valid: true,
-        driverId: matched.driverId || matched.id,
-        membershipId: matched.id,
-        storeId: matched.storeId,
-        driverRecord: matched,
-        isLegacyToken: true,
-      };
-    }
+  const verified = verifyDriverToken(rawToken);
+  if (!verified.valid) return {valid:false,status:401,error:'Entre na sua conta e conecte-se à loja para continuar.'};
+  const matched = liveDrivers.find(d => d.id === verified.membershipId && (d.driverId || d.id) === verified.driverId && d.storeId === verified.storeId);
+  if (!matched) return {valid:false,status:403,error:'Vínculo não encontrado na loja.'};
+  if (['bloqueado','revogado','vinculo_removido'].includes(matched.status)) return {valid:false,status:403,error:'O vínculo foi bloqueado ou encerrado pela loja.'};
+  if (matched.expiresAt && Date.parse(matched.expiresAt) <= Date.now()) return {valid:false,status:403,error:'O vínculo com a loja expirou. Solicite renovação.'};
+  if ((requestedDriverId && requestedDriverId !== verified.driverId && requestedDriverId !== verified.membershipId) ||
+      (requestedMembershipId && requestedMembershipId !== verified.membershipId) ||
+      (req.headers.get('x-store-id') && req.headers.get('x-store-id') !== verified.storeId)) {
+    return {valid:false,status:403,error:'Acesso negado aos dados de outro entregador ou loja.'};
   }
-
-  // 3. Compatibilidade de telemetria GPS local e chamadas com identificadores do entregador ativo
-  if (!rawToken && (requestedDriverId || requestedMembershipId)) {
-    const matched = liveDrivers.find(
-      (d) =>
-        d.status === 'ativo' &&
-        ((requestedDriverId && (d.driverId === requestedDriverId || d.id === requestedDriverId || d.phone === requestedDriverId || d.driverName === requestedDriverId)) ||
-          (requestedMembershipId && d.id === requestedMembershipId))
-    );
-    if (matched) {
-      return {
-        valid: true,
-        driverId: matched.driverId || matched.id,
-        membershipId: matched.id,
-        storeId: matched.storeId,
-        driverRecord: matched,
-        isLegacyToken: true,
-      };
-    }
-  }
-
-  // 4. Permite inspeção se autenticado como Admin
-  if (verifyAdminRequest(req).valid) {
-    const matched = requestedDriverId
-      ? liveDrivers.find((d) => d.driverId === requestedDriverId || d.id === requestedDriverId)
-      : liveDrivers[0];
-    return {
-      valid: true,
-      driverId: matched?.driverId || requestedDriverId || 'admin',
-      membershipId: matched?.id || 'admin',
-      driverRecord: matched || null,
-    };
-  }
-
-  return {
-    valid: false,
-    error: 'Sessão de entregador não autorizada. Faça login e ative o código de plantão.',
-    status: 401,
-  };
+  return {valid:true,driverId:verified.driverId,membershipId:verified.membershipId,storeId:verified.storeId,driverRecord:matched};
 }
-

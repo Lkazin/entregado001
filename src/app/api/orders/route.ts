@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/server';
 import { verifyAdminRequest } from '@/lib/auth/tokens';
 import crypto from 'crypto';
+import { readLogisticsState, writeLogisticsState } from '@/lib/logistics/state-store';
 
 export const dynamic = 'force-dynamic';
 
@@ -205,12 +206,7 @@ async function cleanLogisticsForOrder(
   mode: 'cancel_dispatch' | 'cancel_order' | 'delete_order'
 ): Promise<void> {
   try {
-    const { data: fileData } = await supabaseAdmin.storage
-      .from('novaesweb_store')
-      .download('logistics.json');
-    if (!fileData) return;
-
-    const state = JSON.parse(await fileData.text());
+    const {state,revision} = await readLogisticsState();
     let changed = false;
     const targetStr = String(orderId);
 
@@ -259,12 +255,7 @@ async function cleanLogisticsForOrder(
     }
 
     if (changed) {
-      await supabaseAdmin.storage
-        .from('novaesweb_store')
-        .upload('logistics.json', JSON.stringify(state), {
-          upsert: true,
-          contentType: 'application/json',
-        });
+      await writeLogisticsState(state,revision);
     }
   } catch (e) {
     console.warn('Erro ao sincronizar logistics.json após atualização do pedido:', e);
