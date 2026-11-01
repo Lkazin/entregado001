@@ -3,7 +3,9 @@
 import React, { useState } from 'react';
 import Navbar from '@/components/Navbar';
 import Hero from '@/components/Hero';
+import ScrollReveal from '@/components/ScrollReveal';
 import CategoryGrid from '@/components/CategoryGrid';
+import HowItWorks from '@/components/HowItWorks';
 import PizzaBuilder from '@/components/PizzaBuilder';
 import CatalogSection from '@/components/CatalogSection';
 import CartCheckoutDrawer from '@/components/CartCheckoutDrawer';
@@ -84,16 +86,24 @@ export default function HomePage() {
 
       <main className="flex-1">
         <Hero />
-        <CategoryGrid />
-        <PizzaBuilder onAddToCart={handleAddToCart} />
-        <CatalogSection
-          onSelectFlavorForBuilder={(flavor: PizzaFlavorMock) => {
-            // Rola suavemente até o montador
-            const el = document.getElementById('montar-pizza');
-            if (el) el.scrollIntoView({ behavior: 'smooth' });
-          }}
-          onAddDrink={handleAddDrink}
-        />
+        <ScrollReveal>
+          <CategoryGrid />
+        </ScrollReveal>
+        <ScrollReveal delay={100}>
+          <HowItWorks />
+        </ScrollReveal>
+        <ScrollReveal delay={100}>
+          <PizzaBuilder onAddToCart={handleAddToCart} />
+        </ScrollReveal>
+        <ScrollReveal delay={100}>
+          <CatalogSection
+            onSelectFlavorForBuilder={(flavor: PizzaFlavorMock) => {
+              const el = document.getElementById('montar-pizza');
+              if (el) el.scrollIntoView({ behavior: 'smooth' });
+            }}
+            onAddDrink={handleAddDrink}
+          />
+        </ScrollReveal>
       </main>
 
       <Footer />
