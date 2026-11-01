@@ -3,6 +3,9 @@
 import React, { useState } from 'react';
 import Navbar from '@/components/Navbar';
 import Hero from '@/components/Hero';
+import ScrollReveal from '@/components/ScrollReveal';
+import CategoryGrid from '@/components/CategoryGrid';
+import HowItWorks from '@/components/HowItWorks';
 import PizzaBuilder from '@/components/PizzaBuilder';
 import CatalogSection from '@/components/CatalogSection';
 import CartCheckoutDrawer from '@/components/CartCheckoutDrawer';
@@ -83,15 +86,24 @@ export default function HomePage() {
 
       <main className="flex-1">
         <Hero />
-        <PizzaBuilder onAddToCart={handleAddToCart} />
-        <CatalogSection
-          onSelectFlavorForBuilder={(flavor: PizzaFlavorMock) => {
-            // Rola suavemente até o montador
-            const el = document.getElementById('montar-pizza');
-            if (el) el.scrollIntoView({ behavior: 'smooth' });
-          }}
-          onAddDrink={handleAddDrink}
-        />
+        <ScrollReveal>
+          <CategoryGrid />
+        </ScrollReveal>
+        <ScrollReveal delay={100}>
+          <HowItWorks />
+        </ScrollReveal>
+        <ScrollReveal delay={100}>
+          <PizzaBuilder onAddToCart={handleAddToCart} />
+        </ScrollReveal>
+        <ScrollReveal delay={100}>
+          <CatalogSection
+            onSelectFlavorForBuilder={(flavor: PizzaFlavorMock) => {
+              const el = document.getElementById('montar-pizza');
+              if (el) el.scrollIntoView({ behavior: 'smooth' });
+            }}
+            onAddDrink={handleAddDrink}
+          />
+        </ScrollReveal>
       </main>
 
       <Footer />
@@ -115,7 +127,7 @@ export default function HomePage() {
             </div>
 
             <div>
-              <span className="text-xs font-bold text-red-500 uppercase tracking-wider">Pedido Recebido</span>
+              <span className="text-xs font-bold text-pizza-gold uppercase tracking-wider">Pedido Recebido</span>
               <h3 className="text-2xl font-black text-white mt-1">Pedido #{lastCreatedOrder.orderNumber}</h3>
               <p className="text-xs text-zinc-400 mt-1">
                 Seu pedido foi encaminhado para a cozinha da Bella Pizza!
@@ -126,7 +138,7 @@ export default function HomePage() {
             <div className="p-4 rounded-xl bg-zinc-950 border border-zinc-800 text-left space-y-2">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold text-zinc-300">Código de Entrega (PIN):</span>
-                <span className="text-xs px-2 py-0.5 rounded bg-red-950 text-red-400 font-semibold border border-red-800/40">
+                <span className="text-xs px-2 py-0.5 rounded bg-pizza-card text-pizza-gold font-semibold border border-pizza-gold/30">
                   Segredo
                 </span>
               </div>
@@ -147,7 +159,7 @@ export default function HomePage() {
             <div className="pt-2 flex flex-col gap-2">
               <a
                 href={`/pedido/${lastCreatedOrder.trackingToken}`}
-                className="w-full py-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 transition"
+                className="w-full py-3 rounded-xl bg-gradient-to-r from-pizza-gold-dark via-pizza-gold to-pizza-gold-light hover:brightness-110 text-pizza-black font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-gold-sm transition"
               >
                 <span>Acompanhar Pedido ao Vivo</span>
                 <ExternalLink className="w-4 h-4" />

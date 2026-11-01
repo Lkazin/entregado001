@@ -113,13 +113,13 @@ export default function AdminPinAuth({ onSuccess }: AdminPinAuthProps) {
     <div className="min-h-screen bg-zinc-950 flex flex-col items-center justify-center p-4 relative overflow-hidden">
       
       {/* Luz ambiente de fundo */}
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-red-600/10 rounded-full blur-[120px] pointer-events-none" />
+      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-pizza-gold/10 rounded-full blur-[120px] pointer-events-none" />
 
       <div className="max-w-sm w-full bg-zinc-900 border border-zinc-800 rounded-3xl p-8 shadow-2xl relative z-10 text-center space-y-6">
         
         {/* Cabeçalho */}
         <div className="space-y-2">
-          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-red-600 to-red-800 flex items-center justify-center text-white mx-auto shadow-lg shadow-red-600/30">
+          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-pizza-gold-dark to-pizza-gold flex items-center justify-center text-white mx-auto shadow-lg shadow-gold-sm">
             <Lock className="w-7 h-7 text-amber-300" />
           </div>
           <h1 className="text-xl font-black text-white tracking-tight">
@@ -146,9 +146,9 @@ export default function AdminPinAuth({ onSuccess }: AdminPinAuthProps) {
                 onKeyDown={e => handleKeyDown(idx, e)}
                 className={`w-11 h-14 text-center text-2xl font-black rounded-xl border bg-zinc-950 text-white focus:outline-none transition-all duration-150 ${
                   error
-                    ? 'border-red-600 ring-2 ring-red-600/30 bg-red-950/20'
+                    ? 'border-pizza-gold ring-2 ring-pizza-gold/30 bg-pizza-card/20'
                     : digit
-                    ? 'border-red-500 ring-2 ring-red-500/20 text-red-400'
+                    ? 'border-red-500 ring-2 ring-red-500/20 text-pizza-gold'
                     : 'border-zinc-800 focus:border-red-500 focus:ring-2 focus:ring-red-500/20'
                 }`}
               />
@@ -156,7 +156,7 @@ export default function AdminPinAuth({ onSuccess }: AdminPinAuthProps) {
           </div>
 
           {error && (
-            <p className="text-xs text-red-400 flex items-center justify-center gap-1.5 animate-shake">
+            <p className="text-xs text-pizza-gold flex items-center justify-center gap-1.5 animate-shake">
               <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
               <span>{errorMessage}</span>
             </p>

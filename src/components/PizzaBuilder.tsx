@@ -92,7 +92,7 @@ export default function PizzaBuilder({ onAddToCart }: PizzaBuilderProps) {
         
         {/* Cabeçalho da Seção */}
         <div className="text-center max-w-3xl mx-auto mb-10">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-red-950/60 border border-red-800/40 text-red-400 text-xs font-semibold uppercase tracking-wider mb-3">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-pizza-card/60 border border-pizza-gold/30 text-pizza-gold text-xs font-semibold uppercase tracking-wider mb-3">
             <Sparkles className="w-3.5 h-3.5" />
             Personalização Exclusiva
           </div>
@@ -120,7 +120,7 @@ export default function PizzaBuilder({ onAddToCart }: PizzaBuilderProps) {
             {/* PASSO 1: TAMANHO */}
             <div className="bg-zinc-900/60 border border-zinc-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm">
               <div className="flex items-center justify-between mb-4">
-                <span className="text-xs font-bold text-red-500 uppercase tracking-wider">Passo 1</span>
+                <span className="text-xs font-bold text-pizza-gold uppercase tracking-wider">Passo 1</span>
                 <span className="text-xs text-zinc-400">Selecione as fatias</span>
               </div>
               <h3 className="text-lg font-bold text-white mb-4">Escolha o Tamanho da Pizza</h3>
@@ -135,12 +135,12 @@ export default function PizzaBuilder({ onAddToCart }: PizzaBuilderProps) {
                       onClick={() => handleSizeChange(size)}
                       className={`text-left p-4 rounded-xl border transition-all duration-200 relative ${
                         isSelected
-                          ? 'bg-red-950/40 border-red-600 ring-2 ring-red-600/30'
+                          ? 'bg-pizza-card/40 border-pizza-gold ring-2 ring-pizza-gold/30'
                           : 'bg-zinc-900/40 border-zinc-800 hover:border-zinc-700 hover:bg-zinc-800/50'
                       }`}
                     >
                       {isSelected && (
-                        <div className="absolute top-3 right-3 w-5 h-5 bg-red-600 rounded-full flex items-center justify-center text-white">
+                        <div className="absolute top-3 right-3 w-5 h-5 bg-pizza-gold rounded-full flex items-center justify-center text-pizza-black">
                           <Check className="w-3.5 h-3.5 stroke-[3]" />
                         </div>
                       )}
@@ -158,7 +158,7 @@ export default function PizzaBuilder({ onAddToCart }: PizzaBuilderProps) {
             {/* PASSO 2: SABORES (ATÉ 4) */}
             <div className="bg-zinc-900/60 border border-zinc-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm">
               <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-bold text-red-500 uppercase tracking-wider">Passo 2</span>
+                <span className="text-xs font-bold text-pizza-gold uppercase tracking-wider">Passo 2</span>
                 <span className="text-xs font-semibold text-zinc-300 bg-zinc-800 px-2.5 py-1 rounded-full">
                   {selectedFlavors.length} de {selectedSize.maxFlavors} selecionados
                 </span>
@@ -181,7 +181,7 @@ export default function PizzaBuilder({ onAddToCart }: PizzaBuilderProps) {
                       onClick={() => handleToggleFlavor(flavor)}
                       className={`cursor-pointer rounded-xl border p-4 transition-all duration-200 flex gap-4 items-start ${
                         isSelected
-                          ? 'bg-red-950/30 border-red-500/70 shadow-lg shadow-red-950/30'
+                          ? 'bg-pizza-card/30 border-pizza-gold/70 shadow-lg shadow-gold-sm'
                           : 'bg-zinc-900/30 border-zinc-800/80 hover:border-zinc-700 hover:bg-zinc-800/30'
                       }`}
                     >
@@ -194,13 +194,13 @@ export default function PizzaBuilder({ onAddToCart }: PizzaBuilderProps) {
                         <div className="flex items-center justify-between">
                           <h4 className="font-bold text-white text-sm truncate">{flavor.name}</h4>
                           <span className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 ml-2 ${
-                            isSelected ? 'bg-red-600 text-white' : 'border border-zinc-700 bg-zinc-800/80'
+                            isSelected ? 'bg-pizza-gold text-pizza-black' : 'border border-zinc-700 bg-zinc-800/80'
                           }`}>
                             {isSelected ? <Check className="w-3.5 h-3.5 stroke-[3]" /> : <Plus className="w-3 h-3 text-zinc-400" />}
                           </span>
                         </div>
                         <p className="text-xs text-zinc-400 mt-1 line-clamp-2">{flavor.description}</p>
-                        <p className="text-xs font-bold text-red-400 mt-2">
+                        <p className="text-xs font-bold text-pizza-gold mt-2">
                           R$ {priceForSize.toFixed(2).replace('.', ',')}
                         </p>
                       </div>
@@ -213,7 +213,7 @@ export default function PizzaBuilder({ onAddToCart }: PizzaBuilderProps) {
             {/* PASSO 3: BORDA RECHEADA */}
             <div className="bg-zinc-900/60 border border-zinc-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm">
               <div className="flex items-center justify-between mb-4">
-                <span className="text-xs font-bold text-red-500 uppercase tracking-wider">Passo 3</span>
+                <span className="text-xs font-bold text-pizza-gold uppercase tracking-wider">Passo 3</span>
                 <span className="text-xs text-zinc-400">Opcional</span>
               </div>
               <h3 className="text-lg font-bold text-white mb-4">Adicione uma Borda Especial</h3>
@@ -230,12 +230,12 @@ export default function PizzaBuilder({ onAddToCart }: PizzaBuilderProps) {
                       onClick={() => setSelectedCrust(crust)}
                       className={`text-left p-3.5 rounded-xl border transition-all duration-200 relative ${
                         isSelected
-                          ? 'bg-red-950/40 border-red-600 ring-2 ring-red-600/30'
+                          ? 'bg-pizza-card/40 border-pizza-gold ring-2 ring-pizza-gold/30'
                           : 'bg-zinc-900/40 border-zinc-800 hover:border-zinc-700 hover:bg-zinc-800/50'
                       }`}
                     >
                       <p className="font-semibold text-white text-xs sm:text-sm">{crust.name}</p>
-                      <p className="text-xs text-red-400 font-bold mt-2">
+                      <p className="text-xs text-pizza-gold font-bold mt-2">
                         {crustPrice === 0 ? 'Incluso' : `+ R$ ${crustPrice.toFixed(2).replace('.', ',')}`}
                       </p>
                     </button>
@@ -317,7 +317,7 @@ export default function PizzaBuilder({ onAddToCart }: PizzaBuilderProps) {
                 <button
                   type="button"
                   onClick={handleAdd}
-                  className="w-full py-4 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-sm flex items-center justify-center gap-2 transition-all duration-150 shadow-lg shadow-red-600/30 hover:shadow-red-600/50 active:scale-[0.98]"
+                  className="w-full py-4 rounded-xl bg-gradient-to-r from-pizza-gold-dark via-pizza-gold to-pizza-gold-light hover:brightness-110 text-pizza-black font-bold text-sm flex items-center justify-center gap-2 transition-all duration-150 shadow-lg shadow-gold-sm hover:shadow-gold active:scale-[0.98]"
                 >
                   <ShoppingBag className="w-4 h-4" />
                   Adicionar ao Pedido

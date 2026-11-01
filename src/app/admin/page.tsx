@@ -141,6 +141,7 @@ export default function AdminDashboardPage() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const [activeTab, setActiveTab] = useState<'overview' | 'kanban' | 'menu' | 'logistics' | 'settings' | 'canceled'>('kanban');
   const [canceledSearch, setCanceledSearch] = useState('');
+  const [ordersSearch, setOrdersSearch] = useState('');
 
   // Estado REAL sem dados fakes (carregados da API e do banco)
   const [orders, setOrders] = useState<AdminOrder[]>([]);
@@ -1521,6 +1522,26 @@ export default function AdminDashboardPage() {
               </div>
             </div>
 
+            {/* Busca de pedidos */}
+            <div className="max-w-md flex items-center gap-2">
+              <input
+                type="text"
+                placeholder="Buscar pedido (#, nome, telefone, endereço)..."
+                value={ordersSearch}
+                onChange={(e) => setOrdersSearch(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-pizza-gold/50"
+              />
+              {ordersSearch && (
+                <button
+                  type="button"
+                  onClick={() => setOrdersSearch('')}
+                  className="px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs transition"
+                >
+                  Limpar
+                </button>
+              )}
+            </div>
+
             {/* As 5 Colunas do Kanban */}
             <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
               
@@ -1531,7 +1552,21 @@ export default function AdminDashboardPage() {
                 { key: 'em_entrega', label: '4. Em Entrega', color: 'border-orange-500/40 text-orange-400' },
                 { key: 'concluido', label: '5. Concluído', color: 'border-emerald-500/40 text-emerald-400' },
               ].map((col) => {
-                const colOrders = orders.filter(o => o.status === col.key);
+                const q = ordersSearch.toLowerCase();
+                const colOrders = orders.filter(
+                  (o) =>
+                    o.status === col.key &&
+                    [
+                      String(o.orderNumber),
+                      o.customerName,
+                      o.phone,
+                      o.address,
+                    ]
+                      .filter(Boolean)
+                      .join(' ')
+                      .toLowerCase()
+                      .includes(q)
+                );
 
                 return (
                   <div key={col.key} className="bg-zinc-900/50 border border-zinc-800/80 rounded-2xl p-3.5 flex flex-col h-[calc(100vh-210px)] min-h-[680px] w-full">
