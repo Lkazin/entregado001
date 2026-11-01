@@ -214,7 +214,7 @@ export default function OrderTrackingPage() {
   if (isLoading) {
     return (
       <div className="min-h-screen bg-zinc-950 text-white flex flex-col items-center justify-center p-4">
-        <div className="w-10 h-10 border-4 border-red-600 border-t-transparent rounded-full animate-spin mb-4" />
+        <div className="w-10 h-10 border-4 border-pizza-gold border-t-transparent rounded-full animate-spin mb-4" />
         <p className="text-zinc-400 text-sm font-medium">Carregando acompanhamento do pedido...</p>
       </div>
     );
@@ -224,7 +224,7 @@ export default function OrderTrackingPage() {
     return (
       <div className="min-h-screen bg-zinc-950 text-white flex flex-col items-center justify-center p-4 text-center">
         <div className="w-14 h-14 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-500 mb-4">
-          <AlertCircle className="w-8 h-8 text-red-500" />
+          <AlertCircle className="w-8 h-8 text-pizza-gold" />
         </div>
         <h1 className="text-xl font-bold text-white">Pedido Não Encontrado</h1>
         <p className="text-sm text-zinc-400 mt-1 max-w-sm">
@@ -232,7 +232,7 @@ export default function OrderTrackingPage() {
         </p>
         <Link
           href="/"
-          className="mt-6 px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold transition flex items-center gap-2"
+          className="mt-6 px-5 py-2.5 rounded-xl bg-gradient-to-r from-pizza-gold-dark via-pizza-gold to-pizza-gold-light hover:brightness-110 text-white text-xs font-bold transition flex items-center gap-2"
         >
           <ArrowLeft className="w-4 h-4" />
           <span>Voltar ao Cardápio</span>
@@ -257,7 +257,7 @@ export default function OrderTrackingPage() {
             </div>
             <div>
               <span className="font-black text-lg tracking-tight text-white block leading-none">
-                BELLA <span className="text-red-500">PIZZA</span>
+                BELLA <span className="text-pizza-gold">PIZZA</span>
               </span>
               <span className="text-[10px] text-zinc-400 font-medium">Acompanhamento do Pedido</span>
             </div>
@@ -282,9 +282,9 @@ export default function OrderTrackingPage() {
           <div className="absolute top-0 right-0 w-80 h-80 bg-red-600/10 rounded-full blur-3xl pointer-events-none -mr-20 -mt-20" />
 
           {isCanceled ? (
-            <div className="flex items-center gap-4 text-red-400">
-              <div className="w-12 h-12 rounded-2xl bg-red-950/60 border border-red-700/60 flex items-center justify-center shrink-0">
-                <AlertCircle className="w-6 h-6 text-red-500" />
+            <div className="flex items-center gap-4 text-pizza-gold">
+              <div className="w-12 h-12 rounded-2xl bg-pizza-card/60 border border-red-700/60 flex items-center justify-center shrink-0">
+                <AlertCircle className="w-6 h-6 text-pizza-gold" />
               </div>
               <div>
                 <h1 className="text-2xl font-black text-white">Pedido Cancelado</h1>
@@ -299,7 +299,7 @@ export default function OrderTrackingPage() {
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
                   <div className="flex items-center gap-2 mb-1.5">
-                    <span className="text-[11px] font-bold text-red-500 uppercase tracking-wider flex items-center gap-1">
+                    <span className="text-[11px] font-bold text-pizza-gold uppercase tracking-wider flex items-center gap-1">
                       <Sparkles className="w-3.5 h-3.5" />
                       Status em Tempo Real
                     </span>
@@ -373,7 +373,7 @@ export default function OrderTrackingPage() {
           <div className="p-6 sm:p-8 rounded-3xl bg-zinc-900/90 border border-zinc-800/80 shadow-2xl space-y-6">
             <div className="flex items-center justify-between pb-4 border-b border-zinc-800/80">
               <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-xl bg-red-600/20 border border-red-600/40 flex items-center justify-center text-red-500">
+                <div className="w-8 h-8 rounded-xl bg-red-600/20 border border-pizza-gold/40 flex items-center justify-center text-pizza-gold">
                   <Flame className="w-4 h-4" />
                 </div>
                 <div>
@@ -396,7 +396,7 @@ export default function OrderTrackingPage() {
                     key={st.key}
                     className={`p-4 sm:p-5 rounded-2xl border transition-all duration-300 flex items-start gap-4 ${
                       isCurrent
-                        ? 'bg-zinc-950 border-red-500/60 ring-2 ring-red-500/20 shadow-lg'
+                        ? 'bg-zinc-950 border-pizza-gold/60 ring-2 ring-red-500/20 shadow-lg'
                         : isPassed
                         ? 'bg-zinc-950/60 border-emerald-900/40 opacity-90'
                         : 'bg-zinc-950/30 border-zinc-900 opacity-40'
@@ -437,7 +437,7 @@ export default function OrderTrackingPage() {
                         {/* Tag de Estado */}
                         <div>
                           {isCurrent && (
-                            <span className="px-2.5 py-0.5 rounded-full bg-red-950/90 border border-red-600/60 text-red-400 text-[10px] font-black uppercase tracking-wider animate-pulse">
+                            <span className="px-2.5 py-0.5 rounded-full bg-pizza-card/90 border border-pizza-gold/60 text-pizza-gold text-[10px] font-black uppercase tracking-wider animate-pulse">
                               ● Em Andamento
                             </span>
                           )}
@@ -488,7 +488,7 @@ export default function OrderTrackingPage() {
           {/* Card dos Itens Comprados */}
           <div className="p-6 rounded-3xl bg-zinc-900/90 border border-zinc-800/80 shadow-xl space-y-4">
             <h3 className="font-extrabold text-white text-base flex items-center gap-2">
-              <Receipt className="w-4 h-4 text-red-500" />
+              <Receipt className="w-4 h-4 text-pizza-gold" />
               <span>Itens do Pedido</span>
             </h3>
             
@@ -519,7 +519,7 @@ export default function OrderTrackingPage() {
               </div>
               <div className="flex justify-between text-base font-black text-white pt-2 border-t border-zinc-800">
                 <span>Total:</span>
-                <span className="text-red-500">R$ {Number(order.total || 0).toFixed(2).replace('.', ',')}</span>
+                <span className="text-pizza-gold">R$ {Number(order.total || 0).toFixed(2).replace('.', ',')}</span>
               </div>
             </div>
           </div>
@@ -527,12 +527,12 @@ export default function OrderTrackingPage() {
           {/* Card de Destino e Suporte */}
           <div className="p-6 rounded-3xl bg-zinc-900/90 border border-zinc-800/80 shadow-xl space-y-4 text-xs">
             <h3 className="font-extrabold text-white text-base flex items-center gap-2">
-              <MapPin className="w-4 h-4 text-red-500" />
+              <MapPin className="w-4 h-4 text-pizza-gold" />
               <span>Destino & Pagamento</span>
             </h3>
             
             <div className="p-4 rounded-2xl bg-zinc-950 border border-zinc-800/80 flex items-start gap-3">
-              <MapPin className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
+              <MapPin className="w-4 h-4 text-pizza-gold flex-shrink-0 mt-0.5" />
               <div>
                 <span className="font-bold text-white block text-sm">Endereço de Entrega</span>
                 <p className="text-zinc-300 mt-0.5 font-medium">

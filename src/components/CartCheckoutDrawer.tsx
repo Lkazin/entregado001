@@ -273,7 +273,7 @@ export default function CartCheckoutDrawer({
           <div className="p-5 border-b border-zinc-800 flex items-center justify-between bg-zinc-900/60">
             <h2 className="text-lg font-bold text-white flex items-center gap-2">
               <span>{step === 'cart' ? 'Seu Carrinho' : 'Finalizar Pedido'}</span>
-              <span className="text-xs px-2 py-0.5 rounded-full bg-red-950 text-red-400 border border-red-800/40 font-semibold">
+              <span className="text-xs px-2 py-0.5 rounded-full bg-pizza-card text-pizza-gold border border-pizza-gold/30 font-semibold">
                 {items.length} {items.length === 1 ? 'item' : 'itens'}
               </span>
             </h2>
@@ -287,7 +287,7 @@ export default function CartCheckoutDrawer({
 
           {/* Erro */}
           {errorMsg && (
-            <div className="p-3 m-4 rounded-xl bg-red-950/60 border border-red-800 text-red-300 text-xs flex items-center gap-2">
+            <div className="p-3 m-4 rounded-xl bg-pizza-card/60 border border-pizza-gold/30 text-pizza-gold-light text-xs flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 flex-shrink-0" />
               <span>{errorMsg}</span>
             </div>
@@ -326,7 +326,7 @@ export default function CartCheckoutDrawer({
 
                         <button
                           onClick={() => onRemoveItem(item.id)}
-                          className="text-zinc-500 hover:text-red-400 p-1"
+                          className="text-zinc-500 hover:text-pizza-gold p-1"
                           title="Remover"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -364,7 +364,7 @@ export default function CartCheckoutDrawer({
                 {/* Dados Pessoais */}
                 <div className="space-y-3">
                   <h3 className="font-bold text-zinc-200 text-sm flex items-center gap-2">
-                    <span className="w-5 h-5 rounded-full bg-red-600 text-white flex items-center justify-center text-xs">1</span>
+                    <span className="w-5 h-5 rounded-full bg-pizza-gold text-pizza-black flex items-center justify-center text-xs">1</span>
                     Seus Dados
                   </h3>
                   <div>
@@ -375,7 +375,7 @@ export default function CartCheckoutDrawer({
                       value={customerName}
                       onChange={(e) => setCustomerName(e.target.value)}
                       placeholder="Ex: Carlos Eduardo"
-                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-red-500"
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-pizza-gold"
                     />
                   </div>
                   <div>
@@ -386,7 +386,7 @@ export default function CartCheckoutDrawer({
                       value={customerPhone}
                       onChange={(e) => setCustomerPhone(e.target.value)}
                       placeholder="(11) 98765-4321"
-                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-red-500"
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-pizza-gold"
                     />
                   </div>
                 </div>
@@ -394,7 +394,7 @@ export default function CartCheckoutDrawer({
                 {/* Endereço de Entrega */}
                 <div className="space-y-3 pt-3 border-t border-zinc-800">
                   <h3 className="font-bold text-zinc-200 text-sm flex items-center gap-2">
-                    <span className="w-5 h-5 rounded-full bg-red-600 text-white flex items-center justify-center text-xs">2</span>
+                    <span className="w-5 h-5 rounded-full bg-pizza-gold text-pizza-black flex items-center justify-center text-xs">2</span>
                     Endereço de Entrega
                   </h3>
 
@@ -413,7 +413,7 @@ export default function CartCheckoutDrawer({
                           setSelectedRegion(reg);
                         }
                       }}
-                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-red-500"
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-pizza-gold"
                     >
                       {DELIVERY_REGIONS.map((r) => (
                         <option key={r.id} value={r.id}>
@@ -425,7 +425,7 @@ export default function CartCheckoutDrawer({
                   </div>
 
                   {isOutsideArea && (
-                    <div className="p-3 bg-red-950/60 border border-red-800 rounded-lg text-red-300">
+                    <div className="p-3 bg-pizza-card/60 border border-pizza-gold/30 rounded-lg text-pizza-gold-light">
                       ⚠️ Não realizamos entregas na sua região no momento.
                     </div>
                   )}
@@ -447,7 +447,7 @@ export default function CartCheckoutDrawer({
                         value={cep}
                         onChange={(e) => handleCepLookup(e.target.value)}
                         placeholder="Ex: 01001-000"
-                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-red-500 font-mono"
+                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-pizza-gold font-mono"
                       />
                     </div>
                     {cepCity && (
@@ -472,7 +472,7 @@ export default function CartCheckoutDrawer({
                         value={street}
                         onChange={(e) => setStreet(e.target.value)}
                         placeholder="Nome da rua"
-                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-red-500"
+                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-pizza-gold"
                       />
                     </div>
                     <div>
@@ -483,7 +483,7 @@ export default function CartCheckoutDrawer({
                         value={number}
                         onChange={(e) => setNumber(e.target.value)}
                         placeholder="123"
-                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-red-500"
+                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-pizza-gold"
                       />
                     </div>
                   </div>
@@ -496,7 +496,7 @@ export default function CartCheckoutDrawer({
                         value={complement}
                         onChange={(e) => setComplement(e.target.value)}
                         placeholder="Ex: Apto 42"
-                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-red-500"
+                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-pizza-gold"
                       />
                     </div>
                     <div>
@@ -506,7 +506,7 @@ export default function CartCheckoutDrawer({
                         value={reference}
                         onChange={(e) => setReference(e.target.value)}
                         placeholder="Ex: Próximo à padaria"
-                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-red-500"
+                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-pizza-gold"
                       />
                     </div>
                   </div>
@@ -515,7 +515,7 @@ export default function CartCheckoutDrawer({
                 {/* Forma de Pagamento */}
                 <div className="space-y-3 pt-3 border-t border-zinc-800">
                   <h3 className="font-bold text-zinc-200 text-sm flex items-center gap-2">
-                    <span className="w-5 h-5 rounded-full bg-red-600 text-white flex items-center justify-center text-xs">3</span>
+                    <span className="w-5 h-5 rounded-full bg-pizza-gold text-pizza-black flex items-center justify-center text-xs">3</span>
                     Forma de Pagamento
                   </h3>
 
@@ -524,7 +524,7 @@ export default function CartCheckoutDrawer({
                       type="button"
                       onClick={() => setPaymentMethod('pix_manual')}
                       className={`p-3 rounded-xl border text-center transition ${paymentMethod === 'pix_manual'
-                          ? 'bg-red-950/40 border-red-600 text-white'
+                          ? 'bg-pizza-card/40 border-pizza-gold text-white'
                           : 'bg-zinc-900/40 border-zinc-800 text-zinc-400 hover:text-white'
                         }`}
                     >
@@ -536,7 +536,7 @@ export default function CartCheckoutDrawer({
                       type="button"
                       onClick={() => setPaymentMethod('cash_delivery')}
                       className={`p-3 rounded-xl border text-center transition ${paymentMethod === 'cash_delivery'
-                          ? 'bg-red-950/40 border-red-600 text-white'
+                          ? 'bg-pizza-card/40 border-pizza-gold text-white'
                           : 'bg-zinc-900/40 border-zinc-800 text-zinc-400 hover:text-white'
                         }`}
                     >
@@ -548,7 +548,7 @@ export default function CartCheckoutDrawer({
                       type="button"
                       onClick={() => setPaymentMethod('card_terminal')}
                       className={`p-3 rounded-xl border text-center transition ${paymentMethod === 'card_terminal'
-                          ? 'bg-red-950/40 border-red-600 text-white'
+                          ? 'bg-pizza-card/40 border-pizza-gold text-white'
                           : 'bg-zinc-900/40 border-zinc-800 text-zinc-400 hover:text-white'
                         }`}
                     >
@@ -580,7 +580,7 @@ export default function CartCheckoutDrawer({
                           type="checkbox"
                           checked={needsChange}
                           onChange={(e) => setNeedsChange(e.target.checked)}
-                          className="rounded border-zinc-700 bg-zinc-950 text-red-600 focus:ring-0"
+                          className="rounded border-zinc-700 bg-zinc-950 text-pizza-gold focus:ring-0"
                         />
                         <span>Precisa de troco?</span>
                       </label>
@@ -612,7 +612,7 @@ export default function CartCheckoutDrawer({
                       value={notes}
                       onChange={(e) => setNotes(e.target.value)}
                       placeholder="Ex: Tocar o interfone 2 vezes, retirar cebola..."
-                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2 text-white focus:outline-none focus:border-red-500"
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2 text-white focus:outline-none focus:border-pizza-gold"
                     />
                   </div>
                 </div>
@@ -636,7 +636,7 @@ export default function CartCheckoutDrawer({
                 </div>
                 <div className="flex justify-between text-base font-extrabold text-white pt-2 border-t border-zinc-800">
                   <span>Total:</span>
-                  <span className="text-red-500">R$ {total.toFixed(2).replace('.', ',')}</span>
+                  <span className="text-pizza-gold">R$ {total.toFixed(2).replace('.', ',')}</span>
                 </div>
               </div>
 
@@ -644,7 +644,7 @@ export default function CartCheckoutDrawer({
                 <button
                   type="button"
                   onClick={() => setStep('checkout')}
-                  className="w-full py-3.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 transition active:scale-[0.98]"
+                  className="w-full py-3.5 rounded-xl bg-gradient-to-r from-pizza-gold-dark via-pizza-gold to-pizza-gold-light hover:brightness-110 text-pizza-black font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-gold-sm transition active:scale-[0.98]"
                 >
                   <span>Avançar para Entrega</span>
                   <ArrowRight className="w-4 h-4" />
@@ -662,7 +662,7 @@ export default function CartCheckoutDrawer({
                     type="submit"
                     form="checkout-form"
                     disabled={isSubmitting || isOutsideArea}
-                    className="flex-1 py-3.5 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 transition active:scale-[0.98]"
+                    className="flex-1 py-3.5 rounded-xl bg-gradient-to-r from-pizza-gold-dark via-pizza-gold to-pizza-gold-light hover:brightness-110 disabled:opacity-50 text-pizza-black font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-gold-sm transition active:scale-[0.98]"
                   >
                     {isSubmitting ? 'Enviando Pedido...' : 'Confirmar e Enviar Pedido'}
                   </button>

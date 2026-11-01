@@ -43,7 +43,7 @@ export default function CatalogSection({ onSelectFlavorForBuilder, onAddDrink }:
                 onClick={() => setActiveTab(tab.id as any)}
                 className={`px-4 py-2 rounded-xl text-xs font-bold transition duration-150 ${
                   activeTab === tab.id
-                    ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
+                    ? 'bg-gradient-to-r from-pizza-gold-dark via-pizza-gold to-pizza-gold-light text-pizza-black shadow-gold-sm'
                     : 'bg-zinc-900 text-zinc-400 hover:text-white hover:bg-zinc-800'
                 }`}
               >
@@ -77,7 +77,7 @@ export default function CatalogSection({ onSelectFlavorForBuilder, onAddDrink }:
 
               <div className="p-5 flex-1 flex flex-col justify-between">
                 <div>
-                  <h3 className="font-extrabold text-white text-base group-hover:text-red-400 transition">
+                  <h3 className="font-extrabold text-white text-base group-hover:text-pizza-gold transition">
                     {flavor.name}
                   </h3>
                   <p className="text-zinc-400 text-xs mt-2 line-clamp-2 leading-relaxed">
@@ -96,7 +96,7 @@ export default function CatalogSection({ onSelectFlavorForBuilder, onAddDrink }:
                   <a
                     href="#montar-pizza"
                     onClick={() => onSelectFlavorForBuilder(flavor)}
-                    className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-red-600 text-zinc-200 hover:text-white text-xs font-bold transition flex items-center gap-1.5 shadow-md"
+                    className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-pizza-gold text-pizza-black hover:text-pizza-black text-xs font-bold transition flex items-center gap-1.5 shadow-md"
                   >
                     <Plus className="w-3.5 h-3.5" />
                     Montar Pizza
@@ -135,7 +135,7 @@ export default function CatalogSection({ onSelectFlavorForBuilder, onAddDrink }:
                   <button
                     type="button"
                     onClick={() => onAddDrink(drink)}
-                    className="p-1.5 rounded-lg bg-zinc-800 hover:bg-red-600 text-zinc-300 hover:text-white transition"
+                    className="p-1.5 rounded-lg bg-zinc-800 hover:bg-pizza-gold text-pizza-black hover:text-pizza-black transition"
                     title="Adicionar ao carrinho"
                   >
                     <Plus className="w-4 h-4" />
