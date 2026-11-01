@@ -335,9 +335,7 @@ async function loadLogisticsState(_forceCloud = false) {
     {
       const cloudVersion = typeof parsed.stateVersion === 'number' ? parsed.stateVersion : 1;
 
-      if (!_forceCloud && cloudVersion < liveStateVersion) {
-        return;
-      }
+      // A revisão do banco é a autoridade; RPCs também atualizam este estado.
 
       liveStateVersion = Math.max(liveStateVersion, cloudVersion);
       if (typeof parsed.lastMutationId === 'string') {

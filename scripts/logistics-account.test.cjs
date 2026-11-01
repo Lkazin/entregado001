@@ -156,3 +156,18 @@ module.exports={fixture,driver,assignment,ACCOUNT_A,ACCOUNT_B,TOKEN_A,TOKEN_B,ST
     assert.equal(f.backing.limitKeys.every(k=>/^[a-f0-9]{64}$/.test(k)),true);assert.equal(f.backing.writes,0);assert.equal(f.backing.storageWrites,0);
     const outage=fixture();outage.backing.failLimit=true;const unavailable=await outage.post('invite-activate',{inviteCode:'NW-NOT-ISSUED'});assert.equal(unavailable.status,503);assert.equal(outage.backing.writes,0);
   });
+
+test('revisão do banco prevalece sobre versão JSON antiga e preserva novo pré-cadastro', async () => {
+  const f=fixture({drivers:[driver('existing','legacy-driver')]});
+  f.backing.state.stateVersion=99;
+  assert.equal((await f.get('drivers','admin')).status,200);
+  f.backing.state.drivers.push(driver('new-first-access','new-driver',STORE_A,{status:'aguardando_motoboy',presence:'indisponivel'}));
+  f.backing.state.stateVersion=2;
+  f.backing.revision++;
+  const updated=await f.get('drivers','admin');
+  assert.equal(updated.status,200);
+  assert.ok(updated.body.drivers.some(d=>d.id==='new-first-access'));
+  const saved=await f.post('settings-update',{distributionMode:'broadcast_enabled'},'admin');
+  assert.equal(saved.status,200);
+  assert.ok(f.stored().drivers.some(d=>d.id==='new-first-access'));
+});

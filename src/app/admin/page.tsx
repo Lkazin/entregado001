@@ -13,6 +13,7 @@ import { PIZZA_FLAVORS } from '@/lib/constants';
 
 import AdminPinAuth from '@/components/AdminPinAuth';
 import DriverInTransitList from '@/components/DriverInTransitList';
+import FirstAccessInvitePanel from '@/components/FirstAccessInvitePanel';
 import { printThermalOrder, testPrintThermal, PaperWidth } from '@/lib/thermalPrinter';
 
 function getAdminHeaders(extra?: Record<string, string>): Record<string, string> {
@@ -21,7 +22,7 @@ function getAdminHeaders(extra?: Record<string, string>): Record<string, string>
     ...(extra || {}),
   };
   if (typeof window !== 'undefined') {
-    const token = sessionStorage.getItem('novaesweb_admin_token') || '615210';
+    const token = sessionStorage.getItem('novaesweb_admin_token') || '';
     if (token) {
       headers['x-admin-token'] = token;
       headers['Authorization'] = `Bearer ${token}`;
@@ -267,7 +268,7 @@ export default function AdminDashboardPage() {
     return () => clearInterval(interval);
   }, [pendingNewOrders.length, isMuted]);
 
-  // Checar autenticação via PIN 615210
+  // Restaurar a interface; a autorização das operações é validada no servidor.
   useEffect(() => {
     const auth = typeof window !== 'undefined' ? sessionStorage.getItem('novaesweb_admin_auth') : null;
     setIsAuthenticated(auth === 'authenticated');
@@ -281,15 +282,8 @@ export default function AdminDashboardPage() {
         if (cached) {
           const parsed = JSON.parse(cached);
           if (Array.isArray(parsed)) {
-            // Filtrar pedidos de demonstração antigos
-            const realOnly = parsed.filter((o: any) => 
-              !o.customerName?.includes('Teste') && 
-              !o.customerName?.includes('Fictício') &&
-              !o.customerName?.includes('João') &&
-              !o.customerName?.includes('Maria')
-            );
-            setOrders(realOnly);
-            localStorage.setItem('novaesweb_orders', JSON.stringify(realOnly));
+            // Nomes de clientes não identificam dados de demonstração.
+            setOrders(parsed);
           }
         }
       } catch (e) {}
@@ -1103,6 +1097,7 @@ export default function AdminDashboardPage() {
   };
 
   const handleCopyCode = (code: string) => {
+    if (!code) return;
     if (typeof navigator !== 'undefined' && navigator.clipboard) {
       navigator.clipboard.writeText(code);
       setCodeCopied(true);
@@ -1110,8 +1105,9 @@ export default function AdminDashboardPage() {
     }
   };
 
-  const getWhatsAppShareUrl = (code: string) => {
-    const text = `Olá! Segue seu código de autorização para cadastro na Bella Pizza: ${code}. Abra o app NovaesWeb Entregador, toque em "Criar conta" e insira este código para se vincular à nossa loja.`;
+  const getWhatsAppShareUrl = (code?: string) => {
+    if (!code) return undefined;
+    const text = `Olá! Seu código de plantão na Bella Pizza é: ${code}. Entre na sua conta do NovaesWeb Entregador e use este código para conectar-se à loja. Este código não cria uma conta nova.`;
     return `https://wa.me/?text=${encodeURIComponent(text)}`;
   };
 
@@ -1906,6 +1902,7 @@ export default function AdminDashboardPage() {
         {/* ABA 2: MÓDULO DE LOGÍSTICA */}
         {activeTab === 'logistics' && (
           <div className="space-y-8">
+            <FirstAccessInvitePanel getHeaders={getAdminHeaders} onChanged={() => {void fetchData(true);}} />
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div>
                 <h2 className="text-xl font-black text-white">Visão dos Entregadores da Loja & Logística</h2>
@@ -2042,11 +2039,12 @@ export default function AdminDashboardPage() {
                                 </p>
                                 <div className="flex items-center gap-1.5">
                                   <span className="font-mono font-black text-amber-400 bg-zinc-950 px-2 py-0.5 rounded border border-amber-500/30 text-[11px]">
-                                    {drv.inviteCode}
+                                    {drv.inviteCode || 'Primeiro acesso'}
                                   </span>
                                   <button
                                     type="button"
                                     onClick={() => handleCopyCode(drv.inviteCode)}
+                                    disabled={!drv.inviteCode}
                                     className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition"
                                     title="Copiar Código"
                                   >
@@ -2473,7 +2471,7 @@ export default function AdminDashboardPage() {
                           .filter(d => d.status !== 'vinculo_removido' && d.status !== 'revogado')
                           .map((drv) => (
                             <option key={drv.id} value={drv.driverId || drv.id}>
-                              {drv.driverName || drv.name || `Código ${drv.inviteCode}`} ({drv.status === 'ativo' ? 'Ativo' : drv.status}) — {drv.activeDeliveries || 0}/{drv.maxDeliveries || storeSettings.maxConcurrentDeliveries} entregas
+                              {drv.driverName || drv.name || `Código ${drv.inviteCode || 'Primeiro acesso'}`} ({drv.status === 'ativo' ? 'Ativo' : drv.status}) — {drv.activeDeliveries || 0}/{drv.maxDeliveries || storeSettings.maxConcurrentDeliveries} entregas
                             </option>
                           ))}
                       </select>
@@ -2544,15 +2542,17 @@ export default function AdminDashboardPage() {
               </div>
             </div>
 
+            <FirstAccessInvitePanel getHeaders={getAdminHeaders} onChanged={() => {void fetchData(true);}} />
+
             {/* BLOCO 2: GERAR CÓDIGO PARA MOTOBOY & AUTORIZAÇÃO DE CADASTRO */}
             <div className="p-6 rounded-2xl bg-zinc-900/60 border border-zinc-800 shadow-xl space-y-4">
               <div>
                 <h3 className="font-extrabold text-base text-white flex items-center gap-2">
                   <UserPlus className="w-4 h-4 text-red-500" />
-                  <span>Gerar código para motoboy (Autorização de Cadastro)</span>
+                  <span>Código de plantão para entregador com conta</span>
                 </h3>
                 <p className="text-xs text-zinc-400 mt-0.5">
-                  Gere um código exclusivo de uso único (<code className="text-amber-400 font-bold">NW-XXXXXX</code>) para autorizar o cadastro de um novo motoboy vinculado à sua loja. O motoboy só consegue concluir a conta com este código.
+                  Para quem já possui conta, gere um código de vínculo ou plantão (<code className="text-amber-400 font-bold">NW-XXXXXX</code>). Para cadastrar um novo entregador, utilize o bloco de primeiro acesso acima.
                 </p>
               </div>
 
@@ -2581,7 +2581,7 @@ export default function AdminDashboardPage() {
                     className="w-full py-2.5 px-4 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-extrabold text-xs flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 transition"
                   >
                     <KeyRound className="w-4 h-4" />
-                    <span>{isGeneratingShiftCode ? 'Gerando...' : 'Gerar Código para Motoboy'}</span>
+                    <span>{isGeneratingShiftCode ? 'Gerando...' : 'Gerar código de plantão'}</span>
                   </button>
                 </div>
               </form>
@@ -2660,11 +2660,12 @@ export default function AdminDashboardPage() {
                             <td className="p-3.5">
                               <div className="flex items-center gap-1.5">
                                 <span className="font-mono font-black text-amber-400 bg-zinc-950 px-2 py-0.5 rounded border border-amber-500/30">
-                                  {drv.inviteCode}
+                                  {drv.inviteCode || 'Primeiro acesso'}
                                 </span>
                                 <button
                                   type="button"
                                   onClick={() => handleCopyCode(drv.inviteCode)}
+                                    disabled={!drv.inviteCode}
                                   className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white"
                                 >
                                   <Copy className="w-3 h-3" />
@@ -3277,7 +3278,7 @@ export default function AdminDashboardPage() {
                           <button type="button" onClick={(event) => {event.stopPropagation();handleLinkDriverAccount(drv);}} className="text-[11px] text-sky-300 underline">Associar conta cadastrada</button>
                           {isWaiting && (
                             <p className="text-[10px] text-amber-400/90 mt-1 font-semibold">
-                              Código: {drv.inviteCode} (Aguardando vínculo)
+                              Código: {drv.inviteCode || 'Primeiro acesso'} (Aguardando vínculo)
                             </p>
                           )}
                           {isBlocked && (

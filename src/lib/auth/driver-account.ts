@@ -6,7 +6,7 @@ import { supabaseAdmin } from '@/lib/supabase/server';
 // across all server instances as soon as the database update commits.
 const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
 const SCRYPT_OPTIONS = { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
-const ACCOUNT_FIELDS = 'id,name,phone,vehicle_plate,vehicle_model,created_at';
+const ACCOUNT_FIELDS = 'id,name,phone,vehicle_plate,vehicle_model,home_address,created_at';
 
 function derivePassword(password: string, salt: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -21,6 +21,7 @@ export interface DriverAccount {
   vehiclePlate: string;
   vehicleModel: string;
   createdAt: string;
+  address?: string;
 }
 
 export class AccountSessionError extends Error {
@@ -48,6 +49,7 @@ function accountFromRow(row: any): DriverAccount {
     id: row.id, name: row.name, phone: row.phone,
     vehiclePlate: row.vehicle_plate || '', vehicleModel: row.vehicle_model || '',
     createdAt: row.created_at,
+    address: row.home_address || '',
   };
 }
 
@@ -118,193 +120,12 @@ export async function verifyDriverPassword(password: string, encoded: string): P
   return crypto.timingSafeEqual(key, Buffer.from(hash, 'hex'));
 }
 
-function validatePassword(value: unknown): string {
-  if (typeof value !== 'string' || value.length < 8 || value.length > 128) {
-    throw new AccountSessionError('A senha deve ter entre 8 e 128 caracteres.', 400, 'INVALID_PASSWORD');
-  }
-  return value;
+export async function verifyAuthorizationCode(_rawCode: unknown): Promise<never> {
+  throw new AccountSessionError('Use Primeiro acesso com seu telefone e o código enviado pelo lojista.', 410, 'FIRST_ACCESS_REQUIRED');
 }
 
-export function normalizeAuthorizationCode(raw: unknown): string {
-  let code = String(raw || '').trim().toUpperCase().replace(/[\s]/g, '');
-  if (code.startsWith('NW-')) return code;
-  if (code.startsWith('NW')) return 'NW-' + code.slice(2);
-  if (code.startsWith('CAD-')) return code;
-  if (code.startsWith('CAD')) return 'CAD-' + code.slice(3);
-  return code;
-}
-
-export async function verifyAuthorizationCode(rawCode: unknown): Promise<{
-  valid: boolean;
-  storeId: string;
-  storeName: string;
-  inviteCode: string;
-  membershipId: string;
-}> {
-  const code = normalizeAuthorizationCode(rawCode);
-  if (!code || code.length < 5) {
-    throw new AccountSessionError('Informe o código de autorização fornecido pela loja (ex: NW-XXXXXX).', 400, 'INVALID_REGISTRATION_CODE');
-  }
-
-  const { data, error } = await supabaseAdmin.from('driver_logistics_state')
-    .select('state,revision').eq('id', 'primary').maybeSingle();
-
-  const state = data?.state;
-  const drivers: any[] = Array.isArray(state?.drivers) ? state.drivers : [];
-  const shift = drivers.find((d: any) =>
-    d.inviteCode && normalizeAuthorizationCode(d.inviteCode) === code
-  );
-
-  if (!shift) {
-    throw new AccountSessionError('Código de autorização não encontrado. Verifique o código com o lojista.', 404, 'INVALID_REGISTRATION_CODE');
-  }
-
-  if (shift.status === 'revogado' || shift.status === 'vinculo_removido' || shift.status === 'bloqueado') {
-    throw new AccountSessionError('Este código foi revogado ou cancelado pela loja.', 403, 'CODE_REVOKED');
-  }
-
-  const isExpired = shift.isExpired || (shift.expiresAt && Date.parse(shift.expiresAt) <= Date.now());
-  if (isExpired) {
-    throw new AccountSessionError('Este código de autorização expirou. Solicite um novo código à loja.', 410, 'CODE_EXPIRED');
-  }
-
-  // Código de uso único: se já tiver sido utilizado para cadastro ou se já estiver ativo com outro motoboy
-  if (shift.usedForRegistration || (shift.status === 'ativo' && shift.driverId)) {
-    throw new AccountSessionError('Este código já foi utilizado para cadastrar outro motoboy. Cada código é de uso único.', 409, 'CODE_ALREADY_USED');
-  }
-
-  const storeId = shift.storeId || 'store_bella_pizza';
-  const storeName = shift.storeName || 'Bella Pizza';
-
-  return {
-    valid: true,
-    storeId,
-    storeName,
-    inviteCode: shift.inviteCode,
-    membershipId: shift.id,
-  };
-}
-
-export async function registerDriverAccount(body: any): Promise<{ account: DriverAccount; accountToken: string; storeName?: string; storeId?: string }> {
-  const rawCode = body?.registrationCode || body?.authorizationCode;
-  const registrationCode = normalizeAuthorizationCode(rawCode);
-  if (!registrationCode || registrationCode.length < 5) {
-    throw new AccountSessionError('O código de autorização da loja é obrigatório para concluir o cadastro.', 400, 'INVALID_REGISTRATION_CODE');
-  }
-  const phone = normalizeDriverPhone(body?.phone);
-  const password = validatePassword(body?.password);
-  const name = String(body?.name || '').trim();
-  const plate = String(body?.vehiclePlate || '').trim().toUpperCase();
-  const model = String(body?.vehicleModel || '').trim();
-  if (name.length < 3 || name.length > 100 || plate.length > 12 || model.length > 100) {
-    throw new AccountSessionError('Confira seu nome e os dados do veículo.', 400, 'INVALID_PROFILE');
-  }
-  const accountToken = crypto.randomBytes(32).toString('hex');
-
-  // Suporte a RPC de mock em ambiente de testes unitários
-  try {
-    const { data: rpcData, error: rpcError } = await supabaseAdmin.rpc('driver_register_account', {
-      p_invite_hash: hashToken(registrationCode), p_phone: phone, p_name: name,
-      p_vehicle_plate: plate, p_vehicle_model: model,
-      p_password_hash: await hashDriverPassword(password),
-      p_session_hash: hashToken(accountToken),
-      p_session_expires_at: new Date(Date.now() + SESSION_MS).toISOString(),
-    });
-    if (!rpcError && rpcData) {
-      return { account: accountFromRow(rpcData), accountToken };
-    }
-    if (rpcError?.code === '23505') {
-      throw new AccountSessionError('Este telefone já possui uma conta. Entre com sua senha.', 409, 'ACCOUNT_EXISTS');
-    }
-  } catch (rpcErr) {
-    if (rpcErr instanceof AccountSessionError) throw rpcErr;
-  }
-
-  // 1. Verifica se já existe conta com este telefone
-  const { data: existingAccount } = await supabaseAdmin.from('driver_accounts')
-    .select('id').eq('phone', phone).maybeSingle();
-  if (existingAccount) {
-    throw new AccountSessionError('Este telefone já possui uma conta cadastrada. Faça login com sua senha.', 409, 'ACCOUNT_EXISTS');
-  }
-
-  // 2. Valida o código com a loja e obtém o vínculo
-  const verified = await verifyAuthorizationCode(registrationCode);
-
-  // 3. Cria a conta no banco de dados com senha criptografada via scrypt
-  const passwordHash = await hashDriverPassword(password);
-  const sessionExpiresAt = new Date(Date.now() + SESSION_MS).toISOString();
-
-  const { data: newAccount, error: createError } = await supabaseAdmin.from('driver_accounts').insert({
-    phone,
-    name,
-    vehicle_plate: plate,
-    vehicle_model: model,
-    password_hash: passwordHash,
-    active_session_hash: hashToken(accountToken),
-    session_expires_at: sessionExpiresAt,
-  }).select(ACCOUNT_FIELDS).single();
-
-  if (createError || !newAccount) {
-    if (createError?.code === '23505') {
-      throw new AccountSessionError('Este telefone já possui uma conta. Faça login com sua senha.', 409, 'ACCOUNT_EXISTS');
-    }
-    throw unavailable();
-  }
-
-  // 4. Cria o vínculo na tabela driver_account_memberships
-  try {
-    await supabaseAdmin.from('driver_account_memberships').insert({
-      membership_id: verified.membershipId,
-      account_id: newAccount.id,
-      driver_id: newAccount.id,
-      store_id: verified.storeId,
-    });
-  } catch (mErr) {
-    console.warn('[registerDriverAccount] Aviso ao inserir membership:', mErr);
-  }
-
-  // 5. Atualiza o estado da logística: vincula o motoboy à loja e marca o código como utilizado
-  try {
-    const { data: logData } = await supabaseAdmin.from('driver_logistics_state')
-      .select('state,revision').eq('id', 'primary').maybeSingle();
-    const state = logData?.state;
-    const revision = Number(logData?.revision) || 1;
-    const drivers: any[] = Array.isArray(state?.drivers) ? state.drivers : [];
-    const shift = drivers.find((d: any) =>
-      d.id === verified.membershipId ||
-      (d.inviteCode && normalizeAuthorizationCode(d.inviteCode) === registrationCode)
-    );
-    if (shift) {
-      shift.status = 'ativo';
-      shift.shiftStatus = 'em_plantao';
-      shift.presence = 'disponivel';
-      shift.driverId = newAccount.id;
-      shift.driverName = name;
-      shift.name = name;
-      shift.phone = phone;
-      shift.vehiclePlate = plate;
-      shift.vehicleModel = model;
-      shift.usedForRegistration = true;
-      shift.activatedAt = new Date().toISOString();
-
-      await supabaseAdmin.from('driver_logistics_state').update({
-        state,
-        revision: revision + 1,
-        updated_at: new Date().toISOString(),
-      }).eq('id', 'primary');
-    }
-  } catch (logisticsErr) {
-    console.warn('[registerDriverAccount] Aviso ao atualizar estado de logística:', logisticsErr);
-  }
-
-  await audit('registered', newAccount.id);
-
-  return {
-    account: accountFromRow(newAccount),
-    accountToken,
-    storeName: verified.storeName,
-    storeId: verified.storeId,
-  };
+export async function registerDriverAccount(_body: any): Promise<never> {
+  throw new AccountSessionError('Use Primeiro acesso com seu telefone e o código enviado pelo lojista.', 410, 'FIRST_ACCESS_REQUIRED');
 }
 
 export async function loginDriverAccount(body: any): Promise<{ account: DriverAccount; accountToken: string }> {
