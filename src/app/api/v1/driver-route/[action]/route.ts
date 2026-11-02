@@ -36,7 +36,7 @@ export async function POST(req: NextRequest, context: { params: Promise<{ action
     const result = await optimizeRoute(assignments, body.mode, origin, deadline);
     const latest = await authorized(req, body);
     if (latest.account.id !== initial.account.id || fingerprint(activeRouteAssignments(latest.state, latest.auth)) !== fingerprint(assignments)) throw new RouteError('Suas entregas mudaram durante o cálculo. Atualize a rota.', 409, 'ROUTE_STALE');
-    return json({ success: true, mode: body.mode, ...result, origin: { ...origin, source: gps ? 'gps' : 'store' }, attribution: `© OpenStreetMap contributors; ${result.source === 'valhalla' ? 'Valhalla' : 'OSRM'}` });
+    return json({ success: true, mode: body.mode, ...result, calculatedAt:new Date().toISOString(), vehicle:result.source === 'valhalla' ? 'motorcycle' : 'driving', hasLiveTraffic:false, origin: { ...origin, source: gps ? 'gps' : 'store' }, attribution: `© OpenStreetMap contributors; ${result.source === 'valhalla' ? 'Valhalla' : 'OSRM'}` });
   } catch (error: any) {
     return json({ success: false, error: error?.status ? error.message : 'Não foi possível organizar a rota. Use a organização manual.', code: error?.code || 'ROUTE_UNAVAILABLE' }, error?.status || 503);
   }

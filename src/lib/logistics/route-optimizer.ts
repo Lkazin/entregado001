@@ -116,6 +116,7 @@ export async function optimizeRoute(assignments: any[], mode: RouteMode, origin:
     return { assignmentId: assignments[index - 1].assignmentId || assignments[index - 1].id, sequence: i + 1,
       distanceMeters, durationSeconds, cumulativeDistanceMeters, cumulativeDurationSeconds,
       locationApproximate: points[index].approximate === true,
+      destinationCoordinates:{latitude:points[index].latitude,longitude:points[index].longitude},
       distanceFromOriginMeters: distances[0][index], durationFromOriginSeconds: durations[0][index] };
   }), totalDistanceMeters, totalDurationSeconds,
     rule: mode === 'shortest_distance' ? 'Sugestão por vizinho mais próximo usando distâncias pelas ruas; não garante ótimo global.' : 'Horário de criação (ou aceite quando ausente), em faixas de 5 minutos; distância pelas ruas desempata.', source };

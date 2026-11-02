@@ -81,7 +81,7 @@ test('Valhalla converts road kilometres to metres, keeps seconds and sends gatew
   const m=load(async (url, options) => {
     calls++; assert.equal(String(url),'https://maps.example.test/sources_to_targets');
     assert.equal(options.headers['x-api-key'],'private-fixture'); assert.equal(options.redirect,'error');
-    const body=JSON.parse(options.body); assert.equal(body.costing,'motor_scooter'); assert.equal(body.verbose,false);
+    const body=JSON.parse(options.body); assert.equal(body.costing,'motorcycle'); assert.equal(body.costing_options.motorcycle.use_trails,0); assert.equal(body.verbose,false);
     assert.equal(body.sources[0].lat, origin.latitude);
     return {ok:true,json:async()=>({units:'kilometers', sources_to_targets:{distances:distances.map(row=>row.map(n=>n/1000)),durations:distances.map(row=>row.map(n=>n/10))}})};
   },{VALHALLA_BASE_URL:'https://maps.example.test',VALHALLA_API_KEY:'private-fixture'});

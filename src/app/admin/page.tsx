@@ -152,6 +152,9 @@ export default function AdminDashboardPage() {
 
   // Estado REAL sem dados fakes (carregados da API e do banco)
   const [orders, setOrders] = useState<AdminOrder[]>([]);
+  const ordersFetchInFlight = React.useRef(false);
+  const ordersEpoch = React.useRef(0);
+  const applyLocalOrders: typeof setOrders = update => { ordersEpoch.current++; setOrders(update); };
   const [stageNow, setStageNow] = useState(0);
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -340,7 +343,8 @@ export default function AdminDashboardPage() {
         if (e.key === 'novaesweb_orders' && e.newValue) {
           try {
             const newOrders = JSON.parse(e.newValue);
-            if (Array.isArray(newOrders)) setOrders(newOrders);
+            // Other tabs may hold an older snapshot; ask the server instead.
+            if (Array.isArray(newOrders) && sessionStorage.getItem('novaesweb_admin_token')) void fetchData(true);
           } catch (err) {}
         }
       };
@@ -371,6 +375,9 @@ export default function AdminDashboardPage() {
 
   // FUNÇÃO DE BUSCA DOS DADOS REAIS
   const fetchData = async (silent = false) => {
+    if (ordersFetchInFlight.current) return;
+    ordersFetchInFlight.current = true;
+    const epoch = ordersEpoch.current;
     if (!silent) setIsRefreshing(true);
     try {
       // 1. Buscar Pedidos Reais
@@ -382,8 +389,10 @@ export default function AdminDashboardPage() {
         return;
       }
       const dataOrders = await resOrders.json().catch(() => null);
+      if (epoch !== ordersEpoch.current) return;
       if (dataOrders && dataOrders.success && Array.isArray(dataOrders.orders)) {
         setOrders(prevOrders => {
+          if (epoch !== ordersEpoch.current) return prevOrders;
           // Todo pedido retornado pelo servidor deve ser exibido, independentemente do nome.
           const incoming: AdminOrder[] = dataOrders.orders;
 
@@ -443,6 +452,7 @@ export default function AdminDashboardPage() {
     } catch (err) {
       console.error('Erro ao sincronizar dados:', err);
     } finally {
+      ordersFetchInFlight.current = false;
       setIsLoading(false);
       setIsRefreshing(false);
     }
@@ -466,7 +476,7 @@ export default function AdminDashboardPage() {
       const nextStatus = sequence[currentIdx + 1];
       
       // Atualização imediata otimista no estado e no cache local
-      setOrders(prev => {
+      applyLocalOrders(prev => {
         const updated = prev.map(o => o.id === orderId ? { ...o, status: nextStatus } : o);
         if (typeof window !== 'undefined') {
           localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
@@ -503,7 +513,7 @@ export default function AdminDashboardPage() {
 
   // Confirmar Pix Manual Conectado à API
   const handleConfirmPix = async (orderId: string) => {
-    setOrders(prev => {
+    applyLocalOrders(prev => {
       const updated = prev.map(o => o.id === orderId ? { ...o, paymentStatus: 'confirmado_manual' as const } : o);
       if (typeof window !== 'undefined') {
         localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
@@ -535,7 +545,7 @@ export default function AdminDashboardPage() {
 
     setIsCancelingOrder(true);
 
-    setOrders(prev => {
+    applyLocalOrders(prev => {
       const updated = prev.map(o => o.id === orderId ? { 
         ...o, 
         status: 'cancelado' as const,
@@ -590,7 +600,7 @@ export default function AdminDashboardPage() {
   const handleRestoreOrder = async (orderId: string) => {
     if (!confirm('Deseja restaurar este pedido de volta para a coluna "1. Recebido" do Kanban?')) return;
 
-    setOrders(prev => {
+    applyLocalOrders(prev => {
       const updated = prev.map(o => o.id === orderId ? { 
         ...o, 
         status: 'recebido' as const, 
@@ -627,7 +637,7 @@ export default function AdminDashboardPage() {
   const handleDeleteOrderPermanently = async (orderId: string) => {
     if (!confirm('Tem certeza que deseja excluir definitivamente este registro do histórico de cancelados?')) return;
 
-    setOrders(prev => {
+    applyLocalOrders(prev => {
       const updated = prev.filter(o => o.id !== orderId);
       if (typeof window !== 'undefined') {
         localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
@@ -754,7 +764,7 @@ export default function AdminDashboardPage() {
           : 'Entregador Fixo');
 
       const selectedIdSet = new Set(targetOrders.map((o) => o.id));
-      setOrders((prev) => {
+      applyLocalOrders((prev) => {
         const updated = prev.map((o) =>
           selectedIdSet.has(o.id)
             ? {
@@ -828,7 +838,7 @@ export default function AdminDashboardPage() {
   const handleCancelDispatch = async (orderId: string) => {
     if (!confirm('Deseja retirar este pedido do despacho e torná-lo disponível novamente?')) return;
 
-    setOrders((prev) => {
+    applyLocalOrders((prev) => {
       const updated = prev.map((o) =>
         o.id === orderId
           ? {
@@ -1093,7 +1103,7 @@ export default function AdminDashboardPage() {
         if (typeof window !== 'undefined') {
           localStorage.removeItem('novaesweb_orders');
         }
-        setOrders([]);
+        applyLocalOrders([]);
         setDispatchAlert('Todos os pedidos e demonstrações foram excluídos com sucesso. Painel 100% limpo!');
         setTimeout(() => setDispatchAlert(null), 4000);
         fetchData(true);

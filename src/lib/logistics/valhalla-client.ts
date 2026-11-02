@@ -29,7 +29,7 @@ export async function valhallaMatrixBlock(sources: ValhallaPoint[], targets: Val
     const response = await fetch(url, { method:'POST', headers, redirect:'error', signal:controller.signal, cache:'no-store', body:JSON.stringify({
       sources:sources.map(p => ({lat:p.latitude,lon:p.longitude})),
       targets:targets.map(p => ({lat:p.latitude,lon:p.longitude})),
-      costing:'motor_scooter', units:'kilometers', verbose:false,
+      costing:'motorcycle',costing_options:{motorcycle:{use_trails:0}}, units:'kilometers', verbose:false,
     }) });
     if (!response.ok) throw new Error('provider');
     const result = await response.json();
@@ -60,7 +60,7 @@ export async function valhallaRoute(from: ValhallaPoint, to: ValhallaPoint) {
     const response = await fetch(endpoint('route'), {
       method:'POST', headers, redirect:'error', cache:'no-store', signal:AbortSignal.timeout(8000),
       body:JSON.stringify({locations:[from,to].map(p=>({lat:p.latitude,lon:p.longitude})),
-        costing:'motor_scooter',units:'kilometers',format:'osrm',shape_format:'geojson'}),
+        costing:'motorcycle',costing_options:{motorcycle:{use_trails:0}},units:'kilometers',format:'osrm',shape_format:'geojson'}),
     });
     if (!response.ok) throw new Error('provider');
     const data = await response.json(), route = data.routes?.[0];

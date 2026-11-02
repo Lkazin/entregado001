@@ -4,7 +4,7 @@ $payload = @{
         @{ lat = -29.9189; lon = -51.1781 },
         @{ lat = -29.9239; lon = -51.1826 }
     )
-    costing = 'motor_scooter'
+    costing = 'motorcycle'
     units = 'kilometers'
     language = 'pt-BR'
 } | ConvertTo-Json -Depth 5

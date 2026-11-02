@@ -38,7 +38,9 @@ export function recordStage(target: any, stage: OrderStage, date: string, metada
 }
 
 function matchesOrder(candidate: any, order: any): boolean {
-  const id = candidate.orderId || candidate.id;
+  // Explicit IDs outrank display numbers, which can repeat in legacy data.
+  if (candidate.orderId) return String(candidate.orderId) === String(order.id);
+  const id = candidate.id;
   return String(id) === String(order.id) || Boolean(candidate.orderNumber && order.orderNumber &&
     String(candidate.orderNumber).replace(/^#/, '') === String(order.orderNumber).replace(/^#/, ''));
 }
@@ -100,23 +102,29 @@ export function projectStoreOrders(orders: any[], state: any, storeId: string): 
   const map = new Map<string, any>();
   for (const order of orders) if (order?.id && (!order.storeId || timelineStoreKey(order.storeId) === store)) map.set(String(order.id), { ...order });
   for (const projected of Object.values(projections) as any[]) if (projected?.id) {
+    if (projected.deletedAt) { map.delete(String(projected.id)); continue; }
     const previous = map.get(String(projected.id));
     if (!previous) {
       map.set(String(projected.id), { ...projected });
     } else {
       const prevRank = STATUS_RANK[previous.status] || 0;
       const projRank = STATUS_RANK[projected.status] || 0;
-      const resolvedStatus = previous.status === 'cancelado' || projected.status === 'cancelado'
+      const resolvedStatus = projected.orderProjectionUpdatedAt ? projected.status : previous.status === 'cancelado' || projected.status === 'cancelado'
         ? 'cancelado'
         : prevRank >= projRank
         ? previous.status
         : projected.status;
 
+      const lifecycle = projected.orderProjectionUpdatedAt ? Object.fromEntries(
+        ['status','dispatchStatus','driverId','driverName','assignedDriverName','offerGroupId','acceptedAt','pickedUpAt','deliveredAt','canceledAt','cancellationReason','orderProjectionUpdatedAt']
+          .filter(key => Object.prototype.hasOwnProperty.call(projected,key)).map(key=>[key,projected[key]])
+      ) : {};
       map.set(String(projected.id), {
         ...projected,
         ...previous,
+        ...lifecycle,
         status: resolvedStatus,
-        dispatchStatus: previous.dispatchStatus || projected.dispatchStatus,
+        dispatchStatus: projected.orderProjectionUpdatedAt ? projected.dispatchStatus : previous.dispatchStatus || projected.dispatchStatus,
         stageHistory: mergeStageHistory(previous?.stageHistory, projected.stageHistory),
       });
     }
