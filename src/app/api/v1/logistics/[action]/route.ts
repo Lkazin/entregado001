@@ -12,6 +12,8 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { readLogisticsState, writeLogisticsState, StateStoreError } from '@/lib/logistics/state-store';
 import { AccountSessionError, normalizeDriverPhone } from '@/lib/auth/driver-account';
 import { prepareDriverAccount, driverAccountContext, bindAccountMembership } from '@/lib/auth/driver-account-logistics';
+import { notifyDriversOfNewOffer } from '@/lib/push/web-push-server';
+import { activeAssignmentStatuses, waitingPickupStatuses, pickedUpStatuses, recordStage, mergeStageHistory, projectStoreOrders } from '@/lib/logistics/order-timeline';
 
 export const dynamic = 'force-dynamic';
 
@@ -77,6 +79,7 @@ let liveOffers: any[] = [];
 let liveAssignments: any[] = [];
 let liveTracking: Record<string, LiveDriverLocation> = {};
 let liveSettingsByStore: Record<string, StoreLogisticsSettings> = {};
+let liveOrderProjectionsByStore: Record<string, Record<string, any>> = {};
 let liveStateVersion = 0;
 let lastLocalLogisticsPersistAt = 0;
 let lastMutationId = '';
@@ -344,6 +347,7 @@ async function loadLogisticsState(_forceCloud = false) {
       if (parsed.settingsByStore && typeof parsed.settingsByStore === 'object') {
         liveSettingsByStore = parsed.settingsByStore;
       }
+      liveOrderProjectionsByStore = parsed.orderProjectionsByStore || {};
       if (Array.isArray(parsed.drivers)) {
         liveDrivers = parsed.drivers.map((d: any) => {
             const isExpired =
@@ -401,6 +405,14 @@ async function persistLogisticsState(mutationId?: string): Promise<string> {
   const mutId = mutationId || crypto.randomUUID();
   try {
     recomputeDriverCounters();
+    // Orders are projected in the same authoritative CAS as logistics changes.
+    const stores = new Set([...liveOffers, ...liveAssignments].map(item => normalizeStoreId(item.storeId)));
+    for (const store of stores) {
+      const orders = await loadStoreOrders(store);
+      const map = liveOrderProjectionsByStore[store] || {};
+      for (const order of orders) map[String(order.id)] = order;
+      liveOrderProjectionsByStore[store] = map;
+    }
     const nextVersion = Math.max(1, liveStateVersion) + 1;
     const payload = JSON.stringify({
       stateVersion: nextVersion,
@@ -411,6 +423,7 @@ async function persistLogisticsState(mutationId?: string): Promise<string> {
       offers: liveOffers,
       assignments: liveAssignments,
       tracking: liveTracking,
+      orderProjectionsByStore: liveOrderProjectionsByStore,
     });
     const req = mutationRequest.getStore();
     const account = req?.headers.get('x-account-session') ? driverAccountContext(req).account : null;
@@ -429,6 +442,7 @@ async function persistLogisticsState(mutationId?: string): Promise<string> {
     liveTracking = {};
     liveSettingsByStore = {};
     liveStateVersion = 0;
+    liveOrderProjectionsByStore = {};
     lastLocalLogisticsPersistAt = 0;
     lastMutationId = '';
     await loadLogisticsState(true).catch(() => {});
@@ -445,6 +459,10 @@ function getStoreOrdersPath(targetStoreId?: string | null): string {
   return `stores/${norm}/orders.json`;
 }
 
+function projectedOrders(orders: any[], store: string) {
+  return projectStoreOrders(orders, { offers: liveOffers, assignments: liveAssignments, orderProjectionsByStore: liveOrderProjectionsByStore }, store);
+}
+
 async function loadStoreOrders(targetStoreId?: string | null): Promise<any[]> {
   const norm = normalizeStoreId(targetStoreId);
   const cacheKey = `__orders_${norm}__`;
@@ -454,14 +472,14 @@ async function loadStoreOrders(targetStoreId?: string | null): Promise<any[]> {
   // 1. Sempre prioriza a memória mais fresca gravada por /api/orders
   const gAll = globalThis as any;
   if (gAll.__novaesweb_orders_by_store__ && Array.isArray(gAll.__novaesweb_orders_by_store__[norm]) && gAll.__novaesweb_orders_by_store__[norm].length > 0) {
-    return gAll.__novaesweb_orders_by_store__[norm];
+    return projectedOrders(gAll.__novaesweb_orders_by_store__[norm], norm);
   }
   if (norm === DEFAULT_STORE_ID && Array.isArray(gShared.__novaesweb_orders__) && gShared.__novaesweb_orders__.length > 0) {
-    return gShared.__novaesweb_orders__;
+    return projectedOrders(gShared.__novaesweb_orders__, norm);
   }
 
   if (Array.isArray(g[cacheKey]) && g[timeKey] && Date.now() - g[timeKey] < 5000) {
-    return g[cacheKey];
+    return projectedOrders(g[cacheKey], norm);
   }
 
   const filePath = getStoreOrdersPath(norm);
@@ -478,16 +496,16 @@ async function loadStoreOrders(targetStoreId?: string | null): Promise<any[]> {
           gShared.__novaesweb_orders__ = parsed;
           gShared.__novaesweb_orders_updated_at__ = Date.now();
         }
-        return parsed;
+        return projectedOrders(parsed, norm);
       }
     }
   } catch {}
 
   // Fallback para orders.json se loja padrão
   if (norm === DEFAULT_STORE_ID && Array.isArray(gShared.__novaesweb_orders__)) {
-    return gShared.__novaesweb_orders__;
+    return projectedOrders(gShared.__novaesweb_orders__, norm);
   }
-  return g[cacheKey] || [];
+  return projectedOrders(g[cacheKey] || [], norm);
 }
 
 async function updateStoreOrdersStatus(updater: (orders: any[]) => boolean, targetStoreId?: string | null): Promise<void> {
@@ -511,12 +529,13 @@ async function updateStoreOrdersStatus(updater: (orders: any[]) => boolean, targ
 
       const filePath = getStoreOrdersPath(norm);
       const payload = JSON.stringify(orders);
-      await supabaseAdmin.storage
+      const { error: uploadError } = await supabaseAdmin.storage
         .from('novaesweb_store')
         .upload(filePath, payload, {
           upsert: true,
           contentType: 'application/json',
         });
+      if (uploadError) throw new Error('Não foi possível sincronizar os pedidos. Tente novamente.');
 
       if (norm === DEFAULT_STORE_ID && filePath !== 'orders.json') {
         await supabaseAdmin.storage
@@ -528,7 +547,7 @@ async function updateStoreOrdersStatus(updater: (orders: any[]) => boolean, targ
       }
     }
   } catch (err) {
-    console.warn('[route.ts] Erro ao sincronizar orders.json:', err);
+    throw err;
   }
 }
 
@@ -609,6 +628,8 @@ function sanitizeAssignmentForDriver(a: any, idx: number, fallbackStoreId?: stri
     id: a.id || a.assignmentId || `asg_${idx}`,
     assignmentId: a.assignmentId || a.id || `asg_${idx}`,
     orderId: a.orderId || `ord_${idx}`,
+    offerId: a.offerId, batchId: a.batchId || a.offerId, pickupGroupId: a.pickupGroupId || a.offerId,
+    createdAt: a.createdAt, stageHistory: a.stageHistory || [],
     orderNumber: a.orderNumber ? String(a.orderNumber) : `#${100 + idx}`,
     storeId: normalizeStoreId(a.storeId || fallbackStoreId),
     storeName: a.storeName || 'Bella Pizza',
@@ -640,11 +661,109 @@ function sanitizeAssignmentForDriver(a: any, idx: number, fallbackStoreId?: stri
         ? 'picked_up'
         : 'waiting_pickup',
     sequence: a.sequence || idx + 1,
-    acceptedAt: a.acceptedAt || new Date().toISOString(),
+    acceptedAt: a.acceptedAt || undefined,
     pickedUpAt: a.pickedUpAt || a.pickupConfirmedAt || undefined,
     deliveredAt: a.deliveredAt || undefined,
     requiresPinValidation: true,
   };
+}
+
+async function requireReadyDispatchOrders(items: any[], storeId: string, currentOfferId?: string): Promise<any[]> {
+  const all = await loadStoreOrders(storeId);
+  const ids = new Set<string>();
+  const ready: any[] = [];
+  let shouldUpdateOrders = false;
+
+  for (const item of items) {
+    const key = String(item?.id || item?.orderId || '').trim();
+    if (!key || ids.has(key)) throw new AccountSessionError('O conjunto contém pedido ausente ou duplicado.', 400, 'INVALID_DISPATCH_BATCH');
+    ids.add(key);
+
+    const cleanKey = key.replace(/^#/, '');
+    const order = all.find(o => {
+      if (o.storeId && !isSameStore(o.storeId, storeId)) return false;
+      return String(o.id) === key ||
+             String(o.orderId || '') === key ||
+             String(o.orderNumber || '').replace(/^#/, '') === cleanKey ||
+             (item?.orderNumber && String(o.orderNumber || '').replace(/^#/, '') === String(item.orderNumber).replace(/^#/, ''));
+    });
+
+    if (!order) {
+      throw new AccountSessionError('Pedido não encontrado nesta loja para despacho.', 404, 'ORDER_NOT_FOUND');
+    }
+    if (order.status === 'cancelado') {
+      throw new AccountSessionError('Não é possível despachar um pedido cancelado.', 409, 'ORDER_CANCELED');
+    }
+
+    // Se o pedido ainda estava em recebido ou preparando no backend, o lojista está despachando-o agora:
+    // avança automaticamente para 'pronto' e registra o momento de disponibilidade.
+    if (order.status !== 'pronto') {
+      order.status = 'pronto';
+      order.readyAt = order.readyAt || new Date().toISOString();
+      recordStage(order, 'despacho', new Date().toISOString(), { reason: 'ready' });
+      shouldUpdateOrders = true;
+    }
+
+    const hasActiveAssignment = liveAssignments.some(a =>
+      isSameStore(a.storeId, storeId) &&
+      (String(a.orderId) === key || String(a.orderId) === String(order.id) || String(a.orderNumber || '').replace(/^#/, '') === cleanKey) &&
+      (activeAssignmentStatuses.includes(a.status) || ['delivered', 'entregue'].includes(a.status))
+    );
+    if (hasActiveAssignment) {
+      throw new AccountSessionError('Um pedido do conjunto já possui uma entrega atribuída ou em andamento.', 409, 'ORDER_ALREADY_ASSIGNED');
+    }
+
+    // Se não há entrega ativa, limpa flags antigas para permitir o novo despacho
+    if (order.pickedUpAt || order.deliveredAt) {
+      order.pickedUpAt = undefined;
+      order.deliveredAt = undefined;
+      shouldUpdateOrders = true;
+    }
+
+    const hasActiveOffer = liveOffers.some(o =>
+      isSameStore(o.storeId, storeId) &&
+      (o.offerId || o.id) !== currentOfferId &&
+      o.status === 'pendente' &&
+      (!o.expiresAt || Date.parse(o.expiresAt) > Date.now()) &&
+      (
+        String(o.orderId) === key ||
+        String(o.orderId) === String(order.id) ||
+        String(o.orderNumber || '').replace(/^#/, '') === cleanKey ||
+        (o.orderIds || []).some((id: any) => String(id) === key || String(id) === String(order.id) || String(id).replace(/^#/, '') === cleanKey) ||
+        (o.orders || []).some((entry: any) => String(entry.id || entry.orderId) === key || String(entry.id || entry.orderId) === String(order.id) || String(entry.orderNumber || '').replace(/^#/, '') === cleanKey)
+      )
+    );
+    if (hasActiveOffer) {
+      throw new AccountSessionError('Um pedido do conjunto já está em outra oferta aguardando motoboy.', 409, 'ORDER_ALREADY_OFFERED');
+    }
+
+    ready.push({
+      ...order,
+      customerAddress: order.customerAddress || order.deliveryAddress || order.address,
+      customerPhone: order.customerPhone || order.phone,
+      customerNeighborhood: order.customerNeighborhood || order.region,
+      customerCity: order.customerCity || order.city,
+    });
+  }
+
+  if (shouldUpdateOrders) {
+    await updateStoreOrdersStatus((storeOrders) => {
+      let modified = false;
+      for (const r of ready) {
+        const found = storeOrders.find(o => String(o.id) === String(r.id));
+        if (found) {
+          found.status = 'pronto';
+          found.readyAt = r.readyAt || found.readyAt || new Date().toISOString();
+          found.pickedUpAt = undefined;
+          found.deliveredAt = undefined;
+          modified = true;
+        }
+      }
+      return modified;
+    }, storeId).catch(err => console.warn('Erro ao sincronizar status pronto dos pedidos:', err));
+  }
+
+  return ready;
 }
 
 function isOfferVisibleToDriver(o: any, auth: { driverId?: string; membershipId?: string; storeId?: string; driverRecord?: any }, fallbackStoreId: string): boolean {
@@ -740,12 +859,13 @@ function assertOwnedTargets(req: NextRequest, action: string, body: any) {
   if (!['pickup-confirm','route-reorder','assignment-withdraw','delivery-complete','delivery-confirm','delivery-complete-with-pin','tracking-location-push','tracking-session-start'].includes(action)) return;
   const auth = verifyDriverRequest(req,liveDrivers,body);
   if (!auth.valid) throw new AccountSessionError(auth.error || 'Acesso negado.',auth.status || 401,'DRIVER_SESSION_INVALID');
-  const keys: any[] = action === 'pickup-confirm' ? (body.assignmentIds || body.orderIds || [body.assignmentId || body.orderId]).filter(Boolean) :
+  const keys: any[] = action === 'pickup-confirm' ? [...(body.assignmentIds || body.orderIds || [body.assignmentId || body.orderId]).filter(Boolean), ...(Array.isArray(body.pickupScopeIds) ? body.pickupScopeIds : [])] :
     action === 'route-reorder' ? (body.stops || []).map((stop:any) => stop.assignmentId) : [body.assignmentId || body.orderId].filter(Boolean);
   if (keys.length === 0 && !action.startsWith('tracking-')) throw new AccountSessionError('Informe uma entrega válida.',400,'INVALID_ASSIGNMENT');
   for (const key of keys) {
     const clean = String(key).replace(/^asg_/,'').replace(/^#/,'');
-    const targets = liveAssignments.filter(a => [a.id,a.assignmentId,a.orderId,a.orderNumber].filter(x => x != null).some(x => String(x).replace(/^asg_/,'').replace(/^#/,'') === clean));
+    const exact = liveAssignments.filter(a => String(a.id) === String(key) || String(a.assignmentId) === String(key));
+    const targets = exact.length ? exact : liveAssignments.filter(a => activeAssignmentStatuses.includes(a.status) && [a.orderId,a.orderNumber].filter(x => x != null).some(x => String(x).replace(/^asg_/,'').replace(/^#/,'') === clean));
     if (!targets.length || targets.some(a => !ownsAssignment(auth,a))) throw new AccountSessionError('Esta entrega não pertence à sua conta e loja.',403,'ASSIGNMENT_FORBIDDEN');
   }
 }
@@ -1064,10 +1184,7 @@ export async function GET(
                 a.driverId === auth.membershipId ||
                 a.driverId === auth.driverRecord?.driverId ||
                 a.driverId === auth.driverRecord?.id) &&
-              a.status !== 'delivered' &&
-              a.status !== 'entregue' &&
-              a.status !== 'canceled_by_store' &&
-              a.status !== 'canceled_by_driver'
+              activeAssignmentStatuses.includes(a.status)
           )
           .map((a, idx) => sanitizeAssignmentForDriver(a, idx, driverStore));
 
@@ -1810,17 +1927,16 @@ export async function POST(
             );
           }
 
-          const effectiveStoreId = normalizeStoreId(body.storeId || adminCheck.storeId || storeId);
+          const effectiveStoreId = normalizeStoreId(adminCheck.storeId || storeId);
           const current = getStoreSettings(effectiveStoreId);
 
           const distributionMode =
             body.distributionMode === 'fixed_driver' ? 'fixed_driver' : 'broadcast_enabled';
           const fixedDriverId =
             distributionMode === 'fixed_driver' ? body.fixedDriverId || null : body.fixedDriverId ?? current.fixedDriverId;
-          const maxConcurrentDeliveries = Math.max(
-            1,
-            Math.min(20, parseInt(body.maxConcurrentDeliveries) || current.maxConcurrentDeliveries || 5)
-          );
+          const requestedCapacity = Number(body.maxConcurrentDeliveries);
+          const maxConcurrentDeliveries = Number.isSafeInteger(requestedCapacity) && requestedCapacity > 0
+            ? requestedCapacity : current.maxConcurrentDeliveries;
           const offerTimeoutSeconds = Math.max(
             30,
             Math.min(3600, parseInt(body.offerTimeoutSeconds) || current.offerTimeoutSeconds || 900)
@@ -1948,10 +2064,7 @@ export async function POST(
                   a.driverId === auth.membershipId ||
                   a.driverId === auth.driverRecord?.driverId ||
                   a.driverId === auth.driverRecord?.id) &&
-                a.status !== 'delivered' &&
-                a.status !== 'entregue' &&
-                a.status !== 'canceled_by_store' &&
-                a.status !== 'canceled_by_driver'
+                activeAssignmentStatuses.includes(a.status)
             )
             .map((a, idx) => sanitizeAssignmentForDriver(a, idx, driverStore));
 
@@ -2025,7 +2138,7 @@ export async function POST(
             );
           }
 
-          const effectiveStoreId = normalizeStoreId(body.storeId || adminCheck.storeId || storeId);
+          const effectiveStoreId = normalizeStoreId(adminCheck.storeId || storeId);
           const settings = getStoreSettings(effectiveStoreId);
           const days = Math.max(1, parseInt(body.validityDays) || 7);
 
@@ -2118,7 +2231,7 @@ export async function POST(
             );
           }
 
-          const effectiveStoreId = normalizeStoreId(body.storeId || adminCheck.storeId || storeId);
+          const effectiveStoreId = normalizeStoreId(adminCheck.storeId || storeId);
           const { driverId, inviteCode } = body;
           const drv = liveDrivers.find(
             (d) =>
@@ -2162,7 +2275,7 @@ export async function POST(
             );
           }
 
-          const effectiveStoreId = normalizeStoreId(body.storeId || adminCheck.storeId || storeId);
+          const effectiveStoreId = normalizeStoreId(adminCheck.storeId || storeId);
           const { driverId, handleActiveDeliveries } = body;
 
           const drv = liveDrivers.find(
@@ -2521,7 +2634,7 @@ export async function POST(
             );
           }
 
-          const effectiveStoreId = normalizeStoreId(body.storeId || adminCheck.storeId || storeId);
+          const effectiveStoreId = normalizeStoreId(adminCheck.storeId || storeId);
           const { driverId } = body;
           const drv = liveDrivers.find(
             (d) =>
@@ -2568,7 +2681,7 @@ export async function POST(
 
           await loadLogisticsState();
 
-          const effectiveStoreId = normalizeStoreId(body.storeId || adminCheck.storeId || storeId);
+          const effectiveStoreId = normalizeStoreId(adminCheck.storeId || storeId);
           const settings = getStoreSettings(effectiveStoreId);
 
           const {
@@ -2587,7 +2700,7 @@ export async function POST(
             feeOffered,
           } = body;
 
-          const targetOrders =
+          const requestedOrders =
             Array.isArray(orders) && orders.length > 0
               ? orders
               : Array.isArray(orderIds) && orderIds.length > 0
@@ -2599,78 +2712,16 @@ export async function POST(
                 }))
               : [{ id: orderId, orderId, orderNumber, customerAddress }];
 
-          const batchSize = targetOrders.length;
-          if (batchSize === 0 || !targetOrders[0]?.id) {
+          const batchSize = requestedOrders.length;
+          if (batchSize === 0 || !(requestedOrders[0]?.id || requestedOrders[0]?.orderId)) {
             return jsonResponse(
               { success: false, error: 'Selecione ao menos um pedido para despachar.' },
               { status: 400 }
             );
           }
 
-          // Verifica os pedidos no banco da loja:
-          // 1) Não enviar automaticamente pedidos recém-recebidos ('recebido') ou em preparo ('preparando')
-          // 2) Impedir duplicidade se o pedido já tiver entregador ativo
-          const allOrders = await loadStoreOrders();
+          const targetOrders = await requireReadyDispatchOrders(requestedOrders, effectiveStoreId);
           const nowMs = Date.now();
-
-          for (const item of targetOrders) {
-            const ordIdStr = String(item.id || item.orderId);
-            const ordNumStr = String(item.orderNumber || '').replace('#', '');
-
-            const storeOrder = allOrders.find(
-              (o) =>
-                String(o.id) === ordIdStr ||
-                (ordNumStr && String(o.orderNumber).replace('#', '') === ordNumStr)
-            );
-
-            // Se o lojista acionou o despacho do pedido, ele é automaticamente promovido a "pronto"
-            if (
-              storeOrder &&
-              (storeOrder.status === 'recebido' || storeOrder.status === 'preparando')
-            ) {
-              storeOrder.status = 'pronto';
-            }
-
-            // Verifica se já existe atribuição ativa para este pedido nesta loja
-            const existingActiveAsg = liveAssignments.find(
-              (a) =>
-                isSameStore(a.storeId, effectiveStoreId) &&
-                (String(a.orderId) === ordIdStr ||
-                  (ordNumStr && String(a.orderNumber).replace('#', '') === ordNumStr)) &&
-                (a.status === 'waiting_pickup' ||
-                  a.status === 'picked_up' ||
-                  a.status === 'in_transit' ||
-                  a.status === 'em_rota')
-            );
-
-            if (existingActiveAsg) {
-              return jsonResponse(
-                {
-                  success: false,
-                  error: `O pedido #${existingActiveAsg.orderNumber} já está atribuído ao entregador ${existingActiveAsg.driverName || ''}.`,
-                },
-                { status: 409 }
-              );
-            }
-
-            // Cancela ofertas pendentes anteriores do mesmo pedido para evitar duplicidade
-            liveOffers.forEach((off) => {
-              if (!isSameStore(off.storeId, effectiveStoreId) || off.status !== 'pendente') return;
-              const matchesDirect =
-                String(off.orderId) === ordIdStr ||
-                (ordNumStr && String(off.orderNumber).replace('#', '') === ordNumStr);
-              const matchesNested =
-                Array.isArray(off.orders) &&
-                off.orders.some(
-                  (x: any) =>
-                    String(x.id || x.orderId) === ordIdStr ||
-                    (ordNumStr && String(x.orderNumber).replace('#', '') === ordNumStr)
-                );
-              if (matchesDirect || matchesNested) {
-                off.status = 'cancelada';
-              }
-            });
-          }
 
           // Determina o modo de distribuição
           const effectiveMode: 'fixed_driver' | 'broadcast_enabled' =
@@ -2683,7 +2734,6 @@ export async function POST(
               : settings.distributionMode;
 
           const storeDrivers = liveDrivers.filter((d) => isSameStore(d.storeId, effectiveStoreId));
-          const maxSimultaneousStore = settings.maxConcurrentDeliveries || 5;
 
           let resolvedDriverId: string | null = null;
           let resolvedDriverName: string = 'Entregadores Habilitados';
@@ -2774,24 +2824,6 @@ export async function POST(
               );
             }
 
-            const drvLimit = Math.min(drv.maxDeliveries || maxSimultaneousStore, maxSimultaneousStore);
-            const currentLoad = drv.activeDeliveries || 0;
-            if (currentLoad + batchSize > drvLimit) {
-              return jsonResponse(
-                {
-                  success: false,
-                  fixedDriverUnavailable: true,
-                  reason: 'capacity_exceeded',
-                  driverName: drv.driverName || drv.name,
-                  currentLoad,
-                  batchSize,
-                  maxDeliveries: drvLimit,
-                  error: `O entregador ${drv.driverName || drv.name} já possui ${currentLoad} entrega(s) ativa(s) e o limite simultâneo é ${drvLimit} (tentativa de enviar +${batchSize}). Escolha outro entregador ou aguarde a conclusão.`,
-                },
-                { status: 409 }
-              );
-            }
-
             resolvedDriverId = drv.driverId || drv.id;
             resolvedDriverName = drv.driverName || drv.name || 'Entregador';
             eligibleDriverIds = [drv.driverId || drv.id, drv.id].filter(Boolean);
@@ -2800,9 +2832,7 @@ export async function POST(
             const eligibleDrivers = storeDrivers.filter((d) => {
               if (d.status !== 'ativo') return false;
               if (d.expiresAt && new Date(d.expiresAt).getTime() < nowMs) return false;
-              const drvLimit = Math.min(d.maxDeliveries || maxSimultaneousStore, maxSimultaneousStore);
-              const currentLoad = d.activeDeliveries || 0;
-              return currentLoad + batchSize <= drvLimit;
+              return d.presence !== 'indisponivel' && d.shiftStatus !== 'plantao_encerrado';
             });
 
             const idSet = new Set<string>();
@@ -2894,6 +2924,22 @@ export async function POST(
           liveOffers.unshift(offerObj);
           await persistLogisticsState();
 
+          // Dispara Notificação Web Push para os motoboys destinatários (segundo plano/tela bloqueada)
+          void notifyDriversOfNewOffer({
+            storeId: effectiveStoreId,
+            storeName: offerObj.storeName || settings.storeName || 'Bella Pizza',
+            offerId: offerObj.id,
+            orderNumber: offerObj.orderNumber,
+            deliveryFee: offerObj.deliveryFee ?? offerObj.feeOffered,
+            totalOrders: batchSize,
+            distributionMode: effectiveMode,
+            targetDriverId: resolvedDriverId,
+            eligibleDriverIds,
+            liveDrivers,
+          }).catch((pushErr) => {
+            console.warn('[Logistics] Aviso ao despachar Web Push:', pushErr);
+          });
+
           const orderIdSet = new Set(targetOrders.map((o: any) => String(o.id || o.orderId)));
           const orderNumberSet = new Set(
             targetOrders.map((o: any) => String(o.orderNumber).replace('#', ''))
@@ -2943,7 +2989,7 @@ export async function POST(
             );
           }
 
-          const effectiveStoreId = normalizeStoreId(body.storeId || adminCheck.storeId || storeId);
+          const effectiveStoreId = normalizeStoreId(adminCheck.storeId || storeId);
           const { orderId } = body;
           const targetStr = String(orderId || '');
 
@@ -3010,6 +3056,7 @@ export async function POST(
 
           const { offerId } = body;
           const decision = body.decision || body.response;
+          if (!['accept','accepted','reject','rejected'].includes(decision)) throw new AccountSessionError('Informe aceite ou recusa do conjunto.',400,'INVALID_OFFER_DECISION');
           const drv = auth.driverRecord;
           const drvId = auth.driverId || drv?.driverId || drv?.id;
           const memId = auth.membershipId || drv?.id;
@@ -3056,7 +3103,7 @@ export async function POST(
                   (a) =>
                     isSameStore(a.storeId, driverStore) &&
                     (a.driverId === drvId || a.driverId === memId) &&
-                    a.offerId === (offer.offerId || offer.id)
+                    a.offerId === (offer.offerId || offer.id) && activeAssignmentStatuses.includes(a.status)
                 )
                 .map((a, idx) => sanitizeAssignmentForDriver(a, idx, driverStore));
 
@@ -3110,7 +3157,7 @@ export async function POST(
           }
 
           // O conjunto inteiro de pedidos da oferta (NUNCA permite aceite parcial de conjunto)
-          const targetOrders =
+          let targetOrders =
             Array.isArray(offer.orders) && offer.orders.length > 0
               ? offer.orders
               : [
@@ -3127,62 +3174,11 @@ export async function POST(
                   },
                 ];
 
+          const subset = body.orderIds || body.assignmentIds;
+          if (Array.isArray(subset) && (subset.length !== targetOrders.length || new Set(subset.map(String)).size !== targetOrders.length ||
+            !targetOrders.every((order: any) => subset.map(String).includes(String(order.id || order.orderId))))) throw new AccountSessionError('Aceite ou recuse o conjunto inteiro.',400,'PARTIAL_BATCH_RESPONSE');
           if (decision === 'accepted' || decision === 'accept') {
-            // Verifica se algum pedido do conjunto já possui atribuição ativa (proteção extra contra duplicidade)
-            for (const ord of targetOrders) {
-              const ordIdStr = String(ord.id || ord.orderId);
-              const ordNumStr = String(ord.orderNumber || '').replace('#', '');
-              const conflictAsg = liveAssignments.find(
-                (a) =>
-                  isSameStore(a.storeId, driverStore) &&
-                  (String(a.orderId) === ordIdStr ||
-                    (ordNumStr && String(a.orderNumber).replace('#', '') === ordNumStr)) &&
-                  (a.status === 'waiting_pickup' ||
-                    a.status === 'picked_up' ||
-                    a.status === 'in_transit' ||
-                    a.status === 'em_rota')
-              );
-
-              if (conflictAsg) {
-                if (conflictAsg.driverId === drvId || conflictAsg.driverId === memId) {
-                  return jsonResponse({
-                    success: true,
-                    idempotent: true,
-                    action: 'offer.respond',
-                    offerId: offer.offerId || offer.id,
-                    status: 'aceita',
-                    assignment: sanitizeAssignmentForDriver(conflictAsg, 0, driverStore),
-                  });
-                }
-                return jsonResponse(
-                  {
-                    success: false,
-                    alreadyAccepted: true,
-                    error: 'Esta oferta já foi aceita',
-                    message: 'Esta oferta já foi aceita',
-                  },
-                  { status: 409 }
-                );
-              }
-            }
-
-            // Verifica limite simultâneo do entregador na loja considerando todos os pedidos do conjunto
-            const settings = getStoreSettings(driverStore);
-            const maxLimit = Math.min(
-              drv?.maxDeliveries || settings.maxConcurrentDeliveries || 5,
-              settings.maxConcurrentDeliveries || 5
-            );
-            const currentActive = drv?.activeDeliveries || 0;
-            if (currentActive + targetOrders.length > maxLimit) {
-              return jsonResponse(
-                {
-                  success: false,
-                  error: `Limite de entregas simultâneas excedido (${currentActive}/${maxLimit}). Não é possível aceitar um conjunto de ${targetOrders.length} pedido(s).`,
-                },
-                { status: 409 }
-              );
-            }
-
+            targetOrders = await requireReadyDispatchOrders(targetOrders, driverStore, offer.offerId || offer.id);
             const nowISO = new Date().toISOString();
             const mutationId = `accept_${offer.offerId || offer.id}_${drvId}_${Date.now()}`;
 
@@ -3199,11 +3195,13 @@ export async function POST(
 
             targetOrders.forEach((ord: any, idx: number) => {
               const ordId = ord.id || ord.orderId || `ord_${idx}_${Date.now()}`;
-              const asgId = `asg_${ordId}`;
+              const asgId = `asg_${ordId}_${crypto.randomUUID()}`;
               const asgObj = {
                 id: asgId,
                 assignmentId: asgId,
                 offerId: offer.offerId || offer.id,
+                batchId: offer.offerId || offer.id,
+                pickupGroupId: offer.offerId || offer.id,
                 orderId: ordId,
                 orderNumber: ord.orderNumber
                   ? String(ord.orderNumber)
@@ -3234,18 +3232,12 @@ export async function POST(
                 status: 'waiting_pickup',
                 sequence: idx + 1,
                 acceptedAt: nowISO,
+                createdAt: nowISO,
+                stageHistory: mergeStageHistory(ord.stageHistory),
               };
+              recordStage(asgObj, 'despacho', nowISO, { attemptId: asgId, reason: 'accepted' });
 
-              const existingIdx = liveAssignments.findIndex(
-                (a) =>
-                  isSameStore(a.storeId, driverStore) &&
-                  (a.assignmentId === asgId || a.id === asgId || String(a.orderId) === String(ordId))
-              );
-              if (existingIdx >= 0) {
-                liveAssignments[existingIdx] = asgObj;
-              } else {
-                liveAssignments.unshift(asgObj);
-              }
+              liveAssignments.unshift(asgObj);
               createdAssignments.push(sanitizeAssignmentForDriver(asgObj, idx, driverStore));
             });
 
@@ -3687,7 +3679,8 @@ export async function POST(
 
           if (asg) {
             asg.status = 'entregue';
-            asg.deliveredAt = nowISO;
+            asg.deliveredAt ||= nowISO;
+            recordStage(asg, 'concluido', asg.deliveredAt, { attemptId: asg.id });
             if (isForced) {
               asg.forcedDelivery = true;
               asg.forcedDeliveryReason =

@@ -14,6 +14,7 @@ import { PIZZA_FLAVORS } from '@/lib/constants';
 import AdminPinAuth from '@/components/AdminPinAuth';
 import DriverInTransitList from '@/components/DriverInTransitList';
 import FirstAccessInvitePanel from '@/components/FirstAccessInvitePanel';
+import OrderStageTiming from '@/components/OrderStageTiming';
 import { printThermalOrder, testPrintThermal, PaperWidth } from '@/lib/thermalPrinter';
 
 function getAdminHeaders(extra?: Record<string, string>): Record<string, string> {
@@ -79,6 +80,11 @@ interface AdminOrder {
   assignedDriverName?: string | null;
   offerGroupId?: string | null;
   createdAt: string;
+  acceptedAt?: string;
+  preparingAt?: string;
+  readyAt?: string;
+  dispatchedAt?: string;
+  stageHistory?: Array<{stage: string; at: string; reason?: string; attemptId?: string}>;
   pickedUpAt?: string;
   deliveredAt?: string;
   cancellationReason?: string;
@@ -140,12 +146,19 @@ const STATUS_HIERARCHY: Record<string, number> = {
 
 export default function AdminDashboardPage() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'kanban' | 'menu' | 'logistics' | 'settings' | 'canceled'>('kanban');
+  const [activeTab, setActiveTab] = useState<'overview' | 'kanban' | 'menu' | 'logistics' | 'settings' | 'canceled' | 'first_access'>('kanban');
   const [canceledSearch, setCanceledSearch] = useState('');
   const [ordersSearch, setOrdersSearch] = useState('');
 
   // Estado REAL sem dados fakes (carregados da API e do banco)
   const [orders, setOrders] = useState<AdminOrder[]>([]);
+  const [stageNow, setStageNow] = useState(0);
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    setStageNow(Date.now());
+    const timer = setInterval(() => setStageNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [isAuthenticated]);
   const [drivers, setDrivers] = useState<AdminDriver[]>([]);
   const [storeSettings, setStoreSettings] = useState<StoreDispatchSettings>({
     storeId: 'store_bella_pizza',
@@ -382,34 +395,9 @@ export default function AdminDashboardPage() {
             return [];
           }
 
-          // Ordem de progressão natural do status (anti-regressão garantida pelo módulo)
 
-          const result = incoming.map(o => {
-            const existing = prevOrders.find(p => p.id === o.id || String(p.orderNumber).replace('#', '') === String(o.orderNumber).replace('#', ''));
-            if (existing) {
-              const currentRank = STATUS_HIERARCHY[existing.status] || 0;
-              const incomingRank = STATUS_HIERARCHY[o.status] || 0;
-
-              // Se o status local já avançou (ex: lojista clicou em preparar/pronto ou motoboy concluiu),
-              // e a resposta do servidor veio com status anterior por latência/cache,
-              // preserva sempre o status mais avançado (NUNCA regride de concluído para recebido ou de preparando para recebido!)
-              let resolvedStatus = o.status;
-              if (o.status === 'cancelado' || existing.status === 'cancelado') {
-                resolvedStatus = 'cancelado';
-              } else if (currentRank > incomingRank) {
-                resolvedStatus = existing.status;
-              }
-
-              return {
-                ...o,
-                status: resolvedStatus,
-                dispatchStatus: existing.dispatchStatus || o.dispatchStatus,
-                assignedDriverName: existing.assignedDriverName || o.assignedDriverName,
-                offerGroupId: existing.offerGroupId || o.offerGroupId
-              };
-            }
-            return o;
-          });
+          // O servidor inclui as devoluções ao despacho e o estado confirmado.
+          const result = incoming;
 
           if (typeof window !== 'undefined') {
             localStorage.setItem('novaesweb_orders', JSON.stringify(result));
@@ -432,7 +420,6 @@ export default function AdminDashboardPage() {
             // Entregadores com vínculo removido/convite revogado são tratados como excluídos (histórico segue preservado no servidor)
             const validDrivers: AdminDriver[] = cloudData.drivers.filter(
               (d: any) =>
-                !d.name?.includes('Rodrigo Silva') &&
                 d.status !== 'vinculo_removido' &&
                 d.status !== 'revogado'
             );
@@ -447,154 +434,8 @@ export default function AdminDashboardPage() {
             }
           }
 
-          // SINCRONIZAÇÃO AUTOMÁTICA EM TEMPO REAL: Aceite, Retirada e Conclusão das Entregas
-          const cloudOffers = Array.isArray(cloudData.offers) ? cloudData.offers : [];
-          const cloudAssignments = Array.isArray(cloudData.assignments) ? cloudData.assignments : [];
+          // Os pedidos já vêm projetados pelo servidor com aceite, retirada e conclusão.
 
-          setOrders(prevOrders => {
-            let hasChanged = false;
-            const updated = prevOrders.map(order => {
-              // Pedidos concluídos ou cancelados NUNCA devem regredir para pronto ou recebido!
-              if (order.status === 'cancelado' || order.status === 'concluido') {
-                return order;
-              }
-              const currentRank = STATUS_HIERARCHY[order.status] || 1;
-              const orderIdStr = String(order.id);
-              const orderNumStr = String(order.orderNumber).replace('#', '');
-
-              // 1. Verificar em Assignments (tarefas do motoboy)
-              const asg = cloudAssignments.find((a: any) => 
-                String(a.orderId) === orderIdStr ||
-                String(a.orderNumber).replace('#', '') === orderNumStr
-              );
-
-              if (asg) {
-                const asgDriver = asg.driverName || asg.driverId || order.assignedDriverName || order.driverName;
-
-                // Status: Concluído com validação de PIN
-                if (asg.status === 'delivered' || asg.status === 'entregue') {
-                  if ((order.status as string) !== 'concluido' || order.dispatchStatus !== 'concluido') {
-                    hasChanged = true;
-                    return {
-                      ...order,
-                      status: 'concluido' as const,
-                      dispatchStatus: 'concluido' as const,
-                      driverName: asgDriver,
-                      assignedDriverName: asgDriver,
-                      deliveredAt: asg.deliveredAt || new Date().toISOString()
-                    };
-                  }
-                  return order;
-                }
-
-                // Status: Retirada confirmada na loja -> Em Rota de Entrega
-                if (asg.status === 'picked_up' || asg.status === 'in_transit') {
-                  if (order.status !== 'em_entrega' || order.dispatchStatus !== 'em_entrega') {
-                    hasChanged = true;
-                    return {
-                      ...order,
-                      status: 'em_entrega' as const,
-                      dispatchStatus: 'em_entrega' as const,
-                      driverName: asgDriver,
-                      assignedDriverName: asgDriver,
-                      pickedUpAt: asg.pickupConfirmedAt || order.pickedUpAt
-                    };
-                  }
-                  return order;
-                }
-
-                // Status: Aceito pelo motoboy -> Aguardando Retirada no Balcão
-                if (asg.status === 'waiting_pickup') {
-                  if (order.dispatchStatus !== 'aceito_aguardando_retirada' || order.driverName !== asgDriver) {
-                    hasChanged = true;
-                    // Mantém status em_entrega se já tiver saído, nunca regride
-                    const resolvedStatus = currentRank >= 4 ? order.status : ('pronto' as const);
-                    return {
-                      ...order,
-                      status: resolvedStatus,
-                      dispatchStatus: 'aceito_aguardando_retirada' as const,
-                      driverName: asgDriver,
-                      assignedDriverName: asgDriver
-                    };
-                  }
-                  return order;
-                }
-              }
-
-              // 2. Verificar em Offers (ofertas enviadas)
-              const offer = cloudOffers.find((o: any) => {
-                if (String(o.orderId) === orderIdStr || String(o.orderNumber).replace('#', '') === orderNumStr) return true;
-                if (Array.isArray(o.orderIds) && o.orderIds.some((id: any) => String(id) === orderIdStr)) return true;
-                if (Array.isArray(o.orders) && o.orders.some((item: any) => 
-                  String(item.orderId || item.id) === orderIdStr || 
-                  String(item.orderNumber).replace('#', '') === orderNumStr
-                )) return true;
-                return false;
-              });
-
-              if (offer) {
-                const offerDriver = offer.driverName || offer.targetDriverName || order.assignedDriverName || order.driverName;
-
-                // Oferta aceita pelo motoboy
-                if (offer.status === 'atribuida' || offer.status === 'accepted') {
-                  if (order.dispatchStatus !== 'aceito_aguardando_retirada' || order.driverName !== offerDriver) {
-                    hasChanged = true;
-                    const resolvedStatus = currentRank >= 4 ? order.status : ('pronto' as const);
-                    return {
-                      ...order,
-                      status: resolvedStatus,
-                      dispatchStatus: 'aceito_aguardando_retirada' as const,
-                      driverName: offerDriver,
-                      assignedDriverName: offerDriver
-                    };
-                  }
-                  return order;
-                }
-
-                // Oferta aguardando aceite
-                if (offer.status === 'pendente') {
-                  if (order.dispatchStatus !== 'aguardando_aceite') {
-                    hasChanged = true;
-                    const resolvedStatus = currentRank >= 4 ? order.status : ('pronto' as const);
-                    return {
-                      ...order,
-                      status: resolvedStatus,
-                      dispatchStatus: 'aguardando_aceite' as const,
-                      assignedDriverName: offerDriver,
-                      driverName: offerDriver
-                    };
-                  }
-                  return order;
-                }
-
-                // Oferta recusada ou expirada
-                if (offer.status === 'recusada' || offer.status === 'expirada' || offer.status === 'cancelada') {
-                  if (order.dispatchStatus === 'aguardando_aceite') {
-                    hasChanged = true;
-                    const resolvedStatus = currentRank >= 4 ? order.status : ('pronto' as const);
-                    return {
-                      ...order,
-                      status: resolvedStatus,
-                      dispatchStatus: 'disponivel' as const,
-                      assignedDriverName: null,
-                      driverName: null
-                    };
-                  }
-                  return order;
-                }
-              }
-
-              return order;
-            });
-
-            if (hasChanged) {
-              if (typeof window !== 'undefined') {
-                localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
-              }
-              return updated;
-            }
-            return prevOrders;
-          });
         }
       } catch (cloudErr) {
         console.warn('Erro ao sincronizar logistics.json do Supabase:', cloudErr);
@@ -850,6 +691,8 @@ export default function AdminDashboardPage() {
         ? options?.driverIdOverride || storeSettings.fixedDriverId || selectedDriverId
         : null;
 
+    const destination = targetDriverId ? drivers.find(d => d.id === targetDriverId || d.driverId === targetDriverId) : null;
+    if (!window.confirm(`Enviar ${targetOrders.length} pedido(s) para ${destination?.driverName || destination?.name || (targetDriverId ? 'o entregador selecionado' : 'os entregadores habilitados')}?`)) return;
     setIsSendingDispatch(true);
     setDispatchWarningBanner(null);
 
@@ -1064,7 +907,7 @@ export default function AdminDashboardPage() {
         headers: getAdminHeaders(),
         body: JSON.stringify({
           ...nextSettings,
-          applyLimitToAllDrivers: true,
+          applyLimitToAllDrivers: false,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -1370,6 +1213,16 @@ export default function AdminDashboardPage() {
               Ver Site Público
             </Link>
             <button
+              type="button"
+              onClick={() => setActiveTab('first_access')}
+              className="px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-black transition flex items-center gap-1.5 shadow-md shadow-amber-500/20"
+              title="Cadastrar motoboy e gerar código para o aplicativo NovaesWeb Entregador"
+            >
+              <KeyRound className="w-3.5 h-3.5" />
+              <span>+ Cadastrar Motoboy</span>
+            </button>
+
+            <button
               onClick={() => {
                 sessionStorage.removeItem('novaesweb_admin_auth');
                 setIsAuthenticated(false);
@@ -1396,6 +1249,18 @@ export default function AdminDashboardPage() {
           >
             <ShoppingCart className="w-4 h-4" />
             <span>Kanban de Pedidos ({orders.filter(o => o.status !== 'concluido' && o.status !== 'cancelado').length})</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('first_access')}
+            className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
+              activeTab === 'first_access'
+                ? 'bg-amber-500 text-zinc-950 font-black shadow-lg shadow-amber-500/30'
+                : 'text-amber-400 hover:text-white hover:bg-zinc-800/60'
+            }`}
+          >
+            <KeyRound className="w-4 h-4 text-amber-400" />
+            <span>Cadastrar Motoboy (Primeiro Acesso)</span>
           </button>
 
           <button
@@ -1568,20 +1433,21 @@ export default function AdminDashboardPage() {
               )}
             </div>
 
-            {/* As 5 Colunas do Kanban */}
-            <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+            {/* Etapas do pedido */}
+            <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 gap-4">
               
               {[
                 { key: 'recebido', label: '1. Recebido', color: 'border-blue-500/40 text-blue-400' },
                 { key: 'preparando', label: '2. Preparando', color: 'border-amber-500/40 text-amber-400' },
-                { key: 'pronto', label: '3. Pronto / Despacho', color: 'border-purple-500/40 text-purple-400' },
-                { key: 'em_entrega', label: '4. Em Entrega', color: 'border-orange-500/40 text-orange-400' },
-                { key: 'concluido', label: '5. Concluído', color: 'border-emerald-500/40 text-emerald-400' },
+                { key: 'pronto', label: '3. Despacho', color: 'border-purple-500/40 text-purple-400' },
+                { key: 'retirada', label: '4. Retirada', color: 'border-cyan-500/40 text-cyan-400' },
+                { key: 'em_entrega', label: '5. Em Entrega', color: 'border-orange-500/40 text-orange-400' },
+                { key: 'concluido', label: '6. Concluídos', color: 'border-emerald-500/40 text-emerald-400' },
               ].map((col) => {
                 const q = ordersSearch.toLowerCase();
                 const colOrders = orders.filter(
                   (o) =>
-                    o.status === col.key &&
+                    (o.status === 'pronto' && o.dispatchStatus === 'aceito_aguardando_retirada' ? 'retirada' : o.status) === col.key &&
                     [
                       String(o.orderNumber),
                       o.customerName,
@@ -1668,6 +1534,7 @@ export default function AdminDashboardPage() {
                                 {col.key === 'recebido' && 'Novo Pedido'}
                                 {col.key === 'preparando' && '🔥 No Forno'}
                                 {col.key === 'pronto' && 'Pronto p/ Despacho'}
+                                {col.key === 'retirada' && 'Aguardando retirada'}
                                 {col.key === 'em_entrega' && 'Na Rua'}
                                 {col.key === 'concluido' && 'Entregue ✓'}
                               </span>
@@ -1685,6 +1552,7 @@ export default function AdminDashboardPage() {
                                 </span>
                               )}
                             </div>
+                            <OrderStageTiming order={order} now={stageNow} />
                             {/* Checkbox de seleção para despacho em lote */}
                             {col.key === 'pronto' && order.dispatchStatus !== 'aguardando_aceite' && order.dispatchStatus !== 'aceito_aguardando_retirada' && (
                               <button
@@ -2123,7 +1991,7 @@ export default function AdminDashboardPage() {
                                   </span>
                                 )}
                                 <p className="text-[10px] text-zinc-500">
-                                  Capacidade: <strong className="text-zinc-300">{drv.activeDeliveries || 0}/{drv.maxDeliveries || storeSettings.maxConcurrentDeliveries}</strong> pedidos
+                                  Capacidade: <strong className="text-zinc-300">{drv.activeDeliveries || 0}</strong> pedidos
                                 </p>
                               </div>
                             </td>
@@ -2297,6 +2165,133 @@ export default function AdminDashboardPage() {
                   <span>Zerar Todos os Pedidos do Painel</span>
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* ABA: CADASTRAR MOTOBOY / PRIMEIRO ACESSO */}
+        {activeTab === 'first_access' && (
+          <div className="space-y-8 max-w-5xl mx-auto">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-zinc-800">
+              <div>
+                <h2 className="text-xl font-black text-white flex items-center gap-2">
+                  <KeyRound className="w-5 h-5 text-amber-400" />
+                  <span>Cadastrar Motoboy & Primeiro Acesso ao Aplicativo</span>
+                </h2>
+                <p className="text-xs text-zinc-400 mt-1">
+                  Gere o código de autorização e primeiro acesso para vincular entregadores ao aplicativo NovaesWeb Entregador.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveTab('kanban')}
+                className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-bold transition flex items-center gap-1.5 self-start sm:self-auto"
+              >
+                <ShoppingCart className="w-3.5 h-3.5" />
+                <span>Voltar ao Kanban</span>
+              </button>
+            </div>
+
+            {/* BLOCO 1: PRIMEIRO ACESSO COM CADASTRO GUIADO */}
+            <FirstAccessInvitePanel getHeaders={getAdminHeaders} onChanged={() => {void fetchData(true);}} />
+
+            {/* BLOCO 2: CÓDIGO DE PLANTÃO / VÍNCULO RÁPIDO NW-XXXXXX */}
+            <div className="p-6 rounded-2xl bg-zinc-900/60 border border-zinc-800 shadow-xl space-y-4">
+              <div>
+                <h3 className="font-extrabold text-base text-white flex items-center gap-2">
+                  <UserPlus className="w-4 h-4 text-amber-400" />
+                  <span>Código de autorização / plantão para motoboy com conta</span>
+                </h3>
+                <p className="text-xs text-zinc-400 mt-0.5">
+                  Para quem já possui conta, gere um código de vínculo ou plantão (<code className="text-amber-400 font-bold">NW-XXXXXX</code>) e envie pelo WhatsApp. Para novo cadastro, utilize o bloco de primeiro acesso acima.
+                </p>
+              </div>
+
+              <form onSubmit={handleGenerateShiftCode} className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end max-w-xl">
+                <div>
+                  <label htmlFor="fa-new-driver-name" className="text-zinc-300 font-semibold block mb-1">Nome do entregador (opcional)</label>
+                  <input id="fa-new-driver-name" value={newDriverName} onChange={event => setNewDriverName(event.target.value)} maxLength={100} placeholder="Ex: Lucas Motoboy" className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-white" />
+                </div>
+                <div>
+                  <label htmlFor="fa-new-driver-phone" className="text-zinc-300 font-semibold block mb-1">Telefone com DDD (opcional)</label>
+                  <input id="fa-new-driver-phone" type="tel" value={newDriverPhone} onChange={event => setNewDriverPhone(event.target.value)} maxLength={20} placeholder="(51) 99999-9999" className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-white" />
+                </div>
+                <div>
+                  <label className="text-zinc-300 font-semibold block mb-1">Validade do Código</label>
+                  <select value={shiftValidity} onChange={(e) => setShiftValidity(e.target.value)} className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-white font-semibold">
+                    <option value="1">1 dia (24h)</option>
+                    <option value="3">3 dias</option>
+                    <option value="7">7 dias (Recomendado)</option>
+                    <option value="30">30 dias</option>
+                  </select>
+                </div>
+                <div>
+                  <button type="submit" disabled={isGeneratingShiftCode} className="w-full py-2.5 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-zinc-950 font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-amber-500/20 transition">
+                    <KeyRound className="w-4 h-4" />
+                    <span>{isGeneratingShiftCode ? 'Gerando...' : 'Gerar Código de Autorização'}</span>
+                  </button>
+                </div>
+              </form>
+
+              {generatedShiftCode && (
+                <div className="mt-4 p-4 rounded-2xl bg-zinc-950 border border-amber-500/40 flex flex-col sm:flex-row items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-bold text-amber-300">Código exclusivo gerado:</span>
+                    <span className="text-2xl font-mono font-black text-amber-400 tracking-wider select-all">{generatedShiftCode}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button type="button" onClick={() => handleCopyCode(generatedShiftCode)} className="px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white font-bold text-xs flex items-center gap-1.5">
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>{codeCopied ? 'Copiado!' : 'Copiar Código'}</span>
+                    </button>
+                    <a href={getWhatsAppShareUrl(generatedShiftCode)} target="_blank" rel="noopener noreferrer" className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5">
+                      <MessageSquare className="w-3.5 h-3.5" />
+                      <span>Enviar no WhatsApp</span>
+                    </a>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* BLOCO 3: ENTREGADORES ATIVOS DA LOJA */}
+            <div className="p-6 rounded-2xl bg-zinc-900/60 border border-zinc-800 shadow-xl space-y-4">
+              <div>
+                <h3 className="font-extrabold text-base text-white flex items-center gap-2">
+                  <Bike className="w-4 h-4 text-cyan-400" />
+                  <span>Entregadores Vinculados à Loja ({drivers.length})</span>
+                </h3>
+                <p className="text-xs text-zinc-400 mt-0.5">
+                  Motoboys conectados que recebem as ofertas de entrega da Bella Pizza.
+                </p>
+              </div>
+
+              {drivers.length === 0 ? (
+                <p className="text-zinc-500 text-xs py-4 text-center">Nenhum motoboy vinculado no momento. Gere um código acima para cadastrar.</p>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {drivers.map(drv => (
+                    <div key={drv.id} className="p-3.5 rounded-xl bg-zinc-950 border border-zinc-800 flex items-center justify-between">
+                      <div className="space-y-1">
+                        <p className="font-bold text-white text-xs">{drv.driverName || drv.name || 'Aguardando Cadastro'}</p>
+                        <p className="text-[10px] text-zinc-400">{drv.phone || 'Sem telefone'}</p>
+                        <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                          drv.presence === 'disponivel' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-zinc-800 text-zinc-400'
+                        }`}>
+                          {drv.presence === 'disponivel' ? '● Online (Disponível)' : '○ Indisponível'}
+                        </span>
+                      </div>
+                      <div className="text-right space-y-1">
+                        <span className="text-[11px] font-mono text-amber-400 bg-zinc-900 px-2 py-1 rounded border border-amber-500/20 block">
+                          {drv.inviteCode || 'Ativo'}
+                        </span>
+                        <span className="text-[10px] text-zinc-500 block">
+                          {drv.activeDeliveries || 0} entregas ativas
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -2501,7 +2496,7 @@ export default function AdminDashboardPage() {
                           .filter(d => d.status !== 'vinculo_removido' && d.status !== 'revogado')
                           .map((drv) => (
                             <option key={drv.id} value={drv.driverId || drv.id}>
-                              {drv.driverName || drv.name || `Código ${drv.inviteCode || 'Primeiro acesso'}`} ({drv.status === 'ativo' ? 'Ativo' : drv.status}) — {drv.activeDeliveries || 0}/{drv.maxDeliveries || storeSettings.maxConcurrentDeliveries} entregas
+                              {drv.driverName || drv.name || `Código ${drv.inviteCode || 'Primeiro acesso'}`} ({drv.status === 'ativo' ? 'Ativo' : drv.status}) — {drv.activeDeliveries || 0} entregas
                             </option>
                           ))}
                       </select>
@@ -2535,16 +2530,9 @@ export default function AdminDashboardPage() {
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2 border-t border-zinc-800/80 items-end">
                 <div>
                   <label className="text-zinc-300 font-semibold block mb-1">
-                    Limite Simultâneo de Pedidos por Entregador
+                    Pedidos por entregador
                   </label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={10}
-                    value={storeSettings.maxConcurrentDeliveries}
-                    onChange={(e) => { settingsDirtyRef.current = true; setStoreSettings(prev => ({ ...prev, maxConcurrentDeliveries: Number(e.target.value) || 3 })); }}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-white font-bold"
-                  />
+                  <p className="text-sm text-zinc-400">Sem limite fixo. Selecione a quantidade desejada no despacho.</p>
                 </div>
 
                 <div>
@@ -3257,7 +3245,6 @@ export default function AdminDashboardPage() {
                       const isWaiting = (!drv.driverName && !drv.name) || drv.status === 'aguardando_motoboy' || drv.status === 'aguardando_vinculo';
                       const isBlocked = drv.status === 'bloqueado' || drv.status === 'revogado' || drv.status === 'vinculo_removido';
                       const isOnline = drv.presence === 'disponivel';
-                      const isMaxReached = (drv.activeDeliveries || 0) >= (drv.maxDeliveries || storeSettings.maxConcurrentDeliveries || 3);
 
                       return (
                         <div
@@ -3299,8 +3286,8 @@ export default function AdminDashboardPage() {
 
                             <div className="flex items-center justify-between">
                               <span>Carga ativa:</span>
-                              <span className={`font-bold ${isMaxReached ? 'text-red-400' : 'text-zinc-200'}`}>
-                                {drv.activeDeliveries || 0} de {drv.maxDeliveries || storeSettings.maxConcurrentDeliveries || 3} corridas
+                              <span className="font-bold text-zinc-200">
+                                {drv.activeDeliveries || 0} corridas
                               </span>
                             </div>
                           </div>
