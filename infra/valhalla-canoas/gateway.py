@@ -5,6 +5,7 @@ import json
 import math
 import socket
 import threading
+import unicodedata
 from urllib.parse import urlsplit, parse_qs, urlencode
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -67,6 +68,36 @@ def proxy_request(method, path, body):
         connection.close()
 
 
+
+def normalized_road(value):
+    value = ''.join(c for c in unicodedata.normalize('NFD', str(value or '')) if unicodedata.category(c) != 'Mn').casefold()
+    return ' '.join(value.replace('.', ' ').split())
+
+
+def address_search(query):
+    street = query.split(',')[0].strip()
+    attempts = list(dict.fromkeys([query, street + ', Canoas, Brasil']))
+    for text in attempts:
+        search_path = '/search?' + urlencode({'q': text, 'format': 'jsonv2', 'limit': '10', 'countrycodes': 'br', 'addressdetails': '1', 'bounded': '1', 'viewbox': '-51.32,-29.78,-51.05,-30.02'})
+        status, data = proxy_request('GET', search_path, b'')
+        if status != 200:
+            return status, data
+        candidates = json.loads(data)
+        if not isinstance(candidates, list):
+            raise ValueError('Invalid address result')
+        candidates = [p for p in candidates if int(p.get('place_rank', 0)) >= 26]
+        if not candidates:
+            continue
+        if len(candidates) > 1:
+            road = normalized_road(candidates[0].get('address', {}).get('road'))
+            if not road or not all(normalized_road(p.get('address', {}).get('road')) == road for p in candidates):
+                continue
+        point = dict(candidates[0])
+        # Street-level locations are real OSM points but are explicitly approximate.
+        point['approximate'] = len(candidates) > 1 or text != query or int(point.get('place_rank', 0)) < 30 or not point.get('address', {}).get('house_number')
+        return 200, json.dumps([point]).encode('utf-8')
+    return 200, b'[]'
+
 class GatewayHandler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.0'
     server_version = 'NovaesWebMaps'
@@ -113,7 +144,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             query = ', '.join(part.strip() for part in query.split(',') if part.strip().casefold() not in ('rs', 'rio grande do sul'))
             search_path = '/search?' + urlencode({'q': query, 'format': 'jsonv2', 'limit': '2', 'countrycodes': 'br', 'addressdetails': '1', 'bounded': '1', 'viewbox': '-51.32,-29.78,-51.05,-30.02'})
             try:
-                status, data = proxy_request('GET', search_path, b'')
+                status, data = address_search(query)
                 return self.reply(status, data)
             except (OSError, ValueError, http.client.HTTPException):
                 return self.reply(502, {'error': 'Address service unavailable'})

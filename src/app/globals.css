@@ -97,3 +97,8 @@ h1, h2, h3, h4, .font-serif {
     background: linear-gradient(180deg, rgba(14, 14, 16, 0.9) 0%, rgba(5, 5, 5, 0.95) 100%);
   }
 }
+
+/* Merchant navigation and Kanban retain usable widths on phones and desktops. */
+.admin-tabs > button { flex-shrink:0; white-space:nowrap; }
+.admin-kanban { display:grid; grid-template-columns:repeat(6,minmax(280px,1fr)); gap:1rem; overflow-x:auto; padding-bottom:12px; scroll-snap-type:x proximity; max-width:100%; }
+.admin-kanban > div { min-width:0; scroll-snap-align:start; }

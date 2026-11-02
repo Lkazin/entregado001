@@ -125,6 +125,6 @@ test('private geocoder authenticates search and resolves a street before routing
 test('geocoding never uses a town centroid or ambiguous address as a delivery', async()=> {
   for(const results of [[{lat:'-30',lon:'-51',place_rank:16}],[{lat:'-30',lon:'-51',place_rank:26},{lat:'-30',lon:'-52',place_rank:26}]]) {
     const m=load(async()=>({ok:true,json:async()=>results}),{NOMINATIM_SEARCH_URL:'https://maps.example.test/search',NOMINATIM_API_KEY:'geo-only'});
-    await assert.rejects(m.optimizeRoute([{id:'address',address:'Rua real',city:'Canoas'}],'shortest_distance',origin),/ambíguo/);
+    await assert.rejects(m.optimizeRoute([{id:'address',address:'Rua real',city:'Canoas'}],'shortest_distance',origin), e=>e.code==='ROUTE_ADDRESS_REVIEW_REQUIRED');
   }
 });

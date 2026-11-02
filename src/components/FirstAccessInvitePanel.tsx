@@ -82,7 +82,7 @@ export default function FirstAccessInvitePanel({ getHeaders, onChanged }: {
       <div><label htmlFor="first-access-phone" className="block text-xs font-bold text-zinc-300 mb-2">WhatsApp com DDD</label>
         <input id="first-access-phone" type="tel" inputMode="tel" required maxLength={20} value={phone} disabled={busy} autoComplete="off" placeholder="(51) 99999-9999"
           onChange={event => {setPhone(event.target.value);setIssued(null);setError('');}} className="w-full rounded-xl bg-zinc-950 border border-zinc-700 p-3 text-white text-sm" /></div>
-      <p className="sm:col-span-2 text-xs text-zinc-400 leading-relaxed">O código só funciona com este telefone, é de uso único e vale por até 7 dias. Gerar outro invalida o anterior para esse entregador. Contas já concluídas entram com telefone e senha.</p>
+      <p className="sm:col-span-2 text-xs text-zinc-400 leading-relaxed">O código só funciona com este telefone, é de uso único e vale por até 7 dias. Gerar outro invalida o anterior para esse entregador. Quem já tem conta entra com telefone e senha e usa somente o código de vínculo/plantão da nova loja, sem novo cadastro.</p>
       <button type="submit" disabled={busy} className="sm:col-span-2 flex items-center justify-center gap-2 min-h-11 px-4 py-3 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 disabled:opacity-50 font-extrabold text-sm"><KeyRound className="w-4 h-4" />{busy ? 'Preparando...' : 'Cadastrar e gerar código de primeiro acesso'}</button>
     </form>
     {error && <p role="alert" className="text-sm text-red-300">{error}</p>}

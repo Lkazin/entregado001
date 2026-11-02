@@ -77,6 +77,18 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(self.request('GET', '/search?q=Rua&q=Outra', key=self.key)[0], 400)
             proxy.assert_not_called()
 
+    def test_segments_of_same_street_are_marked_approximate(self):
+        rows = [{'lat':'-29.92','lon':'-51.18','place_rank':26,'address':{'road':'Rua de Teste'}}, {'lat':'-29.921','lon':'-51.181','place_rank':26,'address':{'road':'Rua de Teste'}}]
+        with patch('gateway.proxy_request', return_value=(200, json.dumps(rows).encode())):
+            status, body = gateway.address_search('Rua de Teste, 100, Canoas')
+            self.assertEqual(status, 200)
+            self.assertTrue(json.loads(body)[0]['approximate'])
+
+    def test_different_streets_and_city_centres_stay_unresolved(self):
+        for rows in [[{'place_rank':16,'address':{'road':'Rua de Teste'}}], [{'place_rank':26,'address':{'road':'Rua A'}},{'place_rank':26,'address':{'road':'Rua B'}}]]:
+            with patch('gateway.proxy_request', return_value=(200, json.dumps(rows).encode())):
+                self.assertEqual(json.loads(gateway.address_search('Rua desconhecida, Canoas')[1]), [])
+
     def test_key_file_is_required_and_validated(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'key'

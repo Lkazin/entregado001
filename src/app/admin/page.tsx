@@ -1173,12 +1173,12 @@ export default function AdminDashboardPage() {
       )}
 
       {/* Topo do Painel Administrativo (Recolhivel no Modo Cozinha) */}
-      <header className={`border-b border-zinc-800 bg-zinc-900/90 backdrop-blur-md px-6 py-4 sticky top-0 z-30 transition-all duration-300 ${
+      <header className={`border-b border-zinc-800 bg-zinc-900/90 backdrop-blur-md px-3 sm:px-6 py-3 sm:py-4 sticky top-0 z-30 transition-all duration-300 ${
         isHeaderCollapsed ? 'hidden' : 'block'
       }`}>
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           
-          <div className="flex items-center gap-3">
+          <div className="flex items-center flex-wrap gap-2 sm:gap-3">
             <Link href="/" className="flex items-center gap-2 group">
               <div className="w-8 h-8 rounded-xl bg-red-600 flex items-center justify-center text-white">
                 <Flame className="w-5 h-5 text-amber-300" />
@@ -1197,7 +1197,7 @@ export default function AdminDashboardPage() {
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center flex-wrap gap-2">
             <button
               onClick={() => fetchData()}
               disabled={isRefreshing}
@@ -1238,7 +1238,7 @@ export default function AdminDashboardPage() {
         </div>
 
         {/* Abas Principais de Navegação */}
-        <div className="flex gap-2 mt-4 pt-3 border-t border-zinc-800/80 overflow-x-auto text-xs font-bold">
+        <div className="admin-tabs flex gap-2 mt-3 pt-3 border-t border-zinc-800/80 overflow-x-auto text-xs font-bold">
           <button
             onClick={() => setActiveTab('kanban')}
             className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
@@ -1434,7 +1434,7 @@ export default function AdminDashboardPage() {
             </div>
 
             {/* Etapas do pedido */}
-            <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 gap-4">
+            <div className="admin-kanban">
               
               {[
                 { key: 'recebido', label: '1. Recebido', color: 'border-blue-500/40 text-blue-400' },
@@ -1800,7 +1800,7 @@ export default function AdminDashboardPage() {
         {/* ABA 2: MÓDULO DE LOGÍSTICA */}
         {activeTab === 'logistics' && (
           <div className="space-y-8">
-            <FirstAccessInvitePanel getHeaders={getAdminHeaders} onChanged={() => {void fetchData(true);}} />
+            <button type="button" onClick={() => setActiveTab('first_access')} className="px-4 py-3 rounded-xl bg-amber-500 text-zinc-950 text-sm font-bold">Cadastrar motoboy e gerenciar primeiro acesso</button>
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div>
                 <h2 className="text-xl font-black text-white">Visão dos Entregadores da Loja & Logística</h2>
@@ -2560,7 +2560,7 @@ export default function AdminDashboardPage() {
               </div>
             </div>
 
-            <FirstAccessInvitePanel getHeaders={getAdminHeaders} onChanged={() => {void fetchData(true);}} />
+            <button type="button" onClick={() => setActiveTab('first_access')} className="px-4 py-3 rounded-xl bg-amber-500 text-zinc-950 text-sm font-bold">Cadastrar motoboy e gerenciar primeiro acesso</button>
 
             {/* BLOCO 2: GERAR CÓDIGO PARA MOTOBOY & AUTORIZAÇÃO DE CADASTRO */}
             <div className="p-6 rounded-2xl bg-zinc-900/60 border border-zinc-800 shadow-xl space-y-4">

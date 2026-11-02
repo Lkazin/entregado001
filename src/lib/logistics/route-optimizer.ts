@@ -2,14 +2,14 @@ import { valhallaMatrixBlock } from './valhalla-client';
 // OSRM table returns road distances (metres) and durations (seconds), not aerial estimates.
 // Reference: https://project-osrm.org/docs/v5.24.0/api/#table-service
 export type RouteMode = 'shortest_distance' | 'oldest_wait';
-export type Coordinates = { latitude: number; longitude: number };
+export type Coordinates = { latitude: number; longitude: number; approximate?: boolean };
 export class RouteError extends Error {
   constructor(message: string, public status = 422, public code = 'ROUTE_UNAVAILABLE') { super(message); }
 }
 export function coordinates(value: any): Coordinates | null {
   return value && typeof value.latitude === 'number' && Number.isFinite(value.latitude) && Math.abs(value.latitude) <= 90 &&
     typeof value.longitude === 'number' && Number.isFinite(value.longitude) && Math.abs(value.longitude) <= 180
-    ? { latitude: value.latitude, longitude: value.longitude } : null;
+    ? { latitude: value.latitude, longitude: value.longitude, ...(value.approximate === true ? {approximate:true} : {}) } : null;
 }
 export function normalizeRouteStore(value: string) {
   return ['11111111-1111-1111-1111-111111111111', 'bella-pizza', 'store_bella_pizza'].includes(value) ? 'store_bella_pizza' : value;
@@ -36,7 +36,7 @@ async function request(url: string, deadline: number, extraHeaders: Record<strin
 async function destination(a: any, deadline: number): Promise<Coordinates> {
   const direct = coordinates(a.destinationCoordinates) || coordinates({ latitude: a.deliveryLatitude, longitude: a.deliveryLongitude });
   if (direct) return direct;
-  const street = typeof a.address === 'string' ? a.address.trim() : '';
+  const street = typeof a.address === 'string' ? a.address.split(',')[0].trim() : '';
   const city = typeof a.city === 'string' ? a.city.trim() : '';
   if (!street || /^(Endereço do Cliente|Bairro)$/i.test(street) || !city) throw new RouteError('Uma entrega está sem endereço completo. Confira o endereço antes de organizar a rota.');
   const query = [street, a.addressNumber && a.addressNumber !== 'S/N' ? a.addressNumber : '', a.neighborhood === 'Bairro' ? '' : a.neighborhood, city, a.state, 'Brasil'].filter(Boolean).join(', ');
@@ -61,7 +61,8 @@ async function destination(a: any, deadline: number): Promise<Coordinates> {
     if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost','127.0.0.1','[::1]'].includes(url.hostname))) throw new RouteError('O serviço de endereços precisa usar HTTPS.');
     const results = await request(url.toString(), deadline, process.env.NOMINATIM_API_KEY ? {'x-api-key':process.env.NOMINATIM_API_KEY} : {});
     const point = Array.isArray(results) && results.length === 1 && Number(results[0].place_rank) >= 26 ? coordinates({ latitude: Number(results[0].lat), longitude: Number(results[0].lon) }) : null;
-    if (!point) throw new RouteError('Endereço não localizado com segurança ou ambíguo. Confira o endereço e use a rota manual.');
+    if (!point) throw new RouteError(`Pedido #${a.orderNumber || a.orderId || a.id || '?'}: rua não localizada em Canoas ou com nomes diferentes. Confira o nome da rua e a cidade.`,422,'ROUTE_ADDRESS_REVIEW_REQUIRED');
+    point.approximate = results[0].approximate === true || Number(results[0].place_rank) < 30;
     if (cache.size >= 2000) cache.delete(cache.keys().next().value!);
     cache.set(query, { point, expires: Date.now() + 86400000 });
     return point;
@@ -114,6 +115,7 @@ export async function optimizeRoute(assignments: any[], mode: RouteMode, origin:
     cumulativeDistanceMeters += distanceMeters; cumulativeDurationSeconds += durationSeconds;
     return { assignmentId: assignments[index - 1].assignmentId || assignments[index - 1].id, sequence: i + 1,
       distanceMeters, durationSeconds, cumulativeDistanceMeters, cumulativeDurationSeconds,
+      locationApproximate: points[index].approximate === true,
       distanceFromOriginMeters: distances[0][index], durationFromOriginSeconds: durations[0][index] };
   }), totalDistanceMeters, totalDurationSeconds,
     rule: mode === 'shortest_distance' ? 'Sugestão por vizinho mais próximo usando distâncias pelas ruas; não garante ótimo global.' : 'Horário de criação (ou aceite quando ausente), em faixas de 5 minutos; distância pelas ruas desempata.', source };

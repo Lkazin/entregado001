@@ -1,3 +1,4 @@
+import { buildAccountLedger } from '@/lib/logistics/account-ledger';
 import { valhallaRoute } from '@/lib/logistics/valhalla-client';
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/server';
@@ -835,16 +836,7 @@ function accountBootstrap(req: NextRequest) {
   eligible.sort((a,b) => Number(liveAssignments.some(x => belongs(x,b) && open(x))) - Number(liveAssignments.some(x => belongs(x,a) && open(x))) ||
     Date.parse(b.activatedAt || b.createdAt || 0) - Date.parse(a.activatedAt || a.createdAt || 0));
   const driver = eligible[0];
-  const ledger = Array.from(new Set(ownedDrivers.map(d => normalizeStoreId(d.storeId)))).map(storeId => {
-    const records = ownedDrivers.filter(d => isSameStore(d.storeId, storeId));
-    const deliveries = liveAssignments.filter(a => records.some(d => belongs(a,d)));
-    const completed = deliveries.filter(a => ['delivered','entregue'].includes(a.status));
-    const settings = getStoreSettings(storeId);
-    return {storeId,storeName:settings.storeName || records[0].storeName,storeAddress:settings.storeAddress,
-      completedCount:completed.length,canceledCount:deliveries.filter(a => ['withdrawn','canceled_by_store','cancelada','cancelled','canceled'].includes(a.status)).length,
-      totalToReceive:completed.reduce((sum,a) => sum + Number(a.feeOffered ?? a.deliveryFee ?? 0),0),
-      lastShiftDate:records.map(d => d.activatedAt || d.createdAt).sort().at(-1),isActiveShift:eligible.some(d => isSameStore(d.storeId,storeId))};
-  });
+  const ledger = buildAccountLedger(account.id,memberships,liveDrivers,liveAssignments,getStoreSettings,eligible.map(d=>d.storeId));
   const settings = driver ? getStoreSettings(driver.storeId) : null;
   const existingToken = driver?.sessionToken;
   const existingPayload = verifyDriverToken(existingToken);
