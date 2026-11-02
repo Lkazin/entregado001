@@ -4,6 +4,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import CustomerDeliveryTracking from '@/components/CustomerDeliveryTracking';
 import CustomerOrderNotice from '@/components/CustomerOrderNotice';
+import CustomerOrderRating from '@/components/CustomerOrderRating';
 import { useParams } from 'next/navigation';
 import { normalizeOrderStatus } from '@/lib/logistics/order-timeline';
 import {
@@ -656,54 +657,24 @@ export default function OrderTrackingPage() {
               )}
             </div>
 
-            {/* Avaliação Opcional de 1 a 5 Estrelas */}
-            <div className="p-5 rounded-2xl bg-zinc-950/80 border border-zinc-800/80 max-w-sm mx-auto space-y-3">
-              <p className="text-xs font-semibold text-zinc-300">
-                {ratingState.rated ? 'Sua avaliação do pedido:' : 'Como foi a sua experiência? (Opcional)'}
-              </p>
-
-              <div className="flex items-center justify-center gap-2" role="group" aria-label="Avaliação por estrelas">
-                {[1, 2, 3, 4, 5].map((starVal) => {
-                  const isFilled = starVal <= (ratingState.hoverStars || ratingState.stars);
-                  return (
-                    <button
-                      key={starVal}
-                      type="button"
-                      disabled={ratingState.rated || ratingState.submitting}
-                      onClick={() => handleRate(starVal)}
-                      onMouseEnter={() => !ratingState.rated && setRatingState((prev) => ({ ...prev, hoverStars: starVal }))}
-                      onMouseLeave={() => !ratingState.rated && setRatingState((prev) => ({ ...prev, hoverStars: 0 }))}
-                      aria-label={`Avaliar com ${starVal} estrela${starVal > 1 ? 's' : ''}`}
-                      className={`p-1.5 rounded-lg transition transform hover:scale-110 focus:outline-none focus:ring-2 focus:ring-pizza-gold ${
-                        ratingState.rated ? 'cursor-default' : 'cursor-pointer hover:bg-zinc-900'
-                      }`}
-                    >
-                      <Star
-                        className={`w-6 h-6 transition ${
-                          isFilled ? 'fill-amber-400 text-amber-400' : 'text-zinc-600'
-                        }`}
-                      />
-                    </button>
-                  );
-                })}
-              </div>
-
-              {ratingState.rated && (
-                <p className="text-xs text-emerald-400 font-medium">
-                  ✓ Avaliação registrada ({ratingState.stars} estrelas). Obrigado!
-                </p>
-              )}
-
-              {ratingState.submitting && (
-                <p className="text-xs text-zinc-400 flex items-center justify-center gap-1.5">
-                  <RefreshCw className="w-3 h-3 animate-spin text-pizza-gold" />
-                  <span>Enviando avaliação...</span>
-                </p>
-              )}
-
-              {ratingState.error && (
-                <p className="text-xs text-red-400">{ratingState.error}</p>
-              )}
+            {/* Avaliação do Cliente: Pedido, Motoboy e Comentário */}
+            <div className="max-w-xl mx-auto text-left w-full">
+              <CustomerOrderRating
+                token={token}
+                orderNumber={order.orderNumber}
+                driverName={order.driverName}
+                isDelivered={isDelivered}
+                initialRating={order.rating || (ratingState.rated ? { orderStars: ratingState.stars, driverName: ratingState.driverName } : null)}
+                onRatingSubmitted={(rat) => {
+                  setOrder((prev: any) => prev ? { ...prev, rating: rat } : prev);
+                  setRatingState((prev) => ({
+                    ...prev,
+                    rated: true,
+                    stars: rat.orderStars || rat.stars,
+                    driverName: rat.driverName || prev.driverName
+                  }));
+                }}
+              />
             </div>
 
             {/* Ações: Pedir Novamente e Voltar ao Cardápio */}
@@ -809,10 +780,30 @@ export default function OrderTrackingPage() {
             {!isDelivered ? (
               <CustomerDeliveryTracking key={token} token={token} />
             ) : (
-              <div className="p-4 sm:p-5 rounded-2xl bg-zinc-900/60 border border-emerald-900/30 text-center flex items-center justify-center gap-2.5 text-xs text-emerald-400 font-semibold">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                <span>Rastreamento em tempo real encerrado. Pedido entregue ao destinatário!</span>
-              </div>
+              <>
+                <div className="p-4 sm:p-5 rounded-2xl bg-zinc-900/60 border border-emerald-900/30 text-center flex items-center justify-center gap-2.5 text-xs text-emerald-400 font-semibold">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>Rastreamento em tempo real encerrado. Pedido entregue ao destinatário!</span>
+                </div>
+
+                {/* Opção de Avaliação Imediata ao Cliente */}
+                <CustomerOrderRating
+                  token={token}
+                  orderNumber={order.orderNumber}
+                  driverName={order.driverName}
+                  isDelivered={isDelivered}
+                  initialRating={order.rating || (ratingState.rated ? { orderStars: ratingState.stars, driverName: ratingState.driverName } : null)}
+                  onRatingSubmitted={(rat) => {
+                    setOrder((prev: any) => prev ? { ...prev, rating: rat } : prev);
+                    setRatingState((prev) => ({
+                      ...prev,
+                      rated: true,
+                      stars: rat.orderStars || rat.stars,
+                      driverName: rat.driverName || prev.driverName
+                    }));
+                  }}
+                />
+              </>
             )}
 
             {/* Linha do Tempo Passo a Passo */}

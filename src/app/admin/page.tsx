@@ -7,7 +7,7 @@ import {
   Flame, LayoutDashboard, ShoppingCart, UtensilsCrossed, Bike, Settings, 
   CheckCircle2, Clock, AlertTriangle, ArrowRight, Printer, XCircle, Search, 
   UserPlus, ShieldAlert, KeyRound, Check, RefreshCw, Send, Lock, PlusCircle,
-  Copy, MessageSquare, MessageCircle, Trash2, CheckSquare, Square, X, MapPin, Package, Users
+  Copy, MessageSquare, MessageCircle, Trash2, CheckSquare, Square, X, MapPin, Package, Users, Star
 } from 'lucide-react';
 import { PIZZA_FLAVORS } from '@/lib/constants';
 
@@ -16,6 +16,7 @@ import DriverInTransitList from '@/components/DriverInTransitList';
 import FirstAccessInvitePanel from '@/components/FirstAccessInvitePanel';
 import StoreNotificationCenter from '@/components/StoreNotificationCenter';
 import CustomerAdminPanel from '@/components/CustomerAdminPanel';
+import CustomerRatingsAdminPanel from '@/components/CustomerRatingsAdminPanel';
 import CustomerTrackingSettings from '@/components/CustomerTrackingSettings';
 import OrderStageTiming from '@/components/OrderStageTiming';
 import { printThermalOrder, testPrintThermal, PaperWidth } from '@/lib/thermalPrinter';
@@ -149,7 +150,7 @@ const STATUS_HIERARCHY: Record<string, number> = {
 
 export default function AdminDashboardPage() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'kanban' | 'menu' | 'logistics' | 'settings' | 'canceled' | 'first_access' | 'customers'>('kanban');
+  const [activeTab, setActiveTab] = useState<'overview' | 'kanban' | 'menu' | 'logistics' | 'settings' | 'canceled' | 'first_access' | 'customers' | 'ratings'>('kanban');
   const [canceledSearch, setCanceledSearch] = useState('');
   const [ordersSearch, setOrdersSearch] = useState('');
 
@@ -1330,6 +1331,19 @@ export default function AdminDashboardPage() {
           </button>
 
           <button
+            type="button"
+            onClick={() => setActiveTab('ratings')}
+            className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
+              activeTab === 'ratings'
+                ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
+                : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60'
+            }`}
+          >
+            <Star className="w-4 h-4 text-amber-400 fill-amber-400" />
+            <span>Avaliações dos Clientes</span>
+          </button>
+
+          <button
             onClick={() => setActiveTab('canceled')}
             className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
               activeTab === 'canceled'
@@ -1356,6 +1370,7 @@ export default function AdminDashboardPage() {
         
         {/* ABA 1: KANBAN DE PEDIDOS */}
         {activeTab === 'customers' && <CustomerAdminPanel getHeaders={getAdminHeaders} />}
+        {activeTab === 'ratings' && <CustomerRatingsAdminPanel getHeaders={getAdminHeaders} />}
         {activeTab === 'kanban' && (
           <div className="space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">

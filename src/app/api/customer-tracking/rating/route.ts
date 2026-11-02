@@ -40,20 +40,30 @@ export async function GET(req: NextRequest) {
 
     const isDelivered = context.order.status === 'concluido' || context.order.status === 'entregue';
     const orderId = String(context.order.id);
+    const driverName =
+      context.driver?.driverName ||
+      context.driver?.name ||
+      context.assignment?.driverName ||
+      context.order.driverName ||
+      null;
 
     // Consulta na fonte autoritativa (tabela order_delivery_ratings)
-    let existingRating: { stars: number; ratedAt: string; driverName?: string } | null = null;
+    let existingRating: any = null;
     const { data: dbRow, error: dbErr } = await supabaseAdmin
       .from('order_delivery_ratings')
-      .select('stars, created_at, driver_name')
+      .select('stars, order_stars, driver_stars, comment, created_at, driver_name, order_number')
       .eq('order_id', orderId)
       .maybeSingle();
 
     if (!dbErr && dbRow) {
       existingRating = {
-        stars: dbRow.stars,
+        stars: dbRow.order_stars || dbRow.stars,
+        orderStars: dbRow.order_stars || dbRow.stars,
+        driverStars: dbRow.driver_stars ?? null,
+        comment: dbRow.comment ?? null,
+        driverName: dbRow.driver_name || driverName,
+        orderNumber: dbRow.order_number || String(context.order.orderNumber || '').replace('#', ''),
         ratedAt: dbRow.created_at,
-        driverName: dbRow.driver_name || undefined,
       };
     } else if (context.order.rating) {
       // Recuperação definida caso a tabela ainda não tenha sido consultada
@@ -64,6 +74,8 @@ export async function GET(req: NextRequest) {
       {
         success: true,
         delivered: isDelivered,
+        hasDriver: Boolean(driverName),
+        driverName: driverName || undefined,
         rated: Boolean(existingRating),
         rating: existingRating,
       },
@@ -81,9 +93,22 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
     const token = typeof body?.token === 'string' ? body.token.trim() : '';
-    const stars = Number(body?.stars);
 
-    // 1. Validação estrita dos dados enviados pelo cliente (apenas token e stars)
+    // Aceita orderStars ou fallback retrocompatível stars
+    const rawOrderStars = body?.orderStars !== undefined && body?.orderStars !== null ? body.orderStars : body?.stars;
+    const orderStars = Number(rawOrderStars);
+
+    // Avaliação opcional do motoboy (se houver entregador vinculado)
+    const rawDriverStars = body?.driverStars;
+    const driverStars =
+      rawDriverStars !== undefined && rawDriverStars !== null && rawDriverStars !== ''
+        ? Number(rawDriverStars)
+        : null;
+
+    // Comentário opcional do cliente sobre a experiência (até 500 caracteres)
+    const comment = typeof body?.comment === 'string' ? body.comment.trim().slice(0, 500) : null;
+
+    // 1. Validação estrita dos dados enviados pelo cliente
     if (token.length < 8 || token.length > 200) {
       return NextResponse.json(
         { success: false, error: 'Link de acompanhamento ou token inválido.' },
@@ -91,9 +116,16 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (!Number.isInteger(stars) || stars < 1 || stars > 5) {
+    if (!Number.isInteger(orderStars) || orderStars < 1 || orderStars > 5) {
       return NextResponse.json(
-        { success: false, error: 'Nota de avaliação inválida. Escolha entre 1 e 5 estrelas.' },
+        { success: false, error: 'Avaliação do pedido inválida. Escolha entre 1 e 5 estrelas.' },
+        { status: 400, headers }
+      );
+    }
+
+    if (driverStars !== null && (!Number.isInteger(driverStars) || driverStars < 1 || driverStars > 5)) {
+      return NextResponse.json(
+        { success: false, error: 'Avaliação do motoboy inválida. Escolha entre 1 e 5 estrelas.' },
         { status: 400, headers }
       );
     }
@@ -135,12 +167,14 @@ export async function POST(req: NextRequest) {
       context.driver?.name ||
       context.assignment?.driverName ||
       context.order.driverName ||
-      'Entregador';
+      null;
+
+    const orderNumber = String(context.order.orderNumber || context.order.id).replace('#', '').trim();
 
     // 5. Verifica se já existe avaliação confirmada no banco
     const { data: existingRating, error: checkErr } = await supabaseAdmin
       .from('order_delivery_ratings')
-      .select('stars, created_at, driver_name')
+      .select('stars, order_stars, driver_stars, comment, created_at, driver_name, order_number')
       .eq('order_id', orderId)
       .maybeSingle();
 
@@ -151,9 +185,13 @@ export async function POST(req: NextRequest) {
           error: 'Este pedido já foi avaliado anteriormente.',
           alreadyRated: true,
           rating: {
-            stars: existingRating.stars,
-            ratedAt: existingRating.created_at,
+            stars: existingRating.order_stars || existingRating.stars,
+            orderStars: existingRating.order_stars || existingRating.stars,
+            driverStars: existingRating.driver_stars ?? null,
+            comment: existingRating.comment ?? null,
             driverName: existingRating.driver_name || driverName,
+            orderNumber: existingRating.order_number || orderNumber,
+            ratedAt: existingRating.created_at,
           },
         },
         { status: 409, headers }
@@ -175,26 +213,72 @@ export async function POST(req: NextRequest) {
 
     // 6. Gravação na fonte autoritativa (tabela order_delivery_ratings) com tratamento explícito de error
     const nowIso = new Date().toISOString();
-    const { data: inserted, error: insertErr } = await supabaseAdmin
+    const insertPayload: any = {
+      order_id: orderId,
+      order_number: orderNumber,
+      tracking_token: token,
+      store_id: storeId,
+      driver_id: driverId ? String(driverId) : null,
+      driver_name: driverName || null,
+      stars: orderStars,
+      order_stars: orderStars,
+      driver_stars: driverStars,
+      comment: comment || null,
+      created_at: nowIso,
+    };
+
+    const insertRes = await supabaseAdmin
       .from('order_delivery_ratings')
-      .insert({
+      .insert(insertPayload)
+      .select('stars, order_stars, driver_stars, comment, created_at, driver_name, order_number')
+      .single();
+
+    let inserted: {
+      stars?: any;
+      order_stars?: any;
+      driver_stars?: any;
+      comment?: any;
+      created_at?: any;
+      driver_name?: any;
+      order_number?: any;
+    } | null = insertRes.data;
+    let insertErr = insertRes.error;
+
+    // Se o banco ainda não tiver as novas colunas, fallback seguro para colunas legadas
+    if (insertErr && (insertErr.message?.includes('column') || insertErr.code === '42703')) {
+      const fallbackPayload = {
         order_id: orderId,
         tracking_token: token,
         store_id: storeId,
         driver_id: driverId ? String(driverId) : null,
-        driver_name: driverName,
-        stars,
+        driver_name: driverName || null,
+        stars: orderStars,
         created_at: nowIso,
-      })
-      .select('stars, created_at, driver_name')
-      .single();
+      };
+      const fallbackRes = await supabaseAdmin
+        .from('order_delivery_ratings')
+        .insert(fallbackPayload)
+        .select('stars, created_at, driver_name')
+        .single();
+
+      inserted = fallbackRes.data
+        ? {
+            ...fallbackRes.data,
+            order_stars: orderStars,
+            driver_stars: driverStars,
+            comment,
+            order_number: orderNumber,
+          }
+        : null;
+      insertErr = fallbackRes.error;
+    }
 
     if (insertErr) {
       // Conflito de concorrência: duas solicitações competiram e a outra venceu
       if (insertErr.code === '23505') {
         const { data: winner } = await supabaseAdmin
           .from('order_delivery_ratings')
-          .select('stars, created_at, driver_name')
+          .select('stars, order_stars, driver_stars, comment, created_at, driver_name, order_number')
           .eq('order_id', orderId)
           .maybeSingle();
 
@@ -204,7 +288,15 @@ export async function POST(req: NextRequest) {
             error: 'Este pedido já foi avaliado anteriormente.',
             alreadyRated: true,
             rating: winner
-              ? { stars: winner.stars, ratedAt: winner.created_at, driverName: winner.driver_name || driverName }
+              ? {
+                  stars: winner.order_stars || winner.stars,
+                  orderStars: winner.order_stars || winner.stars,
+                  driverStars: winner.driver_stars ?? null,
+                  comment: winner.comment ?? null,
+                  driverName: winner.driver_name || driverName,
+                  orderNumber: winner.order_number || orderNumber,
+                  ratedAt: winner.created_at,
+                }
               : null,
           },
           { status: 409, headers }
@@ -220,9 +312,14 @@ export async function POST(req: NextRequest) {
     }
 
     const ratingObj = {
-      stars: inserted?.stars || stars,
-      ratedAt: inserted?.created_at || nowIso,
+      stars: inserted?.order_stars || inserted?.stars || orderStars,
+      orderStars: inserted?.order_stars || inserted?.stars || orderStars,
+      driverStars: inserted?.driver_stars !== undefined ? inserted.driver_stars : driverStars,
+      comment: inserted?.comment !== undefined ? inserted.comment : comment,
       driverName: inserted?.driver_name || driverName,
+      driverId: driverId ? String(driverId) : null,
+      orderNumber: inserted?.order_number || orderNumber,
+      ratedAt: inserted?.created_at || nowIso,
     };
 
     // 7. Projeção atômica no estado de logística para sincronia instantânea
@@ -237,6 +334,17 @@ export async function POST(req: NextRequest) {
       proj.rating = ratingObj;
       proj.orderProjectionUpdatedAt = new Date().toISOString();
       freshState.orderProjectionsByStore[storeKey][orderId] = proj;
+
+      // Armazena no índice de avaliações da loja no estado
+      freshState.ratingsByStore ||= {};
+      freshState.ratingsByStore[storeKey] ||= [];
+      const storeRatings = freshState.ratingsByStore[storeKey];
+      const existIdx = storeRatings.findIndex((r: any) => r.orderId === orderId);
+      if (existIdx >= 0) {
+        storeRatings[existIdx] = { ...ratingObj, orderId, storeId };
+      } else {
+        storeRatings.push({ ...ratingObj, orderId, storeId });
+      }
 
       await writeLogisticsState(freshState, freshRev);
     } catch {

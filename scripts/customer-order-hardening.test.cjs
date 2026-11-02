@@ -107,6 +107,14 @@ function createPageHarness({ initialToken = 'token-123', localStorageData = null
     },
   };
 
+  async function mockFetch(url, options) {
+    calls.push({ url, options });
+    if (fetchHandler) {
+      return fetchHandler(url, options);
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  }
+
   const context = {
     exports: {},
     Date: customDate,
@@ -142,6 +150,40 @@ function createPageHarness({ initialToken = 'token-123', localStorageData = null
       if (id === '@/lib/logistics/order-timeline') {
         return orderTimelineModule;
       }
+      if (id === '@/components/CustomerOrderRating') {
+        return {
+          __esModule: true,
+          default: ({ token, isDelivered, orderNumber, driverName, onRatingSubmitted }) => {
+            if (!isDelivered) return null;
+            return {
+              type: 'div',
+              props: {
+                'data-testid': 'customer-order-rating',
+                children: [
+                  {
+                    type: 'button',
+                    props: {
+                      'aria-label': 'Avaliar com 5 estrelas',
+                      onClick: async () => {
+                        try {
+                          const res = await mockFetch('/api/customer-tracking/rating', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ token, orderStars: 5, stars: 5 }),
+                          });
+                          const data = await res.json();
+                          if (onRatingSubmitted) onRatingSubmitted(data.rating);
+                        } catch (e) {}
+                      },
+                      children: '5 estrelas',
+                    },
+                  },
+                ],
+              },
+            };
+          },
+        };
+      }
       if (id === 'lucide-react') return new Proxy({}, { get: (_, key) => key });
       throw Error(`Unexpected test import: ${id}`);
     },
@@ -164,13 +206,7 @@ function createPageHarness({ initialToken = 'token-123', localStorageData = null
       warn: () => {},
       error: () => {},
     },
-    async fetch(url, options) {
-      calls.push({ url, options });
-      if (fetchHandler) {
-        return fetchHandler(url, options);
-      }
-      return { ok: false, status: 404, json: async () => ({}) };
-    },
+    fetch: mockFetch,
   };
 
   vm.runInNewContext(pageSource, context);
@@ -261,6 +297,11 @@ function createPageHarness({ initialToken = 'token-123', localStorageData = null
 
 function findNodes(node, predicate) {
   if (!node || typeof node !== 'object') return [];
+  if (typeof node.type === 'function') {
+    try {
+      return findNodes(node.type(node.props), predicate);
+    } catch {}
+  }
   const matches = predicate(node) ? [node] : [];
   const children = [node.props?.children].flat(Infinity).filter(Boolean);
   return matches.concat(children.flatMap((child) => findNodes(child, predicate)));
@@ -270,7 +311,14 @@ function collectText(node) {
   if (node === null || node === undefined) return '';
   if (typeof node === 'string' || typeof node === 'number') return String(node);
   if (Array.isArray(node)) return node.map(collectText).join(' ');
-  if (typeof node === 'object' && node.props) return collectText(node.props.children);
+  if (typeof node === 'object') {
+    if (typeof node.type === 'function') {
+      try {
+        return collectText(node.type(node.props));
+      } catch {}
+    }
+    if (node.props) return collectText(node.props.children);
+  }
   return '';
 }
 
