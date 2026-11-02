@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import CustomerDeliveryTracking from '@/components/CustomerDeliveryTracking';
+import CustomerOrderNotice from '@/components/CustomerOrderNotice';
 import { useParams } from 'next/navigation';
 import { normalizeOrderStatus } from '@/lib/logistics/order-timeline';
 import {
@@ -557,6 +558,7 @@ export default function OrderTrackingPage() {
 
   return (
     <div className="min-h-screen bg-zinc-950 text-white flex flex-col">
+      <CustomerOrderNotice token={token} status={order.status} confirmed={Boolean(order.isServerConfirmed && order.trackingToken === token)} />
       {/* Top Header */}
       <header className="border-b border-zinc-800/80 bg-zinc-900/70 py-4 px-6 backdrop-blur-md sticky top-0 z-30">
         <div className="max-w-4xl mx-auto flex items-center justify-between">

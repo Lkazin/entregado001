@@ -14,6 +14,8 @@ import { PIZZA_FLAVORS } from '@/lib/constants';
 import AdminPinAuth from '@/components/AdminPinAuth';
 import DriverInTransitList from '@/components/DriverInTransitList';
 import FirstAccessInvitePanel from '@/components/FirstAccessInvitePanel';
+import StoreNotificationCenter from '@/components/StoreNotificationCenter';
+import CustomerAdminPanel from '@/components/CustomerAdminPanel';
 import CustomerTrackingSettings from '@/components/CustomerTrackingSettings';
 import OrderStageTiming from '@/components/OrderStageTiming';
 import { printThermalOrder, testPrintThermal, PaperWidth } from '@/lib/thermalPrinter';
@@ -147,7 +149,7 @@ const STATUS_HIERARCHY: Record<string, number> = {
 
 export default function AdminDashboardPage() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'kanban' | 'menu' | 'logistics' | 'settings' | 'canceled' | 'first_access'>('kanban');
+  const [activeTab, setActiveTab] = useState<'overview' | 'kanban' | 'menu' | 'logistics' | 'settings' | 'canceled' | 'first_access' | 'customers'>('kanban');
   const [canceledSearch, setCanceledSearch] = useState('');
   const [ordersSearch, setOrdersSearch] = useState('');
 
@@ -1209,6 +1211,7 @@ export default function AdminDashboardPage() {
           </div>
 
           <div className="flex items-center flex-wrap gap-2">
+            <StoreNotificationCenter getHeaders={getAdminHeaders} onOpenOrder={id=>setDetailOrderId(id)} />
             <button
               onClick={() => fetchData()}
               disabled={isRefreshing}
@@ -1322,6 +1325,10 @@ export default function AdminDashboardPage() {
             <span>Configurações</span>
           </button>
 
+          <button type="button" onClick={()=>setActiveTab('customers')} className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${activeTab==='customers'?'bg-red-600 text-white':'text-zinc-400 hover:text-white hover:bg-zinc-800/60'}`}>
+            <Users className="h-4 w-4"/><span>Clientes</span>
+          </button>
+
           <button
             onClick={() => setActiveTab('canceled')}
             className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
@@ -1348,6 +1355,7 @@ export default function AdminDashboardPage() {
       <main className="flex-1 p-3 sm:p-5 lg:p-6 w-full max-w-none mx-auto">
         
         {/* ABA 1: KANBAN DE PEDIDOS */}
+        {activeTab === 'customers' && <CustomerAdminPanel getHeaders={getAdminHeaders} />}
         {activeTab === 'kanban' && (
           <div className="space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">

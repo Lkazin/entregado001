@@ -135,6 +135,7 @@ function createPageHarness({ initialToken = 'token-123', localStorageData = null
       if (id === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: 'fragment' };
       if (id === 'next/link') return { __esModule: true, default: LinkComponent };
       if (id === 'next/navigation') return { useParams: () => ({ token: currentToken }) };
+      if (id === '@/components/CustomerOrderNotice') return { __esModule: true, default: () => null };
       if (id === '@/components/CustomerDeliveryTracking') {
         return { __esModule: true, default: TrackingMapComponent };
       }

@@ -2,7 +2,7 @@
 
 import React from 'react';
 import Link from 'next/link';
-import { ShoppingBag, Clock, Phone, ShieldCheck, Flame, LayoutDashboard } from 'lucide-react';
+import { ShoppingBag, Clock, Phone, ShieldCheck, Flame, LayoutDashboard, UserRound } from 'lucide-react';
 
 interface NavbarProps {
   cartCount: number;
@@ -26,7 +26,7 @@ export default function Navbar({ cartCount, cartTotal, onOpenCart }: NavbarProps
         </span>
       </div>
 
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-20 flex items-center justify-between">
+      <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 min-h-20 py-3 flex flex-wrap gap-3 items-center justify-between">
         {/* Logotipo */}
         <Link href="/" className="flex items-center gap-3 group">
           <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-pizza-gold via-pizza-gold-dark to-pizza-black flex items-center justify-center text-white shadow-gold-sm group-hover:scale-105 transition duration-300 border border-pizza-gold/30">
@@ -43,7 +43,7 @@ export default function Navbar({ cartCount, cartTotal, onOpenCart }: NavbarProps
         </Link>
 
         {/* Links Centrais */}
-        <nav className="hidden md:flex items-center gap-8 text-sm font-medium text-zinc-300">
+        <nav className="hidden xl:flex items-center gap-6 text-sm font-medium text-zinc-300">
           <a href="#cardapio" className="hover:text-pizza-gold transition relative after:absolute after:left-0 after:-bottom-1 after:h-px after:w-0 after:bg-pizza-gold hover:after:w-full after:transition-all">
             Cardápio
           </a>
@@ -60,7 +60,8 @@ export default function Navbar({ cartCount, cartTotal, onOpenCart }: NavbarProps
         </nav>
 
         {/* Botão do Carrinho */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
+          <Link href="/minha-conta" target="_blank" rel="noopener noreferrer" className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-pizza-border px-3 py-2 text-sm text-zinc-200 hover:border-pizza-gold/50" aria-label="Abrir minha conta em outra aba"><UserRound className="h-5 w-5" /><span className="hidden sm:inline">Minha conta</span></Link>
           <button
             type="button"
             onClick={onOpenCart}

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/server';
 import { verifyAdminRequest } from '@/lib/auth/tokens';
 import crypto from 'crypto';
+import { ensureCustomerForOrder } from '@/lib/customer-accounts';
 import { readLogisticsState, writeLogisticsState, StateStoreError } from '@/lib/logistics/state-store';
 import { projectStoreOrders, mergeStageHistory } from '@/lib/logistics/order-timeline';
 
@@ -463,10 +464,12 @@ export async function POST(req: NextRequest) {
         String(o.phone) === String(customer.phone)
     );
     if (duplicate) {
+      const customer = await ensureCustomerForOrder(req, duplicate).catch(()=>null);
       return NextResponse.json(
         {
           success: true,
           orderId: duplicate.id,
+          customerProfileSaved: Boolean(customer?.customerId),
           orderNumber: duplicate.orderNumber,
           trackingToken: duplicate.trackingToken,
           deliveryPin: duplicate.deliveryPin,
@@ -474,12 +477,14 @@ export async function POST(req: NextRequest) {
           duplicate: true,
           createdAt: new Date().toISOString(),
         },
-        { headers: corsHeaders }
+        { headers: { ...corsHeaders, ...(customer?.setCookie ? { 'Set-Cookie': customer.setCookie } : {}) } }
       );
     }
 
     const updated = [newOrderObj, ...current.filter((o) => o.id !== newOrderObj.id)];
     await persistOrders(updated, storeId);
+    // Include newly received orders in the same confirmed projection used by delay alerts.
+    await persistOrderProjection(newOrderObj, storeId, {}).catch(()=>{});
 
     // Tenta persistir nas tabelas relacionais se existirem
     try {
@@ -533,9 +538,11 @@ export async function POST(req: NextRequest) {
       // Fallback garantido pelo Supabase Storage
     }
 
+    const customerAccount = await ensureCustomerForOrder(req, newOrderObj).catch(()=>null);
     return NextResponse.json(
       {
         success: true,
+        customerProfileSaved: Boolean(customerAccount?.customerId),
         orderId: newOrderObj.id,
         orderNumber,
         trackingToken,
@@ -543,7 +550,7 @@ export async function POST(req: NextRequest) {
         status: 'recebido',
         createdAt: new Date().toISOString(),
       },
-      { headers: corsHeaders }
+      { headers: { ...corsHeaders, ...(customerAccount?.setCookie ? { 'Set-Cookie': customerAccount.setCookie } : {}) } }
     );
   } catch (err: any) {
     return NextResponse.json(
