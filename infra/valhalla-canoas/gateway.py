@@ -5,6 +5,7 @@ import json
 import math
 import socket
 import threading
+from urllib.parse import urlsplit, parse_qs, urlencode
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -53,7 +54,7 @@ def valid_payload(path, payload):
 
 def proxy_request(method, path, body):
     # Fixed Docker service hostname. User input can never change the destination.
-    connection = http.client.HTTPConnection('valhalla', 8002, timeout=20)
+    connection = http.client.HTTPConnection('nominatim' if path.startswith('/search?') else 'valhalla', 8080 if path.startswith('/search?') else 8002, timeout=20)
     try:
         connection.request(method, path, body=body or None, headers={'Content-Type': 'application/json'})
         response = connection.getresponse()
@@ -95,6 +96,27 @@ class GatewayHandler(BaseHTTPRequestHandler):
         candidate = supplied[0].encode('utf-8') if len(supplied) == 1 else b''
         if not hmac.compare_digest(candidate, self.server.api_key):
             return self.reply(401, {'error': 'Unauthorized'})
+        parsed = urlsplit(self.path)
+        if parsed.scheme or parsed.netloc:
+            return self.reply(404, {'error': 'Not found'})
+        path = parsed.path
+        if self.command == 'GET' and path == '/search':
+            params = parse_qs(parsed.query, keep_blank_values=True)
+            allowed = {'q', 'format', 'limit', 'countrycodes', 'addressdetails'}
+            if not set(params).issubset(allowed) or any(len(v) != 1 for v in params.values()):
+                return self.reply(400, {'error': 'Invalid search parameters'})
+            query = params.get('q', [''])[0].strip()
+            if not 3 <= len(query) <= 350 or params.get('format', ['jsonv2'])[0] != 'jsonv2' or params.get('limit', ['2'])[0] not in ('1', '2'):
+                return self.reply(400, {'error': 'Invalid address query'})
+            # The bounded city extract has no enclosing state boundary relation.
+            # State is implicit in this Canoas-only service; keep street/number/neighbourhood/city.
+            query = ', '.join(part.strip() for part in query.split(',') if part.strip().casefold() not in ('rs', 'rio grande do sul'))
+            search_path = '/search?' + urlencode({'q': query, 'format': 'jsonv2', 'limit': '2', 'countrycodes': 'br', 'addressdetails': '1', 'bounded': '1', 'viewbox': '-51.32,-29.78,-51.05,-30.02'})
+            try:
+                status, data = proxy_request('GET', search_path, b'')
+                return self.reply(status, data)
+            except (OSError, ValueError, http.client.HTTPException):
+                return self.reply(502, {'error': 'Address service unavailable'})
         if (self.command, self.path) not in {('GET', '/status'), ('POST', '/route'), ('POST', '/sources_to_targets')}:
             return self.reply(404, {'error': 'Not found'})
         body = b''

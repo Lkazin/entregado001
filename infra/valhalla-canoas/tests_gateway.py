@@ -66,6 +66,17 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(status, 502)
             self.assertNotIn(b'private details', body)
 
+    def test_address_search_requires_auth_and_stays_in_canoas(self):
+        with patch('gateway.proxy_request', return_value=(200, b'[]')) as proxy:
+            self.assertEqual(self.request('GET', '/search?q=Rua%20Quinze')[0], 401)
+            self.assertEqual(self.request('GET', '/search?q=Rua%20Quinze&format=jsonv2&limit=2', key=self.key)[0], 200)
+            self.assertIn('bounded=1', proxy.call_args.args[1])
+            self.assertIn('countrycodes=br', proxy.call_args.args[1])
+            proxy.reset_mock()
+            self.assertEqual(self.request('GET', '/search?q=Rua&url=http://evil', key=self.key)[0], 400)
+            self.assertEqual(self.request('GET', '/search?q=Rua&q=Outra', key=self.key)[0], 400)
+            proxy.assert_not_called()
+
     def test_key_file_is_required_and_validated(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'key'

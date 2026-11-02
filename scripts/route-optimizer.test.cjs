@@ -107,3 +107,24 @@ if (process.env.TEST_REAL_VALHALLA === '1') test('real local Canoas Valhalla mat
   assert.equal(result.source,'valhalla'); assert.ok(result.totalDistanceMeters>500); assert.ok(result.totalDurationSeconds>30);
   console.log('Valhalla local:',JSON.stringify({meters:result.totalDistanceMeters,seconds:result.totalDurationSeconds}));
 });
+
+test('private geocoder authenticates search and resolves a street before routing', async () => {
+  let searches=0;
+  const m=load(async(url,options)=>{
+    if(String(url).includes('/search?')) {
+      searches++; assert.equal(options.headers['x-api-key'],'geo-only');
+      return {ok:true,json:async()=>[{lat:'-30',lon:'-51',place_rank:26}]};
+    }
+    assert.equal(options.headers['x-api-key'],undefined);
+    return matrixFetch(url);
+  },{NOMINATIM_SEARCH_URL:'https://maps.example.test/search',NOMINATIM_API_KEY:'geo-only'});
+  const addressOnly={...deliveries[0],destinationCoordinates:undefined,address:'Rua real',city:'Canoas'};
+  const result=await m.optimizeRoute([addressOnly,deliveries[1]],'shortest_distance',origin);
+  assert.equal(searches,1); assert.equal(result.stops.length,2);
+});
+test('geocoding never uses a town centroid or ambiguous address as a delivery', async()=> {
+  for(const results of [[{lat:'-30',lon:'-51',place_rank:16}],[{lat:'-30',lon:'-51',place_rank:26},{lat:'-30',lon:'-52',place_rank:26}]]) {
+    const m=load(async()=>({ok:true,json:async()=>results}),{NOMINATIM_SEARCH_URL:'https://maps.example.test/search',NOMINATIM_API_KEY:'geo-only'});
+    await assert.rejects(m.optimizeRoute([{id:'address',address:'Rua real',city:'Canoas'}],'shortest_distance',origin),/ambíguo/);
+  }
+});

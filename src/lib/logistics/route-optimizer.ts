@@ -21,13 +21,13 @@ export function activeRouteAssignments(state: any, auth: { storeId?: string; dri
 const cache = new Map<string, { point: Coordinates; expires: number }>();
 let geocodeQueue: Promise<void> = Promise.resolve();
 let nextGeocodeAt = 0;
-async function request(url: string, deadline: number) {
+async function request(url: string, deadline: number, extraHeaders: Record<string,string> = {}) {
   const remaining = deadline - Date.now();
   if (remaining <= 0) throw new RouteError('Tempo de cálculo excedido. Organize a rota manualmente.', 503, 'ROUTE_TIMEOUT');
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), Math.min(8000, remaining));
   try {
-    const response = await fetch(url, { signal: controller.signal, cache: 'no-store', headers: { 'User-Agent': 'NovaesWebDelivery/1.0 (+https://entregado001-oe6y.vercel.app)' } });
+    const response = await fetch(url, { signal: controller.signal, cache: 'no-store', redirect:'error', headers: { 'User-Agent': 'NovaesWebDelivery/1.0 (+https://entregado001-oe6y.vercel.app)', 'ngrok-skip-browser-warning':'true', ...extraHeaders } });
     if (!response.ok) throw new Error('provider');
     return await response.json();
   } catch { throw new RouteError('Serviço de mapas indisponível. Use a organização manual.', 503, 'ROUTE_PROVIDER_UNAVAILABLE'); }
@@ -55,11 +55,12 @@ async function destination(a: any, deadline: number): Promise<Coordinates> {
     const delay = Math.max(0, nextGeocodeAt - Date.now());
     if (Date.now() + delay >= deadline) throw new RouteError('Tempo de consulta excedido. Organize a rota manualmente.', 503, 'ROUTE_TIMEOUT');
     if (delay) await new Promise(resolve => setTimeout(resolve, delay));
-    nextGeocodeAt = Date.now() + 1000;
+    nextGeocodeAt = Date.now() + (process.env.NOMINATIM_API_KEY ? 0 : 1000);
     const url = new URL(endpoint);
     url.searchParams.set('q', query); url.searchParams.set('format', 'jsonv2'); url.searchParams.set('limit', '2'); url.searchParams.set('countrycodes', 'br');
-    const results = await request(url.toString(), deadline);
-    const point = Array.isArray(results) && results.length === 1 ? coordinates({ latitude: Number(results[0].lat), longitude: Number(results[0].lon) }) : null;
+    if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost','127.0.0.1','[::1]'].includes(url.hostname))) throw new RouteError('O serviço de endereços precisa usar HTTPS.');
+    const results = await request(url.toString(), deadline, process.env.NOMINATIM_API_KEY ? {'x-api-key':process.env.NOMINATIM_API_KEY} : {});
+    const point = Array.isArray(results) && results.length === 1 && Number(results[0].place_rank) >= 26 ? coordinates({ latitude: Number(results[0].lat), longitude: Number(results[0].lon) }) : null;
     if (!point) throw new RouteError('Endereço não localizado com segurança ou ambíguo. Confira o endereço e use a rota manual.');
     if (cache.size >= 2000) cache.delete(cache.keys().next().value!);
     cache.set(query, { point, expires: Date.now() + 86400000 });

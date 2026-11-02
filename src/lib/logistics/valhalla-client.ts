@@ -23,7 +23,7 @@ export async function valhallaMatrixBlock(sources: ValhallaPoint[], targets: Val
   const url = endpoint('sources_to_targets');
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), Math.min(8000, remaining));
-  const headers: Record<string,string> = { 'Content-Type': 'application/json' };
+  const headers: Record<string,string> = { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning':'true' };
   if (process.env.VALHALLA_API_KEY) headers['x-api-key'] = process.env.VALHALLA_API_KEY;
   try {
     const response = await fetch(url, { method:'POST', headers, redirect:'error', signal:controller.signal, cache:'no-store', body:JSON.stringify({
@@ -54,7 +54,7 @@ export async function valhallaMatrixBlock(sources: ValhallaPoint[], targets: Val
 
 /** Valhalla's OSRM-compatible response keeps the existing map contract. */
 export async function valhallaRoute(from: ValhallaPoint, to: ValhallaPoint) {
-  const headers: Record<string,string> = {'Content-Type':'application/json'};
+  const headers: Record<string,string> = {'Content-Type':'application/json','ngrok-skip-browser-warning':'true'};
   if (process.env.VALHALLA_API_KEY) headers['x-api-key'] = process.env.VALHALLA_API_KEY;
   try {
     const response = await fetch(endpoint('route'), {

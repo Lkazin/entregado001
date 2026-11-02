@@ -31,10 +31,37 @@ Cloudflare deve pertencer ao proprietário. Quick Tunnels servem apenas para
 teste: o endereço muda quando reiniciam e não deve ser fixado na Vercel.
 Mantenha Docker e o conector do túnel ativos no PC.
 
-Valhalla recebe coordenadas e devolve rotas/distâncias/tempos. Não converte
-endereços em coordenadas: pedidos sem localização ainda exigem um provedor
-compatível com Nominatim em `NOMINATIM_SEARCH_URL`, ou coordenadas reais já
-salvas. Não são criadas localizações/estimativas fictícias em falhas.
+## Alternativa sem domínio próprio: ngrok
+
+O plano gratuito fornece um domínio atribuído à conta, sujeito aos limites
+do provedor. O arquivo privado `.secrets/ngrok.yml` guarda o authtoken e
+define o túnel `mapas` para `http://maps-gateway:8003`, com `inspect: false`.
+Não publique esse arquivo. Para iniciar os três serviços nesta pasta:
+
+`docker compose -f compose.yaml -f compose.gateway.yaml -f compose.ngrok.yaml up -d`
+
+A API local do agente em `http://127.0.0.1:4040/api/tunnels` informa o
+`public_url` HTTPS. Use esse endereço em `VALHALLA_BASE_URL` na Vercel,
+mantendo `VALHALLA_API_KEY` privada. O token da conta ngrok é diferente da
+chave do gateway e nunca deve ser configurado no painel do motoboy.
+
+## Conversão de endereços
+
+O Nominatim local usa o mesmo recorte de Canoas, com PostgreSQL isolado e
+persistente no volume `novaesweb-geocoder-canoas-data`. Para iniciar tudo:
+
+`docker compose -f compose.yaml -f compose.gateway.yaml -f compose.geocoder.yaml -f compose.ngrok.yaml up -d`
+
+O arquivo ignorado `.secrets/nominatim.env` contém `NOMINATIM_PASSWORD`.
+O serviço privado de busca é `https://SEU-ENDERECO-NGROK/search` e requer
+`NOMINATIM_API_KEY`, com o mesmo valor da chave privada do gateway. Configure
+essas duas variáveis apenas no projeto do lojista na Vercel. Na máquina,
+o Nominatim é acessível em `127.0.0.1:8004` para diagnóstico local.
+
+As buscas são limitadas à região de Canoas. Ruas/números ausentes do
+OpenStreetMap ou resultados ambíguos exigem revisão do endereço; não são
+substituídos por pontos fictícios ou pelo centro da cidade. Localizações
+retornadas no nível da rua são aproximações da rua, não confirmação da porta.
 
 Verificação real local a partir da raiz do repositório:
 `node scripts/valhalla-live-smoke.cjs`.

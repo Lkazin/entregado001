@@ -239,12 +239,13 @@ async function geocodeAddress(
   const timeout = setTimeout(() => controller.abort(), 5000);
   try {
     const url = new URL(endpoint);
+    if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost','127.0.0.1','[::1]'].includes(url.hostname))) return null;
     url.searchParams.set('q', query); url.searchParams.set('format','jsonv2');
     url.searchParams.set('limit','2'); url.searchParams.set('countrycodes','br');
-    const response = await fetch(url, { signal:controller.signal, cache:'no-store', headers:{'User-Agent':'NovaesWebDelivery/1.0 (+https://entregado001-oe6y.vercel.app)'} });
+    const response = await fetch(url, { signal:controller.signal, cache:'no-store', redirect:'error', headers:{'User-Agent':'NovaesWebDelivery/1.0 (+https://entregado001-oe6y.vercel.app)', 'ngrok-skip-browser-warning':'true', ...(process.env.NOMINATIM_API_KEY ? {'x-api-key':process.env.NOMINATIM_API_KEY} : {})} });
     if (!response.ok) return null;
     const data = await response.json();
-    if (!Array.isArray(data) || data.length !== 1) return null;
+    if (!Array.isArray(data) || data.length !== 1 || Number(data[0].place_rank) < 26 || !Number.isFinite(Number(data[0].place_rank))) return null;
     if (data[0]?.lat == null || data[0]?.lon == null || String(data[0].lat).trim() === '' || String(data[0].lon).trim() === '') return null;
     const lat = Number(data[0].lat), lng = Number(data[0].lon);
     if (!Number.isFinite(lat) || Math.abs(lat)>90 || !Number.isFinite(lng) || Math.abs(lng)>180) return null;
@@ -1761,6 +1762,17 @@ export async function GET(
 
         const trackedList = Array.from(driverMap.values());
         const configuredStore = getEffectiveStoreLocation(effectiveStoreId);
+        // Only resolve the current stop; never draw a fabricated destination.
+        await Promise.all(trackedList.map(async (driver) => {
+          const first = driver.assignments[0];
+          if (!first || first.destinationCoordinates) return;
+          const raw = liveAssignments.find(a => (a.id || a.assignmentId) === first.id && isSameStore(a.storeId,effectiveStoreId));
+          if (!raw) return;
+          const point = await geocodeAddress([raw.address,raw.addressNumber].filter(Boolean).join(', '), {
+            city:raw.city || configuredStore.city,state:raw.state || configuredStore.state,region:raw.neighborhood || raw.region,
+          });
+          if (point) first.destinationCoordinates = {latitude:point.lat,longitude:point.lng};
+        }));
 
 
         return jsonResponse({
