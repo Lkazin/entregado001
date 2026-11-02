@@ -158,10 +158,11 @@ export default function CustomerDeliveryTracking({token}: {token: string}) {
           driverLocation={location ? {...location, name: 'Seu entregador'} : null} routeCoordinates={route?.coordinates || []} />
         <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
           <span className={fresh ? 'text-emerald-400' : 'text-amber-300'}>
-            {fresh ? 'Localização atualizada' : location ? 'Sinal desatualizado' : 'Aguardando sinal de GPS do entregador'}
+            {fresh ? 'Localização atualizada' : location ? 'Última posição conhecida · aguardando novo sinal' : 'Sinal do entregador temporariamente indisponível'}
           </span>
           {Number.isFinite(timestamp) && <span className="text-zinc-400">Última atualização: {new Date(timestamp).toLocaleTimeString('pt-BR')}</span>}
         </div>
+        {!fresh && <p className="rounded-xl border border-amber-900/60 bg-amber-950/20 p-3 text-xs text-amber-200" role="status">O acompanhamento será retomado automaticamente assim que o aparelho enviar uma posição recente. A previsão fica pausada para não mostrar um horário incorreto.</p>}
         {location && route && Number.isFinite(route.estimatedMinutes) ? <p className="flex flex-wrap items-center gap-2 text-sm text-white">
           <Clock className="h-4 w-4 text-orange-400" />Previsão aproximada: {Math.max(1, Math.round(route.estimatedMinutes))} min
           {Number.isFinite(route.distanceKm) && <span className="text-zinc-400">· {route.distanceKm.toLocaleString('pt-BR', {maximumFractionDigits: 1})} km</span>}

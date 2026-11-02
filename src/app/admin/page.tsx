@@ -16,9 +16,13 @@ import DriverInTransitList from '@/components/DriverInTransitList';
 import FirstAccessInvitePanel from '@/components/FirstAccessInvitePanel';
 import StoreNotificationCenter from '@/components/StoreNotificationCenter';
 import CustomerAdminPanel from '@/components/CustomerAdminPanel';
+import AdminNavigationDrawer from '@/components/AdminNavigationDrawer';
+import AdminModalLayer from '@/components/AdminModalLayer';
 import CustomerRatingsAdminPanel from '@/components/CustomerRatingsAdminPanel';
 import CustomerTrackingSettings from '@/components/CustomerTrackingSettings';
 import OrderStageTiming from '@/components/OrderStageTiming';
+import OrderDelayAlerts, { OrderDelayBadge, useOrderAlarmSettings } from '@/components/OrderDelayAlerts';
+import { orderDelay } from '@/lib/order-delay-alerts';
 import { printThermalOrder, testPrintThermal, PaperWidth } from '@/lib/thermalPrinter';
 
 function getAdminHeaders(extra?: Record<string, string>): Record<string, string> {
@@ -150,7 +154,51 @@ const STATUS_HIERARCHY: Record<string, number> = {
 
 export default function AdminDashboardPage() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'kanban' | 'menu' | 'logistics' | 'settings' | 'canceled' | 'first_access' | 'customers' | 'ratings'>('kanban');
+  const [activeTab, setActiveTabState] = useState<'overview' | 'kanban' | 'menu' | 'logistics' | 'settings' | 'canceled' | 'first_access' | 'customers' | 'ratings'>('kanban');
+  const [navigationOpen, setNavigationOpen] = useState(false);
+  const navigationButtonRef = React.useRef<HTMLButtonElement>(null);
+  const tvRequestedRef = React.useRef(false);
+  const setActiveTab = (tab: typeof activeTab) => {
+    tvRequestedRef.current = false;
+    setActiveTabState(tab); setNavigationOpen(false); setIsHeaderCollapsed(false);
+    if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+    const url = new URL(window.location.href); url.searchParams.set('section', tab);
+    window.history.pushState({}, '', url); window.scrollTo({ top: 0 });
+  };
+  useEffect(() => {
+    const restore = () => {
+      const tab = new URL(window.location.href).searchParams.get('section');
+      const valid = ['overview', 'kanban', 'menu', 'logistics', 'settings', 'canceled', 'first_access', 'customers', 'ratings'];
+      setActiveTabState(valid.includes(tab || '') ? tab as typeof activeTab : 'kanban');
+      tvRequestedRef.current = false;
+      setIsHeaderCollapsed(false); setNavigationOpen(false);
+      if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+    };
+    restore(); window.addEventListener('popstate', restore);
+    return () => window.removeEventListener('popstate', restore);
+  }, []);
+  const leaveTvMode = () => {
+    tvRequestedRef.current = false;
+    setIsHeaderCollapsed(false);
+    if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+  };
+  const enterTvMode = () => {
+    tvRequestedRef.current = true;
+    setActiveTabState('kanban'); setNavigationOpen(false); setIsHeaderCollapsed(true);
+    // The document includes notification portals and order dialogs.
+    if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+      void document.documentElement.requestFullscreen().then(() => {
+        // Escape or navigation may happen before the browser grants fullscreen.
+        if (!tvRequestedRef.current && document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+      }).catch(() => {});
+    }
+  };
+  useEffect(() => {
+    const onFullscreen = () => { if (!document.fullscreenElement) { tvRequestedRef.current = false; setIsHeaderCollapsed(false); } };
+    const onEscape = (event: KeyboardEvent) => { if (event.key === 'Escape' && tvRequestedRef.current) leaveTvMode(); };
+    document.addEventListener('fullscreenchange', onFullscreen); window.addEventListener('keydown', onEscape);
+    return () => { document.removeEventListener('fullscreenchange', onFullscreen); window.removeEventListener('keydown', onEscape); };
+  }, []);
   const [canceledSearch, setCanceledSearch] = useState('');
   const [ordersSearch, setOrdersSearch] = useState('');
 
@@ -178,6 +226,8 @@ export default function AdminDashboardPage() {
     storeCity: 'Canoas',
     storeState: 'RS',
   });
+  const [orderAlarmSettings] = useOrderAlarmSettings(storeSettings.storeId);
+  const delayedOrderCount = orders.filter(order => orderDelay(order, stageNow, orderAlarmSettings) !== null).length;
   // Enquanto o lojista edita configurações, o polling não pode sobrescrever a escolha (causa do "entregador fixo trocar sozinho")
   const settingsDirtyRef = React.useRef(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
@@ -204,12 +254,7 @@ export default function AdminDashboardPage() {
     return false;
   });
     // Modo Cozinha (Recolher Topo) e Fila de Novos Pedidos
-  const [isHeaderCollapsed, setIsHeaderCollapsed] = useState<boolean>(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('novaesweb_kitchen_mode') === 'true';
-    }
-    return false;
-  });
+  const [isHeaderCollapsed, setIsHeaderCollapsed] = useState(false);
   const [pendingNewOrders, setPendingNewOrders] = useState<AdminOrder[]>([]);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [paperWidth, setPaperWidth] = useState<PaperWidth>(() => {
@@ -220,6 +265,16 @@ export default function AdminDashboardPage() {
     return '80mm';
   });
   const knownOrderIdsRef = React.useRef<Set<string> | null>(null);
+
+  useEffect(() => {
+    if (isLoading || !isAuthenticated) return;
+    const received = new Map(orders.filter(order => order.status === 'recebido').map(order => [order.id, order]));
+    // An order advanced/canceled in another tab must leave this device's arrival alarm too.
+    setPendingNewOrders(previous => {
+      const remaining = previous.filter(order => received.has(order.id));
+      return remaining.length === previous.length ? previous : remaining;
+    });
+  }, [orders, isLoading, isAuthenticated]);
 
   // Deteccao de novos pedidos para fila e impressao automatica
   useEffect(() => {
@@ -267,7 +322,7 @@ export default function AdminDashboardPage() {
 
   // Alarme Sonoro Continuo Tipo Campainha de Delivery (Ding-Dong)
   useEffect(() => {
-    if (pendingNewOrders.length === 0 || isMuted || !isAuthenticated) return;
+    if (pendingNewOrders.length === 0 || delayedOrderCount > 0 || isMuted || !isAuthenticated || !orderAlarmSettings.enabled || orderAlarmSettings.volume === 0) return;
 
     const playDingDong = () => {
       try {
@@ -283,31 +338,33 @@ export default function AdminDashboardPage() {
         const gain1 = ctx.createGain();
         osc1.type = 'triangle';
         osc1.frequency.setValueAtTime(880, now);
-        gain1.gain.setValueAtTime(0.35, now);
+        gain1.gain.setValueAtTime(orderAlarmSettings.volume / 100 * 0.35, now);
         gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
         osc1.connect(gain1);
         gain1.connect(ctx.destination);
         osc1.start(now);
         osc1.stop(now + 0.4);
+        osc1.onended = () => { osc1.disconnect(); gain1.disconnect(); };
 
         // Tom 2: Dong (659 Hz)
         const osc2 = ctx.createOscillator();
         const gain2 = ctx.createGain();
         osc2.type = 'sine';
         osc2.frequency.setValueAtTime(659.25, now + 0.22);
-        gain2.gain.setValueAtTime(0.35, now + 0.22);
+        gain2.gain.setValueAtTime(orderAlarmSettings.volume / 100 * 0.35, now + 0.22);
         gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.85);
         osc2.connect(gain2);
         gain2.connect(ctx.destination);
         osc2.start(now + 0.22);
         osc2.stop(now + 0.85);
+        osc2.onended = () => { osc2.disconnect(); gain2.disconnect(); };
       } catch (e) {}
     };
 
     playDingDong();
-    const interval = setInterval(playDingDong, 1800);
+    const interval = setInterval(playDingDong, orderAlarmSettings.repeatSeconds * 1000);
     return () => clearInterval(interval);
-  }, [pendingNewOrders.length, isMuted, isAuthenticated]);
+  }, [pendingNewOrders.length, delayedOrderCount, isMuted, isAuthenticated, orderAlarmSettings.enabled, orderAlarmSettings.volume, orderAlarmSettings.repeatSeconds]);
 
   // O marcador local não comprova que a sessão do servidor continua válida.
   useEffect(() => {
@@ -1134,7 +1191,7 @@ export default function AdminDashboardPage() {
   const selectedOrders = orders.filter(o => selectedOrderIds.includes(o.id));
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-white flex flex-col">
+    <div inert={navigationOpen} className={`bg-zinc-950 text-white flex flex-col ${isHeaderCollapsed ? 'fixed inset-0 z-40 h-dvh overflow-y-auto' : 'min-h-screen'}`}>
       
       {/* Aviso de novo pedido */}
       {newOrderAlert && (
@@ -1173,15 +1230,12 @@ export default function AdminDashboardPage() {
         <div className="fixed top-3 right-4 z-40 animate-fade-in">
           <button
             type="button"
-            onClick={() => {
-              setIsHeaderCollapsed(false);
-              localStorage.setItem('novaesweb_kitchen_mode', 'false');
-            }}
+            onClick={leaveTvMode}
             className="px-3.5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-black flex items-center gap-2 shadow-2xl shadow-red-600/50 transition transform active:scale-95"
             title="Sair do modo tela cheia e exibir menu"
           >
             <Minimize2 className="w-4 h-4" />
-            <span>Exibir Menu Principal</span>
+            <span>Sair do modo TV</span>
           </button>
         </div>
       )}
@@ -1193,6 +1247,7 @@ export default function AdminDashboardPage() {
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           
           <div className="flex items-center flex-wrap gap-2 sm:gap-3">
+            <button ref={navigationButtonRef} type="button" aria-expanded={navigationOpen} aria-controls="admin-navigation" onClick={() => setNavigationOpen(true)} className="rounded-xl border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm font-bold hover:bg-zinc-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-400">☰ Menu {delayedOrderCount > 0 && <span className="ml-2 rounded-full bg-red-600 px-2 py-0.5 text-xs text-white" aria-label={`${delayedOrderCount} pedidos atrasados`}>{delayedOrderCount}</span>}</button>
             <Link href="/" className="flex items-center gap-2 group">
               <div className="w-8 h-8 rounded-xl bg-red-600 flex items-center justify-center text-white">
                 <Flame className="w-5 h-5 text-amber-300" />
@@ -1207,12 +1262,12 @@ export default function AdminDashboardPage() {
             </span>
             <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800/40 text-[11px] font-semibold">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span>Sincronização em Tempo Real Ativa</span>
+              <span>Atualização automática</span>
             </div>
           </div>
 
           <div className="flex items-center flex-wrap gap-2">
-            <StoreNotificationCenter getHeaders={getAdminHeaders} onOpenOrder={id=>setDetailOrderId(id)} />
+            <StoreNotificationCenter getHeaders={getAdminHeaders} onOpenOrder={id=>setDetailOrderId(id)} onOpenRatings={()=>setActiveTab('ratings')} floating={isHeaderCollapsed} />
             <button
               onClick={() => fetchData()}
               disabled={isRefreshing}
@@ -1253,9 +1308,10 @@ export default function AdminDashboardPage() {
         </div>
 
         {/* Abas Principais de Navegação */}
-        <div className="admin-tabs flex gap-2 mt-3 pt-3 border-t border-zinc-800/80 overflow-x-auto text-xs font-bold">
+        <AdminNavigationDrawer open={navigationOpen} onClose={() => setNavigationOpen(false)} triggerRef={navigationButtonRef}>
+        <nav id="admin-navigation" aria-label="Seções do painel" className="admin-tabs grid gap-2 text-sm font-bold [&>button]:justify-start [&>button]:text-left [&>button]:!whitespace-normal">
           <button
-            onClick={() => setActiveTab('kanban')}
+            aria-current={activeTab === 'kanban' ? 'page' : undefined} onClick={() => setActiveTab('kanban')}
             className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
               activeTab === 'kanban'
                 ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
@@ -1263,11 +1319,11 @@ export default function AdminDashboardPage() {
             }`}
           >
             <ShoppingCart className="w-4 h-4" />
-            <span>Kanban de Pedidos ({orders.filter(o => o.status !== 'concluido' && o.status !== 'cancelado').length})</span>
+            <span>Pedidos ({orders.filter(o => o.status !== 'concluido' && o.status !== 'cancelado').length}) {delayedOrderCount > 0 && <span className="ml-1 rounded-full bg-red-950 px-2 py-0.5 text-xs text-red-200">{delayedOrderCount} atrasados</span>}</span>
           </button>
 
           <button
-            onClick={() => setActiveTab('first_access')}
+            aria-current={activeTab === 'first_access' ? 'page' : undefined} onClick={() => setActiveTab('first_access')}
             className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
               activeTab === 'first_access'
                 ? 'bg-amber-500 text-zinc-950 font-black shadow-lg shadow-amber-500/30'
@@ -1279,7 +1335,7 @@ export default function AdminDashboardPage() {
           </button>
 
           <button
-            onClick={() => setActiveTab('logistics')}
+            aria-current={activeTab === 'logistics' ? 'page' : undefined} onClick={() => setActiveTab('logistics')}
             className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
               activeTab === 'logistics'
                 ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
@@ -1291,7 +1347,7 @@ export default function AdminDashboardPage() {
           </button>
 
           <button
-            onClick={() => setActiveTab('overview')}
+            aria-current={activeTab === 'overview' ? 'page' : undefined} onClick={() => setActiveTab('overview')}
             className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
               activeTab === 'overview'
                 ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
@@ -1303,7 +1359,7 @@ export default function AdminDashboardPage() {
           </button>
 
           <button
-            onClick={() => setActiveTab('menu')}
+            aria-current={activeTab === 'menu' ? 'page' : undefined} onClick={() => setActiveTab('menu')}
             className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
               activeTab === 'menu'
                 ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
@@ -1315,7 +1371,7 @@ export default function AdminDashboardPage() {
           </button>
 
           <button
-            onClick={() => setActiveTab('settings')}
+            aria-current={activeTab === 'settings' ? 'page' : undefined} onClick={() => setActiveTab('settings')}
             className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
               activeTab === 'settings'
                 ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
@@ -1326,13 +1382,13 @@ export default function AdminDashboardPage() {
             <span>Configurações</span>
           </button>
 
-          <button type="button" onClick={()=>setActiveTab('customers')} className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${activeTab==='customers'?'bg-red-600 text-white':'text-zinc-400 hover:text-white hover:bg-zinc-800/60'}`}>
+          <button type="button" aria-current={activeTab === 'customers' ? 'page' : undefined} onClick={()=>setActiveTab('customers')} className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${activeTab==='customers'?'bg-red-600 text-white':'text-zinc-400 hover:text-white hover:bg-zinc-800/60'}`}>
             <Users className="h-4 w-4"/><span>Clientes</span>
           </button>
 
           <button
             type="button"
-            onClick={() => setActiveTab('ratings')}
+            aria-current={activeTab === 'ratings' ? 'page' : undefined} onClick={() => setActiveTab('ratings')}
             className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
               activeTab === 'ratings'
                 ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
@@ -1344,7 +1400,7 @@ export default function AdminDashboardPage() {
           </button>
 
           <button
-            onClick={() => setActiveTab('canceled')}
+            aria-current={activeTab === 'canceled' ? 'page' : undefined} onClick={() => setActiveTab('canceled')}
             className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
               activeTab === 'canceled'
                 ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
@@ -1354,6 +1410,10 @@ export default function AdminDashboardPage() {
             <XCircle className="w-4 h-4 text-red-400" />
             <span>Pedidos Cancelados ({orders.filter(o => o.status === 'cancelado').length})</span>
           </button>
+        </nav>
+        </AdminNavigationDrawer>
+        <div className="mt-3 border-t border-zinc-800 pt-3 text-sm font-bold text-zinc-200">
+          {{ kanban: 'Pedidos', logistics: 'Logística e entregadores', overview: 'Visão geral e relatórios', menu: 'Cardápio e preços', settings: 'Configurações', customers: 'Clientes e endereços', ratings: 'Avaliações dos clientes', canceled: 'Pedidos cancelados', first_access: 'Cadastrar entregador' }[activeTab]}
         </div>
       </header>
 
@@ -1366,7 +1426,8 @@ export default function AdminDashboardPage() {
       )}
 
       {/* Conteúdo Dinâmico por Aba */}
-      <main className="flex-1 p-3 sm:p-5 lg:p-6 w-full max-w-none mx-auto">
+      <main className={`flex-1 p-3 sm:p-5 lg:p-6 w-full max-w-none mx-auto ${isHeaderCollapsed ? 'pt-16 sm:pt-16' : ''}`}>
+        <div className="mb-4"><OrderDelayAlerts orders={orders} now={stageNow} storeId={storeSettings.storeId} onOpenOrder={setDetailOrderId} muted={isMuted}/></div>
         
         {/* ABA 1: KANBAN DE PEDIDOS */}
         {activeTab === 'customers' && <CustomerAdminPanel getHeaders={getAdminHeaders} />}
@@ -1433,16 +1494,12 @@ export default function AdminDashboardPage() {
 
                 <button
                   type="button"
-                  onClick={() => {
-                    const next = !isHeaderCollapsed;
-                    setIsHeaderCollapsed(next);
-                    localStorage.setItem('novaesweb_kitchen_mode', String(next));
-                  }}
+                  onClick={isHeaderCollapsed ? leaveTvMode : enterTvMode}
                   className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold flex items-center gap-1.5 transition border border-zinc-700/60"
-                  title="Recolher topo para o Kanban ocupar toda a tela da cozinha"
+                  title="Exibir somente pedidos em tela cheia"
                 >
                   <Maximize2 className="w-3.5 h-3.5 text-zinc-400" />
-                  <span>{isHeaderCollapsed ? 'Restaurar Menu' : 'Modo Tela Cheia (Recolher Topo)'}</span>
+                  <span>{isHeaderCollapsed ? 'Sair do modo TV' : 'Modo TV · tela cheia'}</span>
                 </button>
               </div>
             </div>
@@ -1536,10 +1593,13 @@ export default function AdminDashboardPage() {
                       ) : (
                         colOrders.map((order) => {
                           const orderTimeMs = order.createdAtISO ? new Date(order.createdAtISO).getTime() : 0;
-                          const elapsedMins = orderTimeMs ? Math.max(0, Math.floor((Date.now() - orderTimeMs) / 60000)) : null;
+                          const elapsedMins = orderTimeMs && stageNow ? Math.max(0, Math.floor((stageNow - orderTimeMs) / 60000)) : null;
 
                           // Estilo Tematico por Coluna/Status
-                          const cardTheme = selectedOrderIds.includes(order.id)
+                          const delay = orderDelay(order, stageNow, orderAlarmSettings);
+                          const cardTheme = delay
+                            ? 'border-red-500 bg-red-950/70 shadow-lg shadow-red-950/50'
+                            : selectedOrderIds.includes(order.id)
                             ? 'border-red-600/90 bg-red-950/30 shadow-lg shadow-red-950/40'
                             : col.key === 'recebido'
                             ? 'border-blue-500/70 bg-gradient-to-b from-blue-950/35 to-zinc-900/95 shadow-lg shadow-blue-950/20 hover:border-blue-400'
@@ -1582,10 +1642,11 @@ export default function AdminDashboardPage() {
                                     : 'bg-zinc-800 text-zinc-300'
                                 }`}>
                                   <Clock className="w-2.5 h-2.5" />
-                                  <span>{elapsedMins} min</span>
+                                  <span>Total: {elapsedMins} min</span>
                                 </span>
                               )}
                             </div>
+                            <OrderDelayBadge order={order} now={stageNow} settings={orderAlarmSettings} />
                             <OrderStageTiming order={order} now={stageNow} />
                             {/* Checkbox de seleção para despacho em lote */}
                             {col.key === 'pronto' && order.dispatchStatus !== 'aguardando_aceite' && order.dispatchStatus !== 'aceito_aguardando_retirada' && (
@@ -3038,7 +3099,7 @@ export default function AdminDashboardPage() {
 
       {/* MODAL / DRAWER INTEGRADO DE DESPACHO (SELEÇÃO DE 1 OU MÚLTIPLOS PEDIDOS) */}
       {isDispatchDrawerOpen && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto animate-in fade-in duration-200">
+        <AdminModalLayer><div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto animate-in fade-in duration-200">
           <div className="bg-zinc-900 border border-zinc-700/80 rounded-3xl max-w-3xl w-full max-h-[92vh] flex flex-col shadow-2xl overflow-hidden my-auto">
             
             {/* Cabeçalho do Modal */}
@@ -3410,7 +3471,7 @@ export default function AdminDashboardPage() {
             </div>
 
           </div>
-        </div>
+        </div></AdminModalLayer>
       )}
       {/* MODAL FULL-SCREEN: NOVO PEDIDO COM ALARME SONORO E FILA EMPILHADA */}
       {pendingNewOrders.length > 0 && (() => {
@@ -3441,7 +3502,7 @@ export default function AdminDashboardPage() {
         };
 
         return (
-          <div className="fixed inset-0 z-50 flex flex-col items-center justify-center p-4 bg-black/90 backdrop-blur-md animate-fade-in">
+          <AdminModalLayer><div className="fixed inset-0 z-50 flex flex-col items-center justify-center p-4 bg-black/90 backdrop-blur-md animate-fade-in">
             {/* Header com Alarme Pulsante */}
             <div className="w-full max-w-xl text-center mb-3">
               <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-red-600/30 border border-red-500 text-red-300 text-sm font-black animate-pulse mb-2">
@@ -3456,6 +3517,7 @@ export default function AdminDashboardPage() {
             {/* Card Principal de Destaque */}
             <div className="w-full max-w-xl rounded-2xl bg-zinc-900 border-2 border-red-500 shadow-2xl shadow-red-600/40 overflow-hidden flex flex-col max-h-[75vh]">
               <div className="p-5 overflow-y-auto space-y-4 text-sm flex-1">
+                <OrderDelayBadge order={topOrder} now={stageNow} settings={orderAlarmSettings} />
                 {/* Cliente & Telefone */}
                 <div className="flex items-start justify-between gap-3 pb-3 border-b border-zinc-800">
                   <div>
@@ -3586,7 +3648,7 @@ export default function AdminDashboardPage() {
                 <span>{isMuted ? 'Mudo (30s)' : 'Pausar Som'}</span>
               </button>
             </div>
-          </div>
+          </div></AdminModalLayer>
         );
       })()}
 
@@ -3638,7 +3700,7 @@ export default function AdminDashboardPage() {
         };
 
         return (
-          <div
+          <AdminModalLayer><div
             className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
             onClick={() => setDetailOrderId(null)}
           >
@@ -3845,18 +3907,18 @@ export default function AdminDashboardPage() {
                 </button>
               </div>
             </div>
-          </div>
+          </div></AdminModalLayer>
         );
       })()}
 
       {/* MODAL PERSONALIZADO DE CANCELAMENTO DE PEDIDO (SEM USAR PROMPT) */}
       {orderToCancel && (
-        <div
-          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in"
+        <AdminModalLayer><div
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto animate-in fade-in"
           onClick={() => !isCancelingOrder && setOrderToCancel(null)}
         >
           <div
-            className="bg-zinc-900 border border-zinc-700/80 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4"
+            className="bg-zinc-900 border border-zinc-700/80 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4 max-h-[90dvh] overflow-y-auto my-auto"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
@@ -3913,7 +3975,7 @@ export default function AdminDashboardPage() {
               </button>
             </div>
           </div>
-        </div>
+        </div></AdminModalLayer>
       )}
 
     </div>
