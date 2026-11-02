@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import { Bell, X } from 'lucide-react';
+import { createPortal } from 'react-dom';
 import type { StoreNotice } from '@/lib/site-notifications';
 
 export default function StoreNotificationCenter({getHeaders,onOpenOrder}:{getHeaders:()=>Record<string,string>;onOpenOrder:(id:string)=>void}) {
@@ -56,6 +57,6 @@ export default function StoreNotificationCenter({getHeaders,onOpenOrder}:{getHea
         {error&&<p role="status" className="mt-3 text-xs text-amber-300">{error}</p>}
       </section>}
     </div>
-    {toast&&<aside role="status" aria-live="polite" className="fixed left-3 right-3 top-3 z-[75] rounded-2xl border border-emerald-700 bg-zinc-950 p-4 shadow-xl sm:left-auto sm:w-96"><div className="flex items-start justify-between gap-3"><button type="button" onClick={()=>openOrder(toast)} className="text-left text-sm font-semibold text-white">{toast.message}<span className="mt-1 block text-xs text-zinc-400">{new Date(toast.at).toLocaleTimeString('pt-BR')} · Ver pedido</span></button><button aria-label="Fechar aviso" type="button" onClick={()=>setToast(null)} className="min-h-8 min-w-8 text-white">×</button></div></aside>}
+    {toast&&typeof document!=='undefined'&&createPortal(<aside role="status" aria-live="polite" className="fixed left-3 right-3 top-3 z-[75] rounded-2xl border border-emerald-700 bg-zinc-950 p-4 shadow-xl sm:left-auto sm:w-96"><div className="flex items-start justify-between gap-3"><button type="button" onClick={()=>openOrder(toast)} className="text-left text-sm font-semibold text-white">{toast.message}<span className="mt-1 block text-xs text-zinc-400">{new Date(toast.at).toLocaleTimeString('pt-BR')} · Ver pedido</span></button><button aria-label="Fechar aviso" type="button" onClick={()=>setToast(null)} className="min-h-8 min-w-8 text-white">×</button></div></aside>,document.body)}
   </>;
 }
