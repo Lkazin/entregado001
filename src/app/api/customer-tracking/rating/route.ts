@@ -82,6 +82,7 @@ export async function GET(req: NextRequest) {
       { headers }
     );
   } catch (err: any) {
+    console.error('[rating route catch]', err);
     return NextResponse.json(
       { success: false, error: 'Não foi possível consultar a avaliação no momento.' },
       { status: 500, headers }
@@ -198,21 +199,50 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Também verifica no estado JSON caso haja divergência
-    if (context.order.rating) {
+    // Também verifica no estado JSON e no índice de avaliações caso haja divergência
+    const rawStoreRatings = state.ratingsByStore?.[storeKey];
+    const storeRatingsList: any[] = Array.isArray(rawStoreRatings)
+      ? rawStoreRatings
+      : typeof rawStoreRatings === 'object' && rawStoreRatings !== null
+      ? Object.values(rawStoreRatings)
+      : [];
+    const stateRating = context.order.rating || storeRatingsList.find((r) => r?.orderId === orderId);
+
+    if (stateRating) {
       return NextResponse.json(
         {
           success: false,
           error: 'Este pedido já foi avaliado anteriormente.',
           alreadyRated: true,
-          rating: context.order.rating,
+          rating: {
+            stars: stateRating.orderStars || stateRating.stars,
+            orderStars: stateRating.orderStars || stateRating.stars,
+            driverStars: stateRating.driverStars ?? null,
+            comment: stateRating.comment ?? null,
+            driverName: stateRating.driverName || driverName,
+            orderNumber: stateRating.orderNumber || orderNumber,
+            ratedAt: stateRating.ratedAt || stateRating.createdAt || stateRating.created_at,
+          },
         },
         { status: 409, headers }
       );
     }
 
-    // 6. Gravação na fonte autoritativa (tabela order_delivery_ratings) com tratamento explícito de error
     const nowIso = new Date().toISOString();
+    const ratingObj = {
+      stars: orderStars,
+      orderStars,
+      driverStars: driverStars ?? null,
+      comment: comment || null,
+      driverName: driverName || null,
+      driverId: driverId ? String(driverId) : null,
+      orderNumber: orderNumber,
+      ratedAt: nowIso,
+    };
+
+    // 6. Gravação na tabela relacional (quando disponível) e tratamento resiliente de ausência de tabela
+    let dbPersisted = false;
+    let isTableMissing = false;
     const insertPayload: any = {
       order_id: orderId,
       order_number: orderNumber,
@@ -273,7 +303,9 @@ export async function POST(req: NextRequest) {
       insertErr = fallbackRes.error;
     }
 
-    if (insertErr) {
+    if (!insertErr) {
+      dbPersisted = true;
+    } else {
       // Conflito de concorrência: duas solicitações competiram e a outra venceu
       if (insertErr.code === '23505') {
         const { data: winner } = await supabaseAdmin
@@ -303,26 +335,28 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      // Falha real de persistência: NÃO retorna sucesso falso
-      console.error('Falha ao persistir avaliação no banco:', insertErr);
-      return NextResponse.json(
-        { success: false, error: 'Não foi possível registrar a avaliação no momento. Tente novamente mais tarde.' },
-        { status: 500, headers }
+      // Detecta se a tabela relacional ainda não foi criada no Supabase remoto
+      isTableMissing = Boolean(
+        insertErr.code === 'PGRST205' ||
+        insertErr.code === '42P01' ||
+        insertErr.message?.includes('schema cache') ||
+        insertErr.message?.includes('does not exist')
       );
+
+      if (isTableMissing) {
+        console.info('[rating] Tabela relacional order_delivery_ratings ausente no schema cache; persistência autoritativa mantida via driver_logistics_state.');
+      } else {
+        // Falha real de banco em tabela existente: rejeita sem sucesso falso
+        console.error('Falha ao persistir avaliação no banco:', insertErr);
+        return NextResponse.json(
+          { success: false, error: 'Não foi possível registrar a avaliação no momento. Tente novamente mais tarde.' },
+          { status: 500, headers }
+        );
+      }
     }
 
-    const ratingObj = {
-      stars: inserted?.order_stars || inserted?.stars || orderStars,
-      orderStars: inserted?.order_stars || inserted?.stars || orderStars,
-      driverStars: inserted?.driver_stars !== undefined ? inserted.driver_stars : driverStars,
-      comment: inserted?.comment !== undefined ? inserted.comment : comment,
-      driverName: inserted?.driver_name || driverName,
-      driverId: driverId ? String(driverId) : null,
-      orderNumber: inserted?.order_number || orderNumber,
-      ratedAt: inserted?.created_at || nowIso,
-    };
-
-    // 7. Projeção atômica no estado de logística para sincronia instantânea
+    // 7. Persistência atômica no estado de logística (driver_logistics_state)
+    let statePersisted = false;
     try {
       const { state: freshState, revision: freshRev } = await readLogisticsState();
       if (!freshState.orderProjectionsByStore) freshState.orderProjectionsByStore = {};
@@ -331,24 +365,50 @@ export async function POST(req: NextRequest) {
       const proj =
         freshState.orderProjectionsByStore[storeKey][orderId] || { ...context.order };
 
+      // Se já avaliado concorrentemente no intervalo
+      if (proj.rating) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'Este pedido já foi avaliado anteriormente.',
+            alreadyRated: true,
+            rating: proj.rating,
+          },
+          { status: 409, headers }
+        );
+      }
+
       proj.rating = ratingObj;
       proj.orderProjectionUpdatedAt = new Date().toISOString();
       freshState.orderProjectionsByStore[storeKey][orderId] = proj;
 
-      // Armazena no índice de avaliações da loja no estado
+      // Armazena no índice de avaliações da loja no estado (compatível com array e map)
       freshState.ratingsByStore ||= {};
-      freshState.ratingsByStore[storeKey] ||= [];
-      const storeRatings = freshState.ratingsByStore[storeKey];
-      const existIdx = storeRatings.findIndex((r: any) => r.orderId === orderId);
-      if (existIdx >= 0) {
-        storeRatings[existIdx] = { ...ratingObj, orderId, storeId };
+      if (Array.isArray(freshState.ratingsByStore[storeKey])) {
+        const storeRatings = freshState.ratingsByStore[storeKey];
+        const existIdx = storeRatings.findIndex((r: any) => r?.orderId === orderId);
+        if (existIdx >= 0) {
+          storeRatings[existIdx] = { ...ratingObj, orderId, storeId };
+        } else {
+          storeRatings.push({ ...ratingObj, orderId, storeId });
+        }
+      } else if (typeof freshState.ratingsByStore[storeKey] === 'object' && freshState.ratingsByStore[storeKey] !== null) {
+        freshState.ratingsByStore[storeKey][orderId] = { ...ratingObj, orderId, storeId };
       } else {
-        storeRatings.push({ ...ratingObj, orderId, storeId });
+        freshState.ratingsByStore[storeKey] = [{ ...ratingObj, orderId, storeId }];
       }
 
       await writeLogisticsState(freshState, freshRev);
-    } catch {
-      // Projeção com recuperação definida: a gravação autoritativa no banco foi concluída
+      statePersisted = true;
+    } catch (stateErr: any) {
+      console.warn('[rating] Erro ao gravar no state-store:', stateErr);
+    }
+
+    if (!dbPersisted && !statePersisted) {
+      return NextResponse.json(
+        { success: false, error: 'Não foi possível registrar a avaliação no momento. Tente novamente mais tarde.' },
+        { status: 500, headers }
+      );
     }
 
     return NextResponse.json(
@@ -360,6 +420,7 @@ export async function POST(req: NextRequest) {
       { headers }
     );
   } catch (err: any) {
+    console.error('[rating route catch]', err);
     return NextResponse.json(
       { success: false, error: 'Ocorreu um erro inesperado ao registrar sua avaliação.' },
       { status: 500, headers }

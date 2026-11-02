@@ -310,3 +310,99 @@ test('8. Aplicativo do Motoboy não tem tela/seção de feedback e opera entrega
   assert.equal(historyComponentCode.includes('Ganhos Acumulados no Turno'), true);
   assert.equal(historyComponentCode.includes('Últimas Entregas Realizadas'), true);
 });
+
+test('9. Resiliência: Avaliação é salva com sucesso mesmo se a tabela order_delivery_ratings não existir no banco (PGRST205)', async () => {
+  let storedState = createMockState();
+  let storedRev = 1;
+
+  const mockSupabaseAdmin = {
+    from: (table) => ({
+      select: () => ({
+        eq: () => ({
+          maybeSingle: async () => ({
+            data: null,
+            error: { code: 'PGRST205', message: "Could not find the table 'public.order_delivery_ratings' in the schema cache" },
+          }),
+        }),
+      }),
+      insert: () => ({
+        select: () => ({
+          single: async () => ({
+            data: null,
+            error: { code: 'PGRST205', message: "Could not find the table 'public.order_delivery_ratings' in the schema cache" },
+          }),
+        }),
+      }),
+    }),
+  };
+
+  const routeContext = {
+    exports: {},
+    Date,
+    Number,
+    NextResponse: {
+      json: (data, opts = {}) => ({ status: opts.status || 200, json: async () => data, body: data }),
+    },
+    console,
+    require: (id) => {
+      if (id === 'next/server') return { NextResponse: routeContext.NextResponse };
+      if (id === '@/lib/supabase/server') return { supabaseAdmin: mockSupabaseAdmin };
+      if (id === '@/lib/logistics/state-store') {
+        return {
+          readLogisticsState: async () => ({ state: storedState, revision: storedRev }),
+          writeLogisticsState: async (newState, rev) => {
+            storedState = newState;
+            storedRev++;
+            return storedRev;
+          },
+        };
+      }
+      if (id === '@/lib/logistics/customer-tracking-policy') {
+        return {
+          trackingContext: (state, token) => {
+            const order = state.orderProjectionsByStore[STORE_A]?.ped1;
+            const assignment = state.assignments[0];
+            return { order, storeId: STORE_A, assignment, driver: { name: assignment.driverName, id: assignment.driverId } };
+          },
+        };
+      }
+      if (id === '@/lib/logistics/order-timeline') {
+        return { timelineStoreKey: (s) => s || STORE_A };
+      }
+      throw new Error(`Unexpected import: ${id}`);
+    },
+  };
+
+  const ratingRouteCode = fs.readFileSync('src/app/api/customer-tracking/rating/route.ts', 'utf8');
+  vm.runInNewContext(compile('src/app/api/customer-tracking/rating/route.ts'), routeContext);
+
+  const { POST } = routeContext.exports;
+  const res = await POST({
+    json: async () => ({
+      token: TOKEN_1,
+      orderStars: 5,
+      driverStars: 5,
+      comment: 'Massa perfeita e entrega muito rápida!',
+    }),
+  });
+
+  if (res.status !== 200) {
+    console.error('ERRO RETORNADO NO TESTE 9:', res.status, res.body);
+  }
+
+  // NÃO deve falhar com 500 mesmo com PGRST205!
+  assert.equal(res.status, 200, 'Deve retornar HTTP 200 mesmo sem a tabela física no Supabase');
+  assert.equal(res.body.success, true);
+  assert.equal(res.body.rating.orderStars, 5);
+  assert.equal(res.body.rating.comment, 'Massa perfeita e entrega muito rápida!');
+
+  // Deve ter persistido no driver_logistics_state
+  assert.ok(storedState.orderProjectionsByStore[STORE_A].ped1.rating);
+  assert.equal(storedState.orderProjectionsByStore[STORE_A].ped1.rating.stars, 5);
+  const storeRatingsTotal = Array.isArray(storedState.ratingsByStore[STORE_A])
+    ? storedState.ratingsByStore[STORE_A].length
+    : Object.keys(storedState.ratingsByStore[STORE_A] || {}).length;
+  assert.equal(storeRatingsTotal, 1);
+});
+
+
