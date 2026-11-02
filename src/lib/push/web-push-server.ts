@@ -26,15 +26,23 @@ export interface PushNotificationPayload {
   data?: Record<string, any>;
 }
 
+// Chaves VAPID padrão do sistema NovaesWeb (para fallback resiliente quando variáveis de ambiente não forem injetadas no host)
+export const DEFAULT_VAPID_PUBLIC_KEY =
+  'BI07ZQtHW3jjOz1BoDHw8QXL1tjmF1ZxVln2MZSUClRE4Bb4BOU-ahEEqUQkVK9JSeV4ja9enmR3CErXrviab3c';
+export const DEFAULT_VAPID_PRIVATE_KEY =
+  'NtO_xCaK1aYyWdCxiCICxuM_2TRZtlKi8uVETK7uEY4';
+export const DEFAULT_VAPID_SUBJECT =
+  'mailto:contato@novaesweb.com.br';
+
 // Inicializa VAPID caso as chaves estejam presentes no ambiente
 let vapidConfigured = false;
 
 function ensureVapidConfig(): boolean {
   if (vapidConfigured) return true;
 
-  const publicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
-  const privateKey = process.env.VAPID_PRIVATE_KEY;
-  const subject = process.env.VAPID_SUBJECT || 'mailto:contato@novaesweb.com.br';
+  const publicKey = (process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || DEFAULT_VAPID_PUBLIC_KEY).trim();
+  const privateKey = (process.env.VAPID_PRIVATE_KEY || DEFAULT_VAPID_PRIVATE_KEY).trim();
+  const subject = (process.env.VAPID_SUBJECT || DEFAULT_VAPID_SUBJECT).trim();
 
   if (!publicKey || !privateKey) {
     return false;
@@ -51,7 +59,7 @@ function ensureVapidConfig(): boolean {
 }
 
 export function getVapidPublicKey(): string {
-  return (process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || '').trim();
+  return (process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || DEFAULT_VAPID_PUBLIC_KEY).trim();
 }
 
 export function isWebPushEnabled(): boolean {
