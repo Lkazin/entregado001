@@ -10,6 +10,16 @@ export function timelineStoreKey(value: unknown): string {
   return !id || aliases.has(id) ? 'store_bella_pizza' : id;
 }
 
+export function normalizeOrderStatus(rawStatus: unknown): 'recebido' | 'preparando' | 'pronto' | 'em_entrega' | 'concluido' | 'cancelado' {
+  const s = String(rawStatus || '').toLowerCase().trim();
+  if (['concluido', 'concluído', 'entregue', 'delivered', 'completed', 'finished'].includes(s)) return 'concluido';
+  if (['cancelado', 'canceled', 'cancelled'].includes(s)) return 'cancelado';
+  if (['em_entrega', 'in_transit', 'em_rota', 'picked_up'].includes(s)) return 'em_entrega';
+  if (['pronto', 'despacho', 'retirada', 'waiting_pickup', 'ready', 'assigned', 'accepted'].includes(s)) return 'pronto';
+  if (['preparando', 'em_preparo', 'preparing'].includes(s)) return 'preparando';
+  return 'recebido';
+}
+
 export function mergeStageHistory(...lists: any[]): any[] {
   const unique = new Map<string, any>();
   for (const list of lists) for (const event of Array.isArray(list) ? list : []) {
@@ -116,7 +126,7 @@ export function projectStoreOrders(orders: any[], state: any, storeId: string): 
         : projected.status;
 
       const lifecycle = projected.orderProjectionUpdatedAt ? Object.fromEntries(
-        ['status','dispatchStatus','driverId','driverName','assignedDriverName','offerGroupId','acceptedAt','pickedUpAt','deliveredAt','canceledAt','cancellationReason','orderProjectionUpdatedAt']
+        ['status','dispatchStatus','driverId','driverName','assignedDriverName','offerGroupId','acceptedAt','pickedUpAt','deliveredAt','canceledAt','cancellationReason','orderProjectionUpdatedAt','rating']
           .filter(key => Object.prototype.hasOwnProperty.call(projected,key)).map(key=>[key,projected[key]])
       ) : {};
       map.set(String(projected.id), {

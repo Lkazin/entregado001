@@ -1,9 +1,10 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import CustomerDeliveryTracking from '@/components/CustomerDeliveryTracking';
 import { useParams } from 'next/navigation';
+import { normalizeOrderStatus } from '@/lib/logistics/order-timeline';
 import {
   Flame,
   Clock,
@@ -17,37 +18,35 @@ import {
   PackageCheck,
   ChefHat,
   Receipt,
-  Sparkles
+  Sparkles,
+  Star,
+  WifiOff,
+  RefreshCw,
+  ServerOff
 } from 'lucide-react';
-
-/**
- * Normaliza os status existentes no ecossistema (entregado, painel-moto, supabase)
- * para os estados visuais padronizados da página de acompanhamento.
- */
-function normalizeOrderStatus(rawStatus: unknown): 'recebido' | 'preparando' | 'pronto' | 'em_entrega' | 'concluido' | 'cancelado' {
-  const s = String(rawStatus || '').toLowerCase().trim();
-  if (['concluido', 'concluído', 'entregue', 'delivered', 'completed', 'finished'].includes(s)) return 'concluido';
-  if (['cancelado', 'canceled', 'cancelled'].includes(s)) return 'cancelado';
-  if (['em_entrega', 'in_transit', 'em_rota', 'picked_up'].includes(s)) return 'em_entrega';
-  if (['pronto', 'despacho', 'retirada', 'waiting_pickup', 'ready', 'assigned', 'accepted'].includes(s)) return 'pronto';
-  if (['preparando', 'em_preparo', 'preparing'].includes(s)) return 'preparando';
-  return 'recebido';
-}
 
 function mapOrderData(found: any, prev: any, isServerConfirmed: boolean) {
   const normStatus = normalizeOrderStatus(found.status);
   const isFinished = normStatus === 'concluido';
-  const deliveredAt = found.deliveredAt || prev?.deliveredAt || (isFinished && isServerConfirmed ? new Date().toISOString() : null);
+
+  // deliveredAt oficial do servidor (nunca inventado pelo cliente)
+  const deliveredAt = found.deliveredAt || (prev?.isServerConfirmed && prev?.status === 'concluido' ? prev?.deliveredAt : null);
+
+  // Instante em que o cliente confirmou com o servidor (referência temporária para transição se deliveredAt estiver ausente)
+  const serverConfirmedAt = prev?.serverConfirmedAt || (isFinished && isServerConfirmed ? Date.now() : null);
 
   return {
     ...(prev || {}),
+    trackingToken: found.trackingToken || prev?.trackingToken || '',
     orderNumber: String(found.orderNumber || '').replace('#', ''),
     status: normStatus,
     dispatchStatus: found.dispatchStatus || (isFinished ? 'entregue' : 'disponivel'),
     deliveredAt,
+    serverConfirmedAt,
     pickedUpAt: found.pickedUpAt || prev?.pickedUpAt || null,
     driverName: found.driverName || found.assignedDriverName || prev?.driverName || null,
     isServerConfirmed,
+    rating: found.rating || prev?.rating || null,
     customer: {
       name: found.customerName || found.customer?.name || prev?.customer?.name || '',
       phone: found.phone || found.customer?.phone || prev?.customer?.phone || ''
@@ -80,158 +79,293 @@ function mapOrderData(found: any, prev: any, isServerConfirmed: boolean) {
 
 export default function OrderTrackingPage() {
   const params = useParams();
-  const token = params?.token as string;
+  const token = typeof params?.token === 'string' ? params.token.trim() : '';
 
   const [order, setOrder] = useState<any>(null);
+  const [orderToken, setOrderToken] = useState<string>('');
   const [isLoading, setIsLoading] = useState(true);
+  const [notFound, setNotFound] = useState(false);
   const [now, setNow] = useState<number>(Date.now());
+  const [lastConfirmedAt, setLastConfirmedAt] = useState<Date | null>(null);
+  const [connectionState, setConnectionState] = useState<'connected' | 'offline' | 'server_error'>('connected');
 
-  const inFlightRequest = useRef<AbortController | null>(null);
+  // Estado da Avaliação Opcional
+  const [ratingState, setRatingState] = useState<{
+    rated: boolean;
+    stars: number;
+    hoverStars: number;
+    submitting: boolean;
+    driverName?: string;
+    message?: string | null;
+    error?: string | null;
+  }>({
+    rated: false,
+    stars: 0,
+    hoverStars: 0,
+    submitting: false,
+    message: null,
+    error: null
+  });
+
+  // Referências para controle de ciclo de vida, single-flight e descarte de dados
+  const inFlightController = useRef<AbortController | null>(null);
+  const isQueryInFlight = useRef(false);
   const requestSeq = useRef(0);
   const currentTokenRef = useRef(token);
   currentTokenRef.current = token;
   const pollTimerRef = useRef<NodeJS.Timeout | null>(null);
   const isServerCompletedRef = useRef(false);
 
+  // 1. Efeito Principal: Limpa imediatamente dados visíveis ao trocar o token e inicia o polling
   useEffect(() => {
-    isServerCompletedRef.current = false;
+    // Nova geração de requisição: invalida imediatamente qualquer execução anterior
+    const generationSeq = ++requestSeq.current;
     currentTokenRef.current = token;
+    isServerCompletedRef.current = false;
 
-    // 1. Carga provisória inicial do localStorage (apenas na montagem ou troca de token)
-    if (typeof window !== 'undefined' && token) {
+    // Aborta consulta em andamento e libera imediatamente o bloqueio para o novo token
+    inFlightController.current?.abort();
+    inFlightController.current = null;
+    isQueryInFlight.current = false;
+
+    if (pollTimerRef.current) {
+      clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+
+    // Limpeza imediata de dados visíveis do pedido anterior
+    setOrder(null);
+    setOrderToken(token);
+    setIsLoading(true);
+    setNotFound(false);
+    setLastConfirmedAt(null);
+    setConnectionState(typeof navigator !== 'undefined' && !navigator.onLine ? 'offline' : 'connected');
+    setRatingState({
+      rated: false,
+      stars: 0,
+      hoverStars: 0,
+      submitting: false,
+      message: null,
+      error: null
+    });
+
+    if (!token) {
+      setIsLoading(false);
+      setNotFound(true);
+      return;
+    }
+
+    // Carga inicial provisória do localStorage com correspondência EXATA de trackingToken
+    if (typeof window !== 'undefined') {
       try {
         const cached = localStorage.getItem('novaesweb_orders');
         if (cached) {
           const list = JSON.parse(cached);
-          const found = Array.isArray(list) ? list.find(
-            (o: any) =>
-              o.trackingToken === token ||
-              o.id === token ||
-              String(o.orderNumber).replace('#', '') === token.replace('#', '')
-          ) : null;
-          if (found) {
+          const found = Array.isArray(list) ? list.find((o: any) => o.trackingToken === token) : null;
+          if (found && currentTokenRef.current === token && generationSeq === requestSeq.current) {
             const provStatus = normalizeOrderStatus(found.status);
-            // Conclusão confirmada exige o backend; cache provisório não assume entrega
-            setOrder((prev: any) => {
-              if (prev?.isServerConfirmed) return prev;
-              return mapOrderData(
+            // Cache provisório nunca antecipa confirmação de entrega do backend
+            setOrder(
+              mapOrderData(
                 { ...found, status: provStatus === 'concluido' ? 'em_entrega' : provStatus },
-                prev,
+                null,
                 false
-              );
-            });
+              )
+            );
+            setOrderToken(token);
             setIsLoading(false);
           }
         }
       } catch {}
     }
 
-    // 2. Consulta autoritativa ao servidor com serialização e proteção de race conditions
-    async function loadOrder() {
-      if (!token || isServerCompletedRef.current) {
-        if (pollTimerRef.current) {
-          clearInterval(pollTimerRef.current);
-          pollTimerRef.current = null;
-        }
-        return;
-      }
-
-      // Serialização: cancela requisição anterior se ainda estiver em andamento
-      inFlightRequest.current?.abort();
-      const controller = new AbortController();
-      inFlightRequest.current = controller;
+    // Mecanismo de Consulta Única (Single-Flight) com Timeout Completo (headers + body)
+    async function runQuery() {
+      const thisToken = token;
       const thisSeq = ++requestSeq.current;
-      const requestedToken = token;
+
+      if (!thisToken || isServerCompletedRef.current) return;
+      if (currentTokenRef.current !== thisToken) return;
+
+      // Impede consultas simultâneas para o MESMO pedido
+      if (isQueryInFlight.current) return;
+      isQueryInFlight.current = true;
+
+      const controller = new AbortController();
+      inFlightController.current = controller;
+
+      // Timeout completo de 8 segundos cobrindo cabeçalhos E download do JSON
+      const timeoutId = setTimeout(() => {
+        controller.abort();
+      }, 8000);
 
       try {
-        const res = await fetch(`/api/orders?token=${encodeURIComponent(requestedToken)}&t=${Date.now()}`, {
+        const res = await fetch(`/api/orders?token=${encodeURIComponent(thisToken)}&t=${Date.now()}`, {
           signal: controller.signal,
           cache: 'no-store'
         });
 
-        // Descarte de respostas atrasadas, canceladas ou de outro token
-        if (controller.signal.aborted || thisSeq !== requestSeq.current || requestedToken !== currentTokenRef.current) {
+        // Descarte se fora de sequência ou token alterado
+        if (thisSeq !== requestSeq.current || thisToken !== currentTokenRef.current) {
           return;
         }
 
-        if (res.ok) {
-          const data = await res.json();
-          const list = Array.isArray(data.orders) ? data.orders : data.order ? [data.order] : [];
-          // Encontra estritamente pelo trackingToken deste pedido (ou id se admin)
-          const found = list.find(
-            (o: any) =>
-              o.trackingToken === requestedToken ||
-              o.id === requestedToken ||
-              String(o.orderNumber).replace('#', '') === requestedToken.replace('#', '')
-          );
+        // Timeout da requisição
+        if (controller.signal.aborted) {
+          const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+          setConnectionState(isOffline ? 'offline' : 'server_error');
+          return;
+        }
 
-          if (found && requestedToken === currentTokenRef.current && thisSeq === requestSeq.current) {
-            const normStatus = normalizeOrderStatus(found.status);
-            const isFinished = normStatus === 'concluido';
-            const isCancelled = normStatus === 'cancelado';
+        if (res.status === 404) {
+          if (thisSeq === requestSeq.current && thisToken === currentTokenRef.current) {
+            setOrder(null);
+            setNotFound(true);
+            setIsLoading(false);
+            setConnectionState('connected');
+          }
+          return;
+        }
 
-            if (isFinished || isCancelled) {
-              isServerCompletedRef.current = true;
-              if (pollTimerRef.current) {
-                clearInterval(pollTimerRef.current);
-                pollTimerRef.current = null;
-              }
-            }
+        if (!res.ok) {
+          if (thisSeq === requestSeq.current && thisToken === currentTokenRef.current) {
+            const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+            setConnectionState(isOffline ? 'offline' : 'server_error');
+          }
+          return;
+        }
 
-            setOrder((prev: any) => {
-              // Prevenção contra regressão por resposta desordenada ou cache antigo
-              if (prev?.isServerConfirmed && prev?.status === 'concluido' && normStatus !== 'concluido') {
-                return prev;
-              }
-              return mapOrderData(found, prev, true);
-            });
+        // Leitura completa do JSON protegida pelo mesmo timeout
+        const data = await res.json();
+
+        // Revalidação estrita após leitura do corpo JSON
+        if (thisSeq !== requestSeq.current || thisToken !== currentTokenRef.current) {
+          return;
+        }
+
+        if (controller.signal.aborted) {
+          const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+          setConnectionState(isOffline ? 'offline' : 'server_error');
+          return;
+        }
+
+        const list = Array.isArray(data.orders) ? data.orders : data.order ? [data.order] : [];
+        const found = list.find((o: any) => o.trackingToken === thisToken);
+
+        if (!found) {
+          if (thisSeq === requestSeq.current && thisToken === currentTokenRef.current) {
+            setOrder(null);
+            setNotFound(true);
+            setIsLoading(false);
+            setConnectionState('connected');
+          }
+          return;
+        }
+
+        setNotFound(false);
+        setConnectionState('connected');
+        setLastConfirmedAt(new Date());
+
+        const normStatus = normalizeOrderStatus(found.status);
+        const isFinished = normStatus === 'concluido';
+        const isCancelled = normStatus === 'cancelado';
+
+        if (isFinished || isCancelled) {
+          isServerCompletedRef.current = true;
+          if (pollTimerRef.current) {
+            clearTimeout(pollTimerRef.current);
+            pollTimerRef.current = null;
           }
         }
 
-        // 3. Atualiza dados do motoboy se ainda estiver ativo (e não concluído/cancelado)
-        if (!isServerCompletedRef.current) {
-          try {
-            const trackRes = await fetch(`/api/v1/logistics/tracking-client-subscribe?token=${encodeURIComponent(requestedToken)}&t=${Date.now()}`, {
-              signal: controller.signal,
-              cache: 'no-store'
-            });
-            if (trackRes.ok && thisSeq === requestSeq.current && requestedToken === currentTokenRef.current && !isServerCompletedRef.current) {
-              const trackData = await trackRes.json();
-              if (trackData.success && trackData.driver?.name) {
-                setOrder((prev: any) => {
-                  if (!prev || prev.status === 'concluido' || prev.status === 'cancelado') return prev;
-                  return {
-                    ...prev,
-                    driverName: trackData.driver.name
-                  };
-                });
-              }
-            }
-          } catch {}
+        setOrder((prev: any) => {
+          // Proteção contra regressão EXCLUSIVA do mesmo pedido
+          if (prev?.trackingToken === thisToken && prev?.isServerConfirmed && prev?.status === 'concluido' && normStatus !== 'concluido') {
+            return prev;
+          }
+          return mapOrderData(found, prev?.trackingToken === thisToken ? prev : null, true);
+        });
+        setOrderToken(thisToken);
+
+        // Atualiza estado de avaliação se já existir no pedido
+        if (found.rating) {
+          setRatingState((prev) => ({
+            ...prev,
+            rated: true,
+            stars: found.rating.stars,
+            driverName: found.rating.driverName || found.driverName || prev.driverName
+          }));
         }
+
       } catch (err: any) {
-        if (err?.name !== 'AbortError') {
-          console.warn('Erro ao atualizar status do pedido:', err);
+        if (thisToken === currentTokenRef.current && thisSeq === requestSeq.current) {
+          const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+          setConnectionState(isOffline ? 'offline' : 'server_error');
         }
       } finally {
-        if (inFlightRequest.current === controller) inFlightRequest.current = null;
-        setIsLoading(false);
+        // Limpa o timeout cobrindo fetch e json
+        clearTimeout(timeoutId);
+
+        // Libera recursos e agenda próximo polling SOMENTE se esta execução ainda for a geração ativa
+        if (thisSeq === requestSeq.current && thisToken === currentTokenRef.current) {
+          isQueryInFlight.current = false;
+          if (inFlightController.current === controller) {
+            inFlightController.current = null;
+          }
+          setIsLoading(false);
+
+          // Agenda próxima consulta 3 segundos após o término da anterior
+          if (!isServerCompletedRef.current) {
+            if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+            pollTimerRef.current = setTimeout(() => {
+              if (thisToken === currentTokenRef.current && !isServerCompletedRef.current) {
+                void runQuery();
+              }
+            }, 3000);
+          }
+        }
       }
     }
 
-    if (token) {
-      void loadOrder();
-      const interval = setInterval(loadOrder, 3000);
-      pollTimerRef.current = interval;
-      return () => {
-        clearInterval(interval);
-        pollTimerRef.current = null;
-        inFlightRequest.current?.abort();
-      };
+    void runQuery();
+
+    // Listeners de reconexão e volta à aba (atualizam imediatamente sem criar duplicatas)
+    function handleOnline() {
+      setConnectionState('connected');
+      if (!isServerCompletedRef.current && !isQueryInFlight.current) {
+        void runQuery();
+      }
     }
+    function handleOffline() {
+      setConnectionState('offline');
+    }
+    function handleVisibility() {
+      if (document.visibilityState === 'visible' && !isServerCompletedRef.current && !isQueryInFlight.current) {
+        void runQuery();
+      }
+    }
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', handleOnline);
+      window.addEventListener('offline', handleOffline);
+      document.addEventListener('visibilitychange', handleVisibility);
+    }
+
+    return () => {
+      if (pollTimerRef.current) {
+        clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+      inFlightController.current?.abort();
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('online', handleOnline);
+        window.removeEventListener('offline', handleOffline);
+        document.removeEventListener('visibilitychange', handleVisibility);
+      }
+    };
   }, [token]);
 
-  // Lista dos 5 passos do pedido para acompanhamento visual do cliente
+  // Lista dos 5 passos do pedido
   const steps = [
     {
       key: 'recebido',
@@ -285,17 +419,22 @@ export default function OrderTrackingPage() {
     }
   ];
 
-  const isDelivered = order?.status === 'concluido' && order?.isServerConfirmed;
-  const isCanceled = order?.status === 'cancelado';
+  // Regras de Entrega Confirmada e Tempo Decorrido
+  const isDelivered = Boolean(order?.status === 'concluido' && order?.isServerConfirmed);
+  const isCanceled = Boolean(order?.status === 'cancelado');
+
+  // Referência de tempo: deliveredAt oficial do servidor. Se ausente/inválido, usa o instante de confirmação local
   const deliveredAtMs = order?.deliveredAt ? Date.parse(order.deliveredAt) : null;
-  const elapsedSinceDelivered = isDelivered && deliveredAtMs && Number.isFinite(deliveredAtMs)
-    ? Math.max(0, now - deliveredAtMs)
+  const timingReferenceMs = Number.isFinite(deliveredAtMs) ? deliveredAtMs : (order?.serverConfirmedAt || null);
+
+  const elapsedSinceDelivered = isDelivered && timingReferenceMs
+    ? Math.max(0, now - timingReferenceMs)
     : 0;
 
   // Substituição da área de acompanhamento após ~10s de entrega confirmada
   const showFinalThankYou = isDelivered && elapsedSinceDelivered >= 10000;
 
-  // Atualiza o relógio interno suavemente enquanto aguarda os 10s da entrega
+  // Atualiza o relógio interno a cada 500ms durante a contagem dos 10 segundos
   useEffect(() => {
     if (!isDelivered || showFinalThankYou) return;
     const timer = setInterval(() => {
@@ -303,6 +442,57 @@ export default function OrderTrackingPage() {
     }, 500);
     return () => clearInterval(timer);
   }, [isDelivered, showFinalThankYou]);
+
+  // Envio de Avaliação Opcional (1 a 5 estrelas) com descarte se o token mudar
+  const handleRate = useCallback(async (stars: number) => {
+    const rateToken = token;
+    const rateSeq = requestSeq.current;
+
+    if (!rateToken || ratingState.submitting || ratingState.rated) return;
+    setRatingState((prev) => ({ ...prev, submitting: true, error: null }));
+
+    try {
+      const res = await fetch('/api/customer-tracking/rating', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: rateToken, stars })
+      });
+
+      const data = await res.json();
+
+      // Descarte estrito se o token ou geração mudou durante o envio
+      if (rateToken !== currentTokenRef.current || rateSeq !== requestSeq.current) {
+        return;
+      }
+
+      if (res.ok && data.success) {
+        setRatingState((prev) => ({
+          ...prev,
+          rated: true,
+          stars,
+          driverName: data.rating?.driverName || prev.driverName,
+          submitting: false,
+          message: 'Obrigado pela sua avaliação!'
+        }));
+      } else {
+        setRatingState((prev) => ({
+          ...prev,
+          submitting: false,
+          rated: Boolean(data.alreadyRated),
+          stars: data.rating?.stars || prev.stars,
+          error: data.error || 'Não foi possível registrar a avaliação. Tente novamente.'
+        }));
+      }
+    } catch {
+      if (rateToken === currentTokenRef.current && rateSeq === requestSeq.current) {
+        setRatingState((prev) => ({
+          ...prev,
+          submitting: false,
+          error: 'Sem resposta do servidor ao registrar avaliação.'
+        }));
+      }
+    }
+  }, [token, ratingState.submitting, ratingState.rated]);
 
   if (isLoading) {
     return (
@@ -313,7 +503,34 @@ export default function OrderTrackingPage() {
     );
   }
 
-  if (!order) {
+  if (!order && !notFound && connectionState !== 'connected') {
+    return (
+      <div className="min-h-screen bg-zinc-950 text-white flex flex-col items-center justify-center p-4 text-center">
+        <div className="w-14 h-14 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-amber-400 mb-4">
+          {connectionState === 'offline' ? (
+            <WifiOff className="w-8 h-8 text-amber-400" />
+          ) : (
+            <ServerOff className="w-8 h-8 text-amber-400" />
+          )}
+        </div>
+        <h1 className="text-xl font-bold text-white">
+          {connectionState === 'offline' ? 'Sem conexão com a internet' : 'Servidor temporariamente indisponível'}
+        </h1>
+        <p className="text-sm text-zinc-400 mt-1 max-w-sm">
+          Aguardando reconexão para carregar os dados deste pedido.
+        </p>
+        <Link
+          href="/"
+          className="mt-6 px-5 py-2.5 rounded-xl bg-gradient-to-r from-pizza-gold-dark via-pizza-gold to-pizza-gold-light hover:brightness-110 text-white text-xs font-bold transition flex items-center gap-2"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          <span>Voltar ao Cardápio</span>
+        </Link>
+      </div>
+    );
+  }
+
+  if (notFound || !order || orderToken !== token) {
     return (
       <div className="min-h-screen bg-zinc-950 text-white flex flex-col items-center justify-center p-4 text-center">
         <div className="w-14 h-14 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-500 mb-4">
@@ -355,18 +572,49 @@ export default function OrderTrackingPage() {
             </div>
           </Link>
 
-          <Link
-            href="/"
-            className="text-xs text-zinc-400 hover:text-white flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800/50 hover:bg-zinc-800 transition border border-zinc-700/40"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            <span>Cardápio</span>
-          </Link>
+          <div className="flex items-center gap-3">
+            {/* Indicador Discreto de Última Atualização Confirmada */}
+            {lastConfirmedAt && connectionState === 'connected' && (
+              <span className="hidden sm:inline-flex items-center gap-1.5 text-[11px] text-zinc-500 font-medium">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                Atualizado às {lastConfirmedAt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+              </span>
+            )}
+
+            <Link
+              href="/"
+              className="text-xs text-zinc-400 hover:text-white flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800/50 hover:bg-zinc-800 transition border border-zinc-700/40"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              <span>Cardápio</span>
+            </Link>
+          </div>
         </div>
       </header>
 
       {/* Main Container */}
       <main className="flex-1 max-w-4xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
+
+        {/* Banner Discreto de Estado da Conexão */}
+        {connectionState === 'offline' && (
+          <div className="p-3.5 rounded-2xl bg-amber-950/60 border border-amber-800/50 flex items-center justify-between gap-3 text-xs text-amber-300 animate-fadeIn">
+            <div className="flex items-center gap-2">
+              <WifiOff className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>Sem conexão — aguardando atualização. Exibindo os últimos dados confirmados.</span>
+            </div>
+            <span className="text-[10px] text-amber-400/80 font-bold shrink-0">Offline</span>
+          </div>
+        )}
+
+        {connectionState === 'server_error' && (
+          <div className="p-3.5 rounded-2xl bg-zinc-900 border border-amber-800/40 flex items-center justify-between gap-3 text-xs text-zinc-300 animate-fadeIn">
+            <div className="flex items-center gap-2">
+              <ServerOff className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>Servidor temporariamente indisponível — aguardando atualização.</span>
+            </div>
+            <span className="text-[10px] text-zinc-500 font-medium shrink-0">Reconectando...</span>
+          </div>
+        )}
 
         {/* 1. SE CANCELADO: Exibe banner específico sem agradecimento de entrega */}
         {isCanceled ? (
@@ -389,21 +637,86 @@ export default function OrderTrackingPage() {
             <div className="w-16 h-16 rounded-2xl bg-emerald-950/80 border-2 border-emerald-500/60 flex items-center justify-center mx-auto text-emerald-400 shadow-xl shadow-emerald-950/50">
               <CheckCircle2 className="w-9 h-9" />
             </div>
+
             <div className="space-y-2 max-w-md mx-auto">
+              <span className="text-xs text-zinc-400 font-semibold uppercase tracking-wider block">
+                Pedido #{order.orderNumber}
+              </span>
               <h1 className="text-2xl sm:text-3xl font-black text-white">Pedido entregue!</h1>
               <p className="text-base text-zinc-300 font-medium">
                 Agradecemos pela sua compra e pela preferência.
               </p>
-              {order.deliveredAt && (
+              {/* Mostra "Entregue às HH:mm" utilizando o horário confirmado pelo servidor (sem inventar horário se ausente) */}
+              {order.deliveredAt && Number.isFinite(Date.parse(order.deliveredAt)) && (
                 <p className="text-xs text-zinc-500 font-medium">
                   Entregue às {new Date(order.deliveredAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
                 </p>
               )}
             </div>
-            <div className="pt-2">
+
+            {/* Avaliação Opcional de 1 a 5 Estrelas */}
+            <div className="p-5 rounded-2xl bg-zinc-950/80 border border-zinc-800/80 max-w-sm mx-auto space-y-3">
+              <p className="text-xs font-semibold text-zinc-300">
+                {ratingState.rated ? 'Sua avaliação do pedido:' : 'Como foi a sua experiência? (Opcional)'}
+              </p>
+
+              <div className="flex items-center justify-center gap-2" role="group" aria-label="Avaliação por estrelas">
+                {[1, 2, 3, 4, 5].map((starVal) => {
+                  const isFilled = starVal <= (ratingState.hoverStars || ratingState.stars);
+                  return (
+                    <button
+                      key={starVal}
+                      type="button"
+                      disabled={ratingState.rated || ratingState.submitting}
+                      onClick={() => handleRate(starVal)}
+                      onMouseEnter={() => !ratingState.rated && setRatingState((prev) => ({ ...prev, hoverStars: starVal }))}
+                      onMouseLeave={() => !ratingState.rated && setRatingState((prev) => ({ ...prev, hoverStars: 0 }))}
+                      aria-label={`Avaliar com ${starVal} estrela${starVal > 1 ? 's' : ''}`}
+                      className={`p-1.5 rounded-lg transition transform hover:scale-110 focus:outline-none focus:ring-2 focus:ring-pizza-gold ${
+                        ratingState.rated ? 'cursor-default' : 'cursor-pointer hover:bg-zinc-900'
+                      }`}
+                    >
+                      <Star
+                        className={`w-6 h-6 transition ${
+                          isFilled ? 'fill-amber-400 text-amber-400' : 'text-zinc-600'
+                        }`}
+                      />
+                    </button>
+                  );
+                })}
+              </div>
+
+              {ratingState.rated && (
+                <p className="text-xs text-emerald-400 font-medium">
+                  ✓ Avaliação registrada ({ratingState.stars} estrelas). Obrigado!
+                </p>
+              )}
+
+              {ratingState.submitting && (
+                <p className="text-xs text-zinc-400 flex items-center justify-center gap-1.5">
+                  <RefreshCw className="w-3 h-3 animate-spin text-pizza-gold" />
+                  <span>Enviando avaliação...</span>
+                </p>
+              )}
+
+              {ratingState.error && (
+                <p className="text-xs text-red-400">{ratingState.error}</p>
+              )}
+            </div>
+
+            {/* Ações: Pedir Novamente e Voltar ao Cardápio */}
+            <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
               <Link
                 href="/"
                 className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-gradient-to-r from-pizza-gold-dark via-pizza-gold to-pizza-gold-light hover:brightness-110 text-white text-sm font-bold transition shadow-lg shadow-amber-950/30"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span>Pedir novamente</span>
+              </Link>
+
+              <Link
+                href="/"
+                className="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-sm font-semibold transition border border-zinc-700/60"
               >
                 <ArrowLeft className="w-4 h-4" />
                 <span>Voltar ao cardápio</span>
@@ -437,7 +750,7 @@ export default function OrderTrackingPage() {
                   {/* Código PIN do Cliente */}
                   <div className="p-4 rounded-2xl bg-zinc-950/90 border border-zinc-800/80 text-left sm:text-right shadow-inner">
                     <div className="flex items-center sm:justify-end gap-1.5 text-xs text-zinc-400 font-semibold mb-1">
-                      <ShieldCheck className={`w-4 h-4 ${isDelivered ? 'text-emerald-400' : 'text-emerald-400'}`} />
+                      <ShieldCheck className="w-4 h-4 text-emerald-400" />
                       <span>{isDelivered ? 'Código de Entrega Validado' : 'Seu Código de Entrega (PIN)'}</span>
                     </div>
                     <div className={`font-mono text-3xl font-black tracking-widest bg-zinc-900 px-4 py-1.5 rounded-xl border border-zinc-800 inline-block shadow-sm ${isDelivered ? 'text-emerald-400' : 'text-amber-400'}`}>
@@ -470,7 +783,7 @@ export default function OrderTrackingPage() {
                     </div>
                   </div>
 
-                  {/* Tempo Estimado e Entregador (Sem previsão após entrega confirmada) */}
+                  {/* Previsão de Chegada e Entregador (Removidos após entrega confirmada) */}
                   <div className="flex flex-col sm:items-end gap-2 shrink-0 pt-3 sm:pt-0 border-t sm:border-t-0 border-zinc-800/60">
                     {!isDelivered && order.status !== 'em_entrega' && (
                       <div className="flex items-center gap-2 text-xs font-semibold text-zinc-300 bg-zinc-900 px-3 py-1.5 rounded-xl border border-zinc-800">
@@ -608,7 +921,7 @@ export default function OrderTrackingPage() {
                           </div>
                         )}
 
-                        {/* Agradecimento na etapa concluída (visível logo após entrega) */}
+                        {/* Agradecimento na etapa concluída (visível nos primeiros 10s pós-entrega) */}
                         {st.key === 'concluido' && (isPassed || isDelivered) && (
                           <div className="mt-2.5 p-3 rounded-xl bg-emerald-950/40 border border-emerald-800/30 text-xs text-emerald-400 font-medium flex items-center gap-2">
                             <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
@@ -639,11 +952,11 @@ export default function OrderTrackingPage() {
                 <div key={i} className="pb-3 border-b border-zinc-800/60 last:border-0 last:pb-0">
                   <div className="flex justify-between items-start text-xs">
                     <div>
-                      <span className="font-bold text-white text-sm">{item.qty}x {item.name}</span>
+                      <span className="font-bold text-white text-sm">{item.qty || item.quantity || 1}x {item.name}</span>
                       <p className="text-zinc-400 text-xs mt-0.5">{item.details}</p>
                     </div>
                     <span className="font-bold text-zinc-300 text-sm">
-                      R$ {Number(item.price || 0).toFixed(2).replace('.', ',')}
+                      R$ {Number(item.price || item.totalPrice || 0).toFixed(2).replace('.', ',')}
                     </span>
                   </div>
                 </div>

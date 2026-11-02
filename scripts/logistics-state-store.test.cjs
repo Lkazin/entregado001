@@ -35,7 +35,7 @@ function fixture(initial = { revision: 1, state: { drivers: [], offers: [], assi
   }};
   const filename = path.join(__dirname, '../src/lib/logistics/state-store.ts');
   const source = ts.transpileModule(fs.readFileSync(filename,'utf8'), { compilerOptions: {module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020} }).outputText;
-  const context = { exports:{}, Date, Number, require:name => name === '@/lib/supabase/server' ? {supabaseAdmin:db} : require(name) };
+  const context = { exports:{}, Date, Number, require:name => name === '@/lib/supabase/server' ? {supabaseAdmin:db} : name === './tracking-realtime' ? { publishTrackingInvalidation: async () => {} } : require(name) };
   vm.runInNewContext(source,context,{filename});
   return { api:context.exports, current:()=>row, outage:value=>{fail=value;}, replaceSession:value=>{activeSessionHash=value;} };
 }
