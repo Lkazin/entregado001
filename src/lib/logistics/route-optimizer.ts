@@ -1,3 +1,4 @@
+import { valhallaMatrixBlock } from './valhalla-client';
 // OSRM table returns road distances (metres) and durations (seconds), not aerial estimates.
 // Reference: https://project-osrm.org/docs/v5.24.0/api/#table-service
 export type RouteMode = 'shortest_distance' | 'oldest_wait';
@@ -72,9 +73,17 @@ export async function optimizeRoute(assignments: any[], mode: RouteMode, origin:
   const count = points.length;
   const distances: number[][] = Array.from({ length: count }, () => []);
   const durations: number[][] = Array.from({ length: count }, () => []);
-  // Chunks limit each transport request, never the number of deliveries.
+  const source = process.env.VALHALLA_BASE_URL ? 'valhalla' as const : 'osrm' as const;
+  // 25x25 pairs fit the local Valhalla limits; chunking does not cap deliveries.
   for (let s = 0; s < count; s += 25) for (let d = 0; d < count; d += 25) {
     const sources = points.slice(s, s + 25), destinations = points.slice(d, d + 25);
+    if (source === 'valhalla') {
+      const matrix = await valhallaMatrixBlock(sources, destinations, deadline);
+      for (let i=0;i<sources.length;i++) for (let j=0;j<destinations.length;j++) {
+        distances[s+i][d+j]=matrix.distances[i][j]; durations[s+i][d+j]=matrix.durations[i][j];
+      }
+      continue;
+    }
     const combined = [...sources, ...destinations];
     const url = new URL(`${process.env.OSRM_BASE_URL || 'https://router.project-osrm.org'}/table/v1/driving/${combined.map(p => `${p.longitude},${p.latitude}`).join(';')}`);
     url.searchParams.set('sources', sources.map((_, i) => i).join(';'));
@@ -97,6 +106,14 @@ export async function optimizeRoute(assignments: any[], mode: RouteMode, origin:
     const next = remaining.shift()!; order.push(next);
     totalDistanceMeters += distances[current][next]; totalDurationSeconds += durations[current][next]; current = next;
   }
-  return { stops: order.map((index, i) => ({ assignmentId: assignments[index - 1].assignmentId || assignments[index - 1].id, sequence: i + 1 })), totalDistanceMeters, totalDurationSeconds,
-    rule: mode === 'shortest_distance' ? 'Sugestão por vizinho mais próximo usando distâncias pelas ruas; não garante ótimo global.' : 'Horário de criação (ou aceite quando ausente), em faixas de 5 minutos; distância pelas ruas desempata.', source: 'osrm' as const };
+  let cumulativeDistanceMeters = 0, cumulativeDurationSeconds = 0;
+  return { stops: order.map((index, i) => {
+    const previous = i === 0 ? 0 : order[i - 1];
+    const distanceMeters = distances[previous][index], durationSeconds = durations[previous][index];
+    cumulativeDistanceMeters += distanceMeters; cumulativeDurationSeconds += durationSeconds;
+    return { assignmentId: assignments[index - 1].assignmentId || assignments[index - 1].id, sequence: i + 1,
+      distanceMeters, durationSeconds, cumulativeDistanceMeters, cumulativeDurationSeconds,
+      distanceFromOriginMeters: distances[0][index], durationFromOriginSeconds: durations[0][index] };
+  }), totalDistanceMeters, totalDurationSeconds,
+    rule: mode === 'shortest_distance' ? 'Sugestão por vizinho mais próximo usando distâncias pelas ruas; não garante ótimo global.' : 'Horário de criação (ou aceite quando ausente), em faixas de 5 minutos; distância pelas ruas desempata.', source };
 }

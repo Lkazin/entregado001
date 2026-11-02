@@ -33,6 +33,7 @@ interface DriverInTransit {
     orderNumber: number | string;
     address: string;
     region: string;
+    destinationCoordinates?: {latitude:number;longitude:number} | null;
     status: string;
   }>;
 }
@@ -88,9 +89,12 @@ export default function DriverInTransitList({ focusedDriverId, onOpenOrderDetail
   // Quando seleciona um motoboy, busca a rota dele até a primeira entrega
   const handleSelectDriver = async (drv: DriverInTransit) => {
     setSelectedDriverId(drv.driverId);
-    if (drv.location && drv.assignments && drv.assignments.length > 0 && storeLocation) {
+    setSelectedDriverRoute([]);
+    const destination = drv.assignments?.[0]?.destinationCoordinates;
+    if (drv.location && destination && Number.isFinite(destination.latitude) && Number.isFinite(destination.longitude)) {
       try {
-        const geoRes = await fetch(`/api/v1/logistics/osrm-route?from=${drv.location.longitude},${drv.location.latitude}&to=${storeLocation.longitude + 0.01},${storeLocation.latitude + 0.01}`);
+        const adminToken = sessionStorage.getItem('novaesweb_admin_token');
+        const geoRes = await fetch(`/api/v1/logistics/osrm-route?from=${drv.location.longitude},${drv.location.latitude}&to=${destination.longitude},${destination.latitude}`, {headers: adminToken ? {'x-admin-token':adminToken} : undefined});
         if (geoRes.ok) {
           const rData = await geoRes.json().catch(() => null);
           if (rData && rData.coordinates) {
@@ -149,6 +153,7 @@ export default function DriverInTransitList({ focusedDriverId, onOpenOrderDetail
               longitude: selectedDriver.location.longitude,
               name: selectedDriver.name
             } : null}
+            destinationLocation={selectedDriver?.assignments?.[0]?.destinationCoordinates || null}
             routeCoordinates={selectedDriverRoute}
           />
 

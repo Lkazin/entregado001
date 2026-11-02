@@ -1,3 +1,4 @@
+import { valhallaRoute } from '@/lib/logistics/valhalla-client';
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/server';
 import {
@@ -217,83 +218,40 @@ function recomputeDriverCounters() {
   }
 }
 
+function verifiedAssignmentCoordinates(a: any): {latitude:number;longitude:number} | null {
+  const latitude = a.destinationCoordinates?.latitude ?? a.deliveryLatitude;
+  const longitude = a.destinationCoordinates?.longitude ?? a.deliveryLongitude;
+  return typeof latitude === 'number' && Number.isFinite(latitude) && Math.abs(latitude)<=90 &&
+    typeof longitude === 'number' && Number.isFinite(longitude) && Math.abs(longitude)<=180 ? {latitude,longitude} : null;
+}
 const geocodeCache: Record<string, { lat: number; lng: number }> = {};
 
 async function geocodeAddress(
   addressStr: string,
-  options?: {
-    city?: string;
-    state?: string;
-    cep?: string;
-    region?: string;
-  }
-): Promise<{ lat: number; lng: number }> {
-  const baseCenter = {
-    lat: STORE_LOCATION.latitude,
-    lng: STORE_LOCATION.longitude,
-  };
-
-  if (!addressStr || !addressStr.trim()) {
-    return baseCenter;
-  }
-
-  const city = options?.city?.trim() || '';
-  const state = options?.state?.trim() || '';
-  const cep = (options?.cep || '').replace(/\D/g, '');
-  const region = options?.region?.trim() || '';
-
-  const cacheKey = `${addressStr}|${region}|${city}|${state}|${cep}`.trim().toLowerCase();
-  if (geocodeCache[cacheKey]) return geocodeCache[cacheKey];
-
+  options?: { city?: string; state?: string; cep?: string; region?: string }
+): Promise<{ lat: number; lng: number } | null> {
+  const endpoint = process.env.NOMINATIM_SEARCH_URL;
+  if (!endpoint || !addressStr?.trim()) return null;
+  const query = [addressStr.trim(), options?.region, options?.city, options?.state, options?.cep, 'Brasil'].filter(Boolean).join(', ');
+  const key = query.toLowerCase();
+  if (geocodeCache[key]) return geocodeCache[key];
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
   try {
-    const cleanStreet = addressStr.split(' - ')[0].trim();
-    const queries: string[] = [];
-
-    if (city && state) {
-      queries.push(`${cleanStreet}, ${region ? region + ', ' : ''}${city}, ${state}, Brasil`);
-      queries.push(`${cleanStreet}, ${city}, ${state}, Brasil`);
-    }
-    if (cep.length === 8) {
-      queries.push(`${cep}, ${city ? city + ', ' : ''}Brasil`);
-    }
-    queries.push(`${cleanStreet}, Brasil`);
-    if (city && state) {
-      queries.push(`${region ? region + ', ' : ''}${city}, ${state}, Brasil`);
-    } else {
-      queries.push(`${cleanStreet}, Canoas, RS, Brasil`);
-    }
-
-    for (const q of queries) {
-      const res = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=1`,
-        {
-          headers: { 'User-Agent': 'NovaesWebDeliveryTracking/1.0 (contato@novaesweb.com.br)' },
-        }
-      );
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data) && data.length > 0 && data[0].lat && data[0].lon) {
-          const coords = { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
-          geocodeCache[cacheKey] = coords;
-          return coords;
-        }
-      }
-    }
-  } catch {}
-
-  let hash = 0;
-  for (let i = 0; i < addressStr.length; i++) {
-    hash = (hash << 5) - hash + addressStr.charCodeAt(i);
-    hash |= 0;
-  }
-  const offsetLat = ((Math.abs(hash) % 30) - 15) / 1000;
-  const offsetLng = ((Math.abs(hash >> 3) % 30) - 15) / 1000;
-  const fallbackCoords = {
-    lat: baseCenter.lat + offsetLat,
-    lng: baseCenter.lng + offsetLng,
-  };
-  geocodeCache[cacheKey] = fallbackCoords;
-  return fallbackCoords;
+    const url = new URL(endpoint);
+    url.searchParams.set('q', query); url.searchParams.set('format','jsonv2');
+    url.searchParams.set('limit','2'); url.searchParams.set('countrycodes','br');
+    const response = await fetch(url, { signal:controller.signal, cache:'no-store', headers:{'User-Agent':'NovaesWebDelivery/1.0 (+https://entregado001-oe6y.vercel.app)'} });
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (!Array.isArray(data) || data.length !== 1) return null;
+    if (data[0]?.lat == null || data[0]?.lon == null || String(data[0].lat).trim() === '' || String(data[0].lon).trim() === '') return null;
+    const lat = Number(data[0].lat), lng = Number(data[0].lon);
+    if (!Number.isFinite(lat) || Math.abs(lat)>90 || !Number.isFinite(lng) || Math.abs(lng)>180) return null;
+    if (Object.keys(geocodeCache).length >= 2000) delete geocodeCache[Object.keys(geocodeCache)[0]];
+    return geocodeCache[key] = {lat,lng};
+  } catch { return null; }
+  finally {clearTimeout(timeout);}
 }
 
 async function calculateOSRMRoute(
@@ -302,9 +260,10 @@ async function calculateOSRMRoute(
   toLng: number,
   toLat: number
 ): Promise<{ coordinates: [number, number][]; distanceKm: number; durationMin: number }> {
+  if (process.env.VALHALLA_BASE_URL) return valhallaRoute({latitude:fromLat,longitude:fromLng},{latitude:toLat,longitude:toLng});
   try {
-    const url = `https://router.project-osrm.org/route/v1/driving/${fromLng},${fromLat};${toLng},${toLat}?overview=full&geometries=geojson`;
-    const res = await fetch(url);
+    const url = `${process.env.OSRM_BASE_URL || 'https://router.project-osrm.org'}/route/v1/driving/${fromLng},${fromLat};${toLng},${toLat}?overview=full&geometries=geojson`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000), cache: 'no-store' });
     if (res.ok) {
       const data = await res.json();
       if (data.code === 'Ok' && data.routes && data.routes.length > 0) {
@@ -318,14 +277,7 @@ async function calculateOSRMRoute(
     }
   } catch {}
 
-  return {
-    coordinates: [
-      [fromLng, fromLat],
-      [toLng, toLat],
-    ],
-    distanceKm: 2.2,
-    durationMin: 10,
-  };
+  throw new Error('Serviço de rotas indisponível.');
 }
 
 async function loadLogisticsState(_forceCloud = false) {
@@ -1547,7 +1499,7 @@ export async function GET(
                 effectiveStore.longitude,
                 effectiveStore.latitude
               );
-            } else {
+            } else if (destCoords) {
               routeData = await calculateOSRMRoute(
                 effectiveStore.longitude,
                 effectiveStore.latitude,
@@ -1705,12 +1657,9 @@ export async function GET(
         const startLat = authorizedDriverLoc
           ? authorizedDriverLoc.latitude
           : effectiveStore.latitude;
-        const routeData = await calculateOSRMRoute(
-          startLng,
-          startLat,
-          destCoords.lng,
-          destCoords.lat
-        );
+        const routeData = destCoords ? await calculateOSRMRoute(
+          startLng, startLat, destCoords.lng, destCoords.lat
+        ).catch(() => null) : null;
 
         return jsonResponse({
           success: true,
@@ -1736,11 +1685,11 @@ export async function GET(
             isInTransit: true,
           },
           driverLocation: authorizedDriverLoc,
-          route: {
+          route: routeData ? {
             coordinates: routeData.coordinates,
             distanceKm: routeData.distanceKm,
             estimatedMinutes: routeData.durationMin,
-          },
+          } : null,
         });
       }
 
@@ -1779,7 +1728,7 @@ export async function GET(
                 a.driverId === dId ||
                 a.driverId === d.id ||
                 (!a.driverId && d.driverName && a.driverName === d.driverName)
-            );
+            ).sort((a,b) => (a.sequence ?? Number.MAX_SAFE_INTEGER) - (b.sequence ?? Number.MAX_SAFE_INTEGER));
 
             if (driverAssignments.length === 0) return;
 
@@ -1804,12 +1753,15 @@ export async function GET(
                 address: a.address,
                 region: a.region || a.neighborhood || '',
                 status: a.status,
+                sequence: a.sequence,
+                destinationCoordinates: verifiedAssignmentCoordinates(a),
               })),
             });
           });
 
         const trackedList = Array.from(driverMap.values());
         const configuredStore = getEffectiveStoreLocation(effectiveStoreId);
+
 
         return jsonResponse({
           success: true,
@@ -1974,11 +1926,7 @@ export async function POST(
             body.storeCity !== undefined ||
             body.storeState !== undefined
           ) {
-            const lowerAddr = `${nextStoreAddress} ${nextStoreCity}`.toLowerCase();
-            if (lowerAddr.includes('canoas') && lowerAddr.includes('centro')) {
-              nextLat = -29.9189;
-              nextLng = -51.1781;
-            } else {
+            {
               const geocoded = await geocodeAddress(nextStoreAddress, {
                 city: nextStoreCity,
                 state: nextStoreState,
