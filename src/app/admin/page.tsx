@@ -14,6 +14,7 @@ import { PIZZA_FLAVORS } from '@/lib/constants';
 import AdminPinAuth from '@/components/AdminPinAuth';
 import DriverInTransitList from '@/components/DriverInTransitList';
 import FirstAccessInvitePanel from '@/components/FirstAccessInvitePanel';
+import CustomerTrackingSettings from '@/components/CustomerTrackingSettings';
 import OrderStageTiming from '@/components/OrderStageTiming';
 import { printThermalOrder, testPrintThermal, PaperWidth } from '@/lib/thermalPrinter';
 
@@ -2381,6 +2382,7 @@ export default function AdminDashboardPage() {
         {/* ABA 5: CONFIGURAÇÕES — ENTREGADORES E DESPACHO */}
         {activeTab === 'settings' && (
           <div className="space-y-8 text-xs max-w-5xl">
+            <CustomerTrackingSettings getHeaders={getAdminHeaders} />
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div>
                 <h2 className="text-xl font-black text-white">Configurações • Entregadores e Despacho</h2>

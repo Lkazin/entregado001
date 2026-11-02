@@ -316,7 +316,7 @@ export async function GET(req: NextRequest) {
       const found = orders.find(
         (o: any) =>
           o.trackingToken === token ||
-          o.id === token ||
+          (isAdmin && o.id === token) ||
           (isAdmin && String(o.orderNumber) === token.replace('#', ''))
       );
       if (!found) {
@@ -375,14 +375,7 @@ export async function POST(req: NextRequest) {
       Number(body.orderNumber) <= 999999
         ? Number(body.orderNumber)
         : null;
-    const providedToken =
-      typeof body.trackingToken === 'string' &&
-      body.trackingToken.length >= 8 &&
-      body.trackingToken.length <= 80
-        ? body.trackingToken
-        : null;
-
-    const trackingToken = providedToken || `tk-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+    const trackingToken = `tk-${crypto.randomBytes(32).toString('hex')}`;
     const pin = providedPin || String(Math.floor(1000 + Math.random() * 9000));
     const pinHash = crypto.createHash('sha256').update(pin).digest('hex');
     const storeId = normalizeStoreId(

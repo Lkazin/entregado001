@@ -202,9 +202,14 @@ export default function CartCheckoutDrawer({
         const data = await res.json().catch(() => null);
         if (res.ok && data?.success && data.orderId) {
           serverOrderId = String(data.orderId);
+          orderPayload.trackingToken = data.trackingToken;
+          orderPayload.orderNumber = data.orderNumber;
+          orderPayload.deliveryPin = data.deliveryPin;
+        } else {
+          throw new Error('Não foi possível confirmar o pedido. Tente novamente.');
         }
       } catch (e) {
-        console.warn('Nao foi possivel enviar o pedido ao servidor, mantendo copia local:', e);
+        throw new Error('Não foi possível confirmar o pedido. Confira sua conexão e tente novamente.');
       }
 
       if (typeof window !== 'undefined') {

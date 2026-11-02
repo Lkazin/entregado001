@@ -1,3 +1,4 @@
+import { customerTrackingSnapshot } from '@/lib/logistics/customer-tracking';
 import { buildAccountLedger } from '@/lib/logistics/account-ledger';
 import { valhallaRoute } from '@/lib/logistics/valhalla-client';
 import { NextRequest, NextResponse } from 'next/server';
@@ -60,6 +61,7 @@ export interface StoreLogisticsSettings {
   fixedDriverId: string | null;
   maxConcurrentDeliveries: number;
   offerTimeoutSeconds: number;
+  customerLiveTrackingEnabled?: boolean;
   updatedAt: string;
 }
 
@@ -73,6 +75,7 @@ export interface LiveDriverLocation {
   heading?: number | null;
   speed?: number | null;
   accuracy?: number | null;
+  capturedAt?: string;
   updatedAt: string;
 }
 
@@ -205,7 +208,7 @@ function recomputeDriverCounters() {
       const ordKey = String(a.orderId || a.orderNumber || a.id);
       if (a.status === 'waiting_pickup') {
         uniqueWaitingOrders.add(ordKey);
-      } else if (a.status === 'picked_up' || a.status === 'in_transit' || a.status === 'em_rota' || a.status === 'waiting_pickup' || a.status === 'assigned' || a.status === 'accepted') {
+      } else if (a.status === 'picked_up' || a.status === 'in_transit' || a.status === 'em_rota') {
         uniqueInTransitOrders.add(ordKey);
       } else if (a.status === 'delivered' || a.status === 'entregue') {
         uniqueDeliveredOrders.add(ordKey);
@@ -1307,383 +1310,10 @@ export async function GET(
 
       // 10. Acompanhamento do Pedido pelo Cliente — Regra Estrita de Liberação de Rastreamento
       case 'tracking-client-subscribe': {
-        const token =
-          req.nextUrl.searchParams.get('token') ||
-          req.nextUrl.searchParams.get('trackingToken') ||
-          req.nextUrl.searchParams.get('orderId');
-        const isAdmin = verifyAdminRequest(req).valid;
-
-        if (!token) {
-          return jsonResponse(
-            { success: false, error: 'Token de acompanhamento do pedido é obrigatório' },
-            { status: 400 }
-          );
-        }
-
-        const allOrders = await loadStoreOrders();
-        const order = allOrders.find(
-          (o) =>
-            o.trackingToken === token ||
-            String(o.id) === token ||
-            (isAdmin && String(o.orderNumber).replace('#', '') === token.replace('#', ''))
-        );
-
-        if (!order) {
-          return jsonResponse(
-            {
-              success: true,
-              trackingStage: 'no_driver',
-              trackingEnabled: false,
-              message: 'O rastreamento estará disponível quando seu pedido sair para entrega',
-              order: null,
-              destination: null,
-              store: null,
-              driver: null,
-              driverLocation: null,
-              route: null,
-            },
-            { status: 200 }
-          );
-        }
-
-        const targetNum = String(order.orderNumber).replace('#', '');
-        const targetId = String(order.id);
-        const orderStoreId = normalizeStoreId(order.storeId || storeId);
-
-        // Busca atribuição específica deste pedido nesta loja
-        const asg = liveAssignments.find(
-          (a) =>
-            isSameStore(a.storeId, orderStoreId) &&
-            (String(a.orderId) === targetId ||
-              String(a.orderNumber).replace('#', '') === targetNum) &&
-            a.status !== 'canceled_by_store' &&
-            a.status !== 'canceled_by_driver'
-        );
-
-        // Busca oferta pendente específica deste pedido nesta loja
-        const nowMs = Date.now();
-        const pendingOffer = liveOffers.find((off) => {
-          if (!isSameStore(off.storeId, orderStoreId)) return false;
-          if (off.status !== 'pendente') return false;
-          if (off.expiresAt && new Date(off.expiresAt).getTime() <= nowMs) return false;
-          const directMatch =
-            String(off.orderId) === targetId ||
-            String(off.orderNumber).replace('#', '') === targetNum;
-          const nestedMatch =
-            Array.isArray(off.orders) &&
-            off.orders.some(
-              (item: any) =>
-                String(item.id || item.orderId) === targetId ||
-                String(item.orderNumber).replace('#', '') === targetNum
-            );
-          return directMatch || nestedMatch;
-        });
-
-        const orderCity = order.addressDetail?.city || order.city || '';
-        const orderState = order.addressDetail?.state || order.state || '';
-        const orderCep = order.addressDetail?.cep || order.cep || '';
-        const orderRegion = order.addressDetail?.neighborhood || order.region || '';
-
-        const fullAddress = order.addressDetail?.street
-          ? `${order.addressDetail.street}, ${order.addressDetail.number || ''} - ${orderRegion}`
-          : `${order.address || ''}${orderRegion ? ' - ' + orderRegion : ''}`;
-
-        // ESTÁGIO 5: Pedido entregue ou cancelado -> Encerrar acompanhamento e revogar acesso à localização
-        if (
-          order.status === 'concluido' ||
-          order.status === 'entregue' ||
-          order.status === 'cancelado' ||
-          asg?.status === 'delivered' ||
-          asg?.status === 'entregue'
-        ) {
-          return jsonResponse({
-            success: true,
-            trackingStage: 'ended',
-            trackingEnabled: false,
-            message:
-              order.status === 'cancelado'
-                ? 'Pedido cancelado — acompanhamento encerrado.'
-                : 'Pedido entregue — acompanhamento encerrado.',
-            order: {
-              id: order.id,
-              orderNumber: order.orderNumber,
-              status: order.status,
-              dispatchStatus: order.dispatchStatus || order.status,
-              customerName: order.customerName,
-              address: fullAddress,
-            },
-            destination: null,
-            store: null,
-            driver: null,
-            driverLocation: null,
-            route: null,
-          });
-        }
-
-        // Verifica se a retirada já foi confirmada e a rota iniciada
-        const isPickupConfirmedAndRouteStarted = Boolean(
-          (asg && (asg.status === 'picked_up' || asg.status === 'in_transit' || asg.status === 'em_rota')) ||
-            (order.status === 'em_entrega' &&
-              order.pickedUpAt &&
-              (!asg || asg.status !== 'waiting_pickup'))
-        );
-
-        // ESTÁGIO 3: Entregador aceitou, mas ainda não retirou o pedido na loja
-        if (
-          !isPickupConfirmedAndRouteStarted &&
-          ((asg && (asg.status === 'waiting_pickup' || asg.status === 'assigned' || asg.status === 'accepted')) ||
-            order.dispatchStatus === 'aceito_aguardando_retirada')
-        ) {
-          const acceptedDriverId = asg?.driverId || order.driverId || null;
-          const drv = acceptedDriverId
-            ? liveDrivers.find(
-                (d) =>
-                  isSameStore(d.storeId, orderStoreId) &&
-                  (d.driverId === acceptedDriverId || d.id === acceptedDriverId)
-              )
-            : null;
-          const acceptedDriverName =
-            drv?.driverName ||
-            drv?.name ||
-            asg?.driverName ||
-            order.assignedDriverName ||
-            order.driverName ||
-            'Entregador';
-          const driverPlate = drv?.vehiclePlate || null;
-
-          // Busca localização recente (<= 15 min) do motoboy aceito
-          const candidateLoc =
-            (acceptedDriverId && liveTracking[acceptedDriverId]) ||
-            (drv?.id && liveTracking[drv.id]) ||
-            (drv?.driverId && liveTracking[drv.driverId]) ||
-            null;
-
-          let authorizedDriverLoc: LiveDriverLocation | null = null;
-          if (candidateLoc && candidateLoc.updatedAt) {
-            const locTimeMs = new Date(candidateLoc.updatedAt).getTime();
-            const isRecent = nowMs - locTimeMs <= 15 * 60 * 1000;
-            if (isRecent) {
-              authorizedDriverLoc = candidateLoc;
-            }
-          }
-
-          const configuredStore = getEffectiveStoreLocation(orderStoreId);
-          const destCoords = await geocodeAddress(fullAddress, {
-            city: orderCity || configuredStore.city,
-            state: orderState || configuredStore.state,
-            cep: orderCep,
-            region: orderRegion,
-          });
-
-          const effectiveStore = {
-            name: configuredStore.name,
-            address: configuredStore.address,
-            latitude: configuredStore.latitude,
-            longitude: configuredStore.longitude,
-          };
-
-          // Rota em tempo real: se o motoboy tiver GPS ativo, calcula rota motoboy -> pizzaria
-          let routeData = null;
-          try {
-            if (authorizedDriverLoc) {
-              routeData = await calculateOSRMRoute(
-                authorizedDriverLoc.longitude,
-                authorizedDriverLoc.latitude,
-                effectiveStore.longitude,
-                effectiveStore.latitude
-              );
-            } else if (destCoords) {
-              routeData = await calculateOSRMRoute(
-                effectiveStore.longitude,
-                effectiveStore.latitude,
-                destCoords.lng,
-                destCoords.lat
-              );
-            }
-          } catch {}
-
-          return jsonResponse({
-            success: true,
-            trackingStage: 'waiting_pickup',
-            trackingEnabled: true,
-            message: authorizedDriverLoc
-              ? `O entregador ${acceptedDriverName} aceitou seu pedido e está a caminho da loja para retirá-lo.`
-              : `O entregador ${acceptedDriverName} aceitou seu pedido e vai retirar na loja em instantes.`,
-            order: {
-              id: order.id,
-              orderNumber: order.orderNumber,
-              status: order.status,
-              dispatchStatus: 'aceito_aguardando_retirada',
-              customerName: order.customerName,
-              address: fullAddress,
-              destination: destCoords,
-            },
-            destination: destCoords,
-            store: effectiveStore,
-            driver: {
-              name: acceptedDriverName,
-              plate: driverPlate,
-              isInTransit: false,
-              isHeadingToStore: true,
-            },
-            driverLocation: authorizedDriverLoc,
-            route: routeData ? {
-              coordinates: routeData.coordinates,
-              distanceKm: routeData.distanceKm,
-              estimatedMinutes: routeData.durationMin,
-            } : null,
-          });
-        }
-
-        // ESTÁGIO 2: Oferta enviada para motoboy(s), aguardando aceite
-        if (
-          !isPickupConfirmedAndRouteStarted &&
-          (pendingOffer || order.dispatchStatus === 'aguardando_aceite')
-        ) {
-          return jsonResponse({
-            success: true,
-            trackingStage: 'offer_sent',
-            trackingEnabled: false,
-            message: 'Aguardando aceite do entregador',
-            order: {
-              id: order.id,
-              orderNumber: order.orderNumber,
-              status: order.status,
-              dispatchStatus: 'aguardando_aceite',
-              customerName: order.customerName,
-              address: fullAddress,
-            },
-            destination: null,
-            store: null,
-            driver: null,
-            driverLocation: null,
-            route: null,
-          });
-        }
-
-        // ESTÁGIO 1: Sem entregador atribuído (pedido recebido, em preparo ou pronto na bancada)
-        if (!isPickupConfirmedAndRouteStarted) {
-          return jsonResponse({
-            success: true,
-            trackingStage: 'no_driver',
-            trackingEnabled: false,
-            message: 'O rastreamento estará disponível quando seu pedido sair para entrega',
-            order: {
-              id: order.id,
-              orderNumber: order.orderNumber,
-              status: order.status,
-              dispatchStatus: order.dispatchStatus || 'disponivel',
-              customerName: order.customerName,
-              address: fullAddress,
-            },
-            destination: null,
-            store: null,
-            driver: null,
-            driverLocation: null,
-            route: null,
-          });
-        }
-
-        // ESTÁGIO 4: Retirada confirmada e rota iniciada -> Liberar mapa com endereço do pedido e localização real/autorizada do entregador atribuído
-        const assignedDriverId = asg?.driverId || order.driverId || null;
-        const drv = assignedDriverId
-          ? liveDrivers.find(
-              (d) =>
-                isSameStore(d.storeId, orderStoreId) &&
-                (d.driverId === assignedDriverId || d.id === assignedDriverId)
-            )
-          : null;
-
-        const driverName =
-          drv?.driverName ||
-          drv?.name ||
-          asg?.driverName ||
-          order.assignedDriverName ||
-          order.driverName ||
-          'Entregador';
-        const driverPlate = drv?.vehiclePlate || null;
-
-        // Somente usa a localização do PRÓPRIO entregador atribuído a este pedido, se recente (<= 10 min)
-        // NUNCA pega allTrackedLocations[0] de outro motoboy nem coordenada antiga!
-        const candidateLoc =
-          (assignedDriverId && liveTracking[assignedDriverId]) ||
-          (drv?.id && liveTracking[drv.id]) ||
-          (drv?.driverId && liveTracking[drv.driverId]) ||
-          null;
-
-        const pickupTimeMs =
-          asg?.pickupConfirmedAt || asg?.pickedUpAt || order.pickedUpAt
-            ? new Date(asg?.pickupConfirmedAt || asg?.pickedUpAt || order.pickedUpAt).getTime()
-            : 0;
-
-        let authorizedDriverLoc: LiveDriverLocation | null = null;
-        if (candidateLoc && candidateLoc.updatedAt) {
-          const locTimeMs = new Date(candidateLoc.updatedAt).getTime();
-          const isRecent = nowMs - locTimeMs <= 10 * 60 * 1000;
-          // Aceita se foi atualizada recentemente (após ou próximo ao início da rota)
-          const isFromCurrentRoute = !pickupTimeMs || locTimeMs >= pickupTimeMs - 120000;
-          if (isRecent && isFromCurrentRoute) {
-            authorizedDriverLoc = candidateLoc;
-          }
-        }
-
-        const configuredStore = getEffectiveStoreLocation(orderStoreId);
-
-        // Destino vem exclusivamente do endereço do pedido (nunca do GPS do celular do cliente)
-        const destCoords = await geocodeAddress(fullAddress, {
-          city: orderCity || configuredStore.city,
-          state: orderState || configuredStore.state,
-          cep: orderCep,
-          region: orderRegion,
-        });
-
-        const effectiveStore = {
-          name: configuredStore.name,
-          address: configuredStore.address,
-          latitude: configuredStore.latitude,
-          longitude: configuredStore.longitude,
-        };
-
-        const startLng = authorizedDriverLoc
-          ? authorizedDriverLoc.longitude
-          : effectiveStore.longitude;
-        const startLat = authorizedDriverLoc
-          ? authorizedDriverLoc.latitude
-          : effectiveStore.latitude;
-        const routeData = destCoords ? await calculateOSRMRoute(
-          startLng, startLat, destCoords.lng, destCoords.lat
-        ).catch(() => null) : null;
-
-        return jsonResponse({
-          success: true,
-          trackingStage: 'in_transit',
-          trackingEnabled: true,
-          message: authorizedDriverLoc
-            ? 'Seu pedido está em rota de entrega com localização em tempo real.'
-            : 'Seu pedido saiu para entrega. Aguardando atualização de GPS do entregador.',
-          order: {
-            id: order.id,
-            orderNumber: order.orderNumber,
-            status: order.status,
-            dispatchStatus: 'em_entrega',
-            customerName: order.customerName,
-            address: fullAddress,
-            destination: destCoords,
-          },
-          destination: destCoords,
-          store: effectiveStore,
-          driver: {
-            name: driverName,
-            plate: driverPlate,
-            isInTransit: true,
-          },
-          driverLocation: authorizedDriverLoc,
-          route: routeData ? {
-            coordinates: routeData.coordinates,
-            distanceKm: routeData.distanceKm,
-            estimatedMinutes: routeData.durationMin,
-          } : null,
-        });
+        const token = req.nextUrl.searchParams.get('token') || req.nextUrl.searchParams.get('trackingToken') || '';
+        const snapshot = await customerTrackingSnapshot(token);
+        return jsonResponse({...snapshot, trackingEnabled:snapshot.stage === 'active',
+          trackingStage:snapshot.stage === 'active' ? 'in_transit' : snapshot.stage === 'ended' ? 'ended' : 'no_driver'});
       }
 
       // 11. Lista de Motoboys em Percurso para o Painel do Lojista (Isolado por Loja)
@@ -1943,6 +1573,7 @@ export async function POST(
           }
 
           liveSettingsByStore[effectiveStoreId] = {
+            ...current,
             storeId: effectiveStoreId,
             storeName: nextStoreName,
             storeAddress: nextStoreAddress,
@@ -3731,7 +3362,10 @@ export async function POST(
             bodyMembershipId ||
             auth.membershipId;
 
-          if (typeof latitude !== 'number' || typeof longitude !== 'number') {
+          const capturedAtMs = Number(body.timestamp);
+          if (!Number.isFinite(latitude) || Math.abs(latitude) > 90 || !Number.isFinite(longitude) || Math.abs(longitude) > 180 ||
+              !Number.isFinite(capturedAtMs) || capturedAtMs > Date.now()+5000 || Date.now()-capturedAtMs > 30000 ||
+              (accuracy != null && (!Number.isFinite(accuracy) || accuracy < 0 || accuracy > 100))) {
             return jsonResponse(
               {
                 success: false,
@@ -3778,7 +3412,7 @@ export async function POST(
                 (drv?.driverId && a.driverId === drv.driverId) ||
                 (auth?.membershipId && a.driverId === auth.membershipId) ||
                 (drv?.phone && a.driverPhone === drv.phone)) &&
-              (a.status === 'picked_up' || a.status === 'in_transit' || a.status === 'em_rota' || a.status === 'waiting_pickup' || a.status === 'assigned' || a.status === 'accepted')
+              (a.status === 'picked_up' || a.status === 'in_transit' || a.status === 'em_rota')
           );
 
           if (!hasStartedRoute) {
@@ -3792,6 +3426,10 @@ export async function POST(
             });
           }
 
+          const previousLocation = liveTracking[validDriverId];
+          if (previousLocation?.capturedAt && capturedAtMs <= Date.parse(previousLocation.capturedAt)) {
+            return jsonResponse({success:true,ignored:true,message:'Aguardando uma posição mais recente do GPS.'});
+          }
           const locationData: LiveDriverLocation = {
             driverId: validDriverId,
             driverName: resolvedName,
@@ -3803,6 +3441,7 @@ export async function POST(
             speed: speed ?? null,
             accuracy: accuracy ?? null,
             updatedAt: new Date().toISOString(),
+            capturedAt: new Date(capturedAtMs).toISOString(),
           };
 
           if (liveTracking['drv_default']) {
@@ -3841,28 +3480,11 @@ export async function POST(
             (a) =>
               isSameStore(a.storeId, driverStore) &&
               (a.driverId === validDriverId || a.driverId === auth.membershipId) &&
-              (a.status === 'picked_up' || a.status === 'in_transit' || a.status === 'em_rota' || a.status === 'waiting_pickup' || a.status === 'assigned' || a.status === 'accepted')
+              (a.status === 'picked_up' || a.status === 'in_transit' || a.status === 'em_rota')
           );
 
-          if (
-            hasStartedRoute &&
-            validDriverId &&
-            initialLocation?.latitude &&
-            initialLocation?.longitude
-          ) {
-            liveTracking[validDriverId] = {
-              driverId: validDriverId,
-              storeId: driverStore,
-              assignmentId,
-              latitude: initialLocation.latitude,
-              longitude: initialLocation.longitude,
-              heading: initialLocation.heading ?? null,
-              speed: initialLocation.speed ?? null,
-              accuracy: initialLocation.accuracy ?? null,
-              updatedAt: new Date().toISOString(),
-            };
-            await persistLogisticsState();
-          }
+          // Location is accepted exclusively through tracking-location-push, with capture validation.
+          if (!hasStartedRoute) return jsonResponse({success:true,ignored:true,action:'tracking.session.waiting_pickup'});
           return jsonResponse({
             success: true,
             action: 'tracking.session.start',

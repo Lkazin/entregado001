@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
+import CustomerDeliveryTracking from '@/components/CustomerDeliveryTracking';
 import { useParams } from 'next/navigation';
 import {
   Flame,
@@ -349,7 +350,7 @@ export default function OrderTrackingPage() {
 
                 {/* Tempo Estimado e Entregador */}
                 <div className="flex flex-col sm:items-end gap-2 shrink-0 pt-3 sm:pt-0 border-t sm:border-t-0 border-zinc-800/60">
-                  {order.status !== 'concluido' && (
+                  {order.status !== 'concluido' && order.status !== 'em_entrega' && (
                     <div className="flex items-center gap-2 text-xs font-semibold text-zinc-300 bg-zinc-900 px-3 py-1.5 rounded-xl border border-zinc-800">
                       <Clock className="w-4 h-4 text-amber-400" />
                       <span>Previsão: <strong className="text-white">~{order.estimatedMinutes} min</strong></span>
@@ -367,6 +368,8 @@ export default function OrderTrackingPage() {
             </div>
           )}
         </div>
+
+        <CustomerDeliveryTracking key={token} token={token} />
 
         {/* Linha do Tempo Passo a Passo (Visual Claro e Intuitivo) */}
         {!isCanceled && (

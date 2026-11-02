@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import { Bike, Navigation, MapPin, Phone, RefreshCw, CheckCircle2, Clock, AlertTriangle, User } from 'lucide-react';
 
@@ -49,65 +49,96 @@ export default function DriverInTransitList({ focusedDriverId, onOpenOrderDetail
   const [isLoading, setIsLoading] = useState(true);
   const [selectedDriverId, setSelectedDriverId] = useState<string | null>(null);
   const [selectedDriverRoute, setSelectedDriverRoute] = useState<[number, number][]>([]);
+  const [now, setNow] = useState(Date.now);
+  const trackingRequest = useRef<AbortController | null>(null);
+  const routeRequest = useRef<AbortController | null>(null);
+  const routeKey = useRef('');
+  const lastRouteRequest = useRef({key: '', at: 0});
+
+  const locationAge = (driver: DriverInTransit) => {
+    const timestamp = Date.parse(driver.location?.updatedAt || '');
+    return Number.isFinite(timestamp) && timestamp <= now + 5000 ? Math.max(0, now - timestamp) : Infinity;
+  };
 
   useEffect(() => {
     if (focusedDriverId) {
-      const matched = drivers.find(d => d.driverId === focusedDriverId);
-      if (matched) {
-        handleSelectDriver(matched);
-      } else {
-        setSelectedDriverId(focusedDriverId);
-      }
+      setSelectedDriverId(focusedDriverId);
     }
-  }, [focusedDriverId, drivers]);
+  }, [focusedDriverId]);
 
-  const fetchTracking = async () => {
+  const fetchTracking = useCallback(async () => {
+    if (trackingRequest.current) return;
+    const controller = new AbortController();
+    trackingRequest.current = controller;
+    const timeout = setTimeout(() => controller.abort(), 12000);
     try {
       const adminToken = typeof window !== 'undefined' ? sessionStorage.getItem('novaesweb_admin_token') : null;
       const res = await fetch('/api/v1/logistics/tracking-store-drivers', {
         headers: adminToken ? { 'x-admin-token': adminToken } : undefined,
+        cache: 'no-store', signal: controller.signal,
       });
+      if (controller.signal.aborted) return;
+      if (res.status === 401 || res.status === 403) { setDrivers([]); setStoreLocation(null); return; }
       if (res.ok) {
         const data = await res.json().catch(() => null);
-        if (data && data.success) {
+        if (!controller.signal.aborted && data && data.success) {
           setDrivers(data.driversInTransit || []);
           setStoreLocation(data.store);
         }
       }
     } catch (e) {
     } finally {
-      setIsLoading(false);
+      clearTimeout(timeout);
+      if (!controller.signal.aborted) { setNow(Date.now()); setIsLoading(false); }
+      if (trackingRequest.current === controller) trackingRequest.current = null;
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchTracking();
     const interval = setInterval(fetchTracking, 4000);
-    return () => clearInterval(interval);
-  }, []);
+    const clock = setInterval(() => setNow(Date.now()), 5000);
+    return () => {
+      clearInterval(interval);
+      clearInterval(clock);
+      trackingRequest.current?.abort();
+      trackingRequest.current = null;
+      routeRequest.current?.abort();
+    };
+  }, [fetchTracking]);
 
-  // Quando seleciona um motoboy, busca a rota dele até a primeira entrega
-  const handleSelectDriver = async (drv: DriverInTransit) => {
+  const handleSelectDriver = (drv: DriverInTransit) => {
     setSelectedDriverId(drv.driverId);
-    setSelectedDriverRoute([]);
-    const destination = drv.assignments?.[0]?.destinationCoordinates;
-    if (drv.location && destination && Number.isFinite(destination.latitude) && Number.isFinite(destination.longitude)) {
-      try {
-        const adminToken = sessionStorage.getItem('novaesweb_admin_token');
-        const geoRes = await fetch(`/api/v1/logistics/osrm-route?from=${drv.location.longitude},${drv.location.latitude}&to=${destination.longitude},${destination.latitude}`, {headers: adminToken ? {'x-admin-token':adminToken} : undefined});
-        if (geoRes.ok) {
-          const rData = await geoRes.json().catch(() => null);
-          if (rData && rData.coordinates) {
-            setSelectedDriverRoute(rData.coordinates);
-          }
-        }
-      } catch (e) {}
-    } else {
-      setSelectedDriverRoute([]);
-    }
   };
 
   const selectedDriver = drivers.find(d => d.driverId === selectedDriverId) || drivers[0];
+  const selectedLocation = selectedDriver && locationAge(selectedDriver) <= 120000 ? selectedDriver.location : null;
+
+  useEffect(() => {
+    const destination = selectedDriver?.assignments?.[0]?.destinationCoordinates;
+    const key = selectedDriver && destination ? `${selectedDriver.driverId}:${selectedDriver.assignments[0].id}:${destination.latitude}:${destination.longitude}` : '';
+    if (routeKey.current !== key || !selectedLocation) {
+      routeRequest.current?.abort();
+      routeRequest.current = null;
+      setSelectedDriverRoute([]);
+      routeKey.current = key;
+    }
+    if (!key || !selectedLocation || !destination || !Number.isFinite(destination.latitude) || !Number.isFinite(destination.longitude)) return;
+    if (routeRequest.current || (lastRouteRequest.current.key === key && now-lastRouteRequest.current.at < 30000)) return;
+    const controller = new AbortController();
+    routeRequest.current = controller;
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    lastRouteRequest.current = {key, at: now};
+    const adminToken = sessionStorage.getItem('novaesweb_admin_token');
+    void fetch(`/api/v1/logistics/osrm-route?from=${selectedLocation.longitude},${selectedLocation.latitude}&to=${destination.longitude},${destination.latitude}`, {
+      headers: adminToken ? {'x-admin-token':adminToken} : undefined, cache: 'no-store', signal: controller.signal,
+    }).then(async response => {
+      const data = response.ok ? await response.json() : null;
+      if (!controller.signal.aborted && routeKey.current === key) setSelectedDriverRoute(Array.isArray(data?.coordinates) ? data.coordinates : []);
+    }).catch(() => {
+      if (!controller.signal.aborted && routeKey.current === key) setSelectedDriverRoute([]);
+    }).finally(() => { clearTimeout(timeout); if (routeRequest.current === controller) routeRequest.current = null; });
+  }, [selectedDriver, selectedLocation, now]);
 
   return (
     <div className="space-y-6">
@@ -123,7 +154,7 @@ export default function DriverInTransitList({ focusedDriverId, onOpenOrderDetail
             </span>
           </h3>
           <p className="text-xs text-zinc-400">
-            Acompanhe o deslocamento real de cada motoboy pelo GPS do aplicativo com MapLibre GL e OSRM.
+            Posições atualizadas automaticamente pelo GPS do aplicativo. Confira o horário do último sinal.
           </p>
         </div>
 
@@ -148,9 +179,9 @@ export default function DriverInTransitList({ focusedDriverId, onOpenOrderDetail
               longitude: storeLocation.longitude,
               label: storeLocation.name || 'Bella Pizza'
             } : null}
-            driverLocation={selectedDriver?.location ? {
-              latitude: selectedDriver.location.latitude,
-              longitude: selectedDriver.location.longitude,
+            driverLocation={selectedLocation ? {
+              latitude: selectedLocation.latitude,
+              longitude: selectedLocation.longitude,
               name: selectedDriver.name
             } : null}
             destinationLocation={selectedDriver?.assignments?.[0]?.destinationCoordinates || null}
@@ -198,6 +229,8 @@ export default function DriverInTransitList({ focusedDriverId, onOpenOrderDetail
                   <div
                     key={drv.driverId}
                     onClick={() => handleSelectDriver(drv)}
+                    role="button" tabIndex={0} aria-pressed={isSelected}
+                    onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') {event.preventDefault(); handleSelectDriver(drv);} }}
                     className={`p-3.5 rounded-xl border cursor-pointer transition ${
                       isSelected
                         ? 'bg-orange-950/30 border-orange-600/80 ring-1 ring-orange-500/30'
@@ -237,15 +270,15 @@ export default function DriverInTransitList({ focusedDriverId, onOpenOrderDetail
 
                     {/* Ações Rápidas */}
                     <div className="mt-3 flex items-center justify-between pt-2 border-t border-zinc-800/60 text-xs">
-                      {drv.location ? (
+                      {locationAge(drv) <= 30000 ? (
                         <span className="text-[10px] text-emerald-400 flex items-center gap-1 font-bold">
                           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                          Transmitindo GPS Real
+                          GPS atualizado
                         </span>
                       ) : (
                         <span className="text-[10px] text-amber-400 flex items-center gap-1 font-bold">
                           <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-                          Aguardando permissão de GPS
+                          {locationAge(drv) <= 120000 ? 'Sinal desatualizado' : 'Aguardando sinal de GPS'}
                         </span>
                       )}
 

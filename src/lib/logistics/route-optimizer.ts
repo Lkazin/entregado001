@@ -33,7 +33,7 @@ async function request(url: string, deadline: number, extraHeaders: Record<strin
   } catch { throw new RouteError('Serviço de mapas indisponível. Use a organização manual.', 503, 'ROUTE_PROVIDER_UNAVAILABLE'); }
   finally { clearTimeout(timer); }
 }
-async function destination(a: any, deadline: number): Promise<Coordinates> {
+export async function resolveRouteDestination(a: any, deadline: number): Promise<Coordinates> {
   const direct = coordinates(a.destinationCoordinates) || coordinates({ latitude: a.deliveryLatitude, longitude: a.deliveryLongitude });
   if (direct) return direct;
   const street = typeof a.address === 'string' ? a.address.split(',')[0].trim() : '';
@@ -71,7 +71,7 @@ async function destination(a: any, deadline: number): Promise<Coordinates> {
 export async function optimizeRoute(assignments: any[], mode: RouteMode, origin: Coordinates, deadline = Date.now() + 24000) {
   if (!assignments.length) throw new RouteError('Confirme a retirada de pelo menos uma entrega antes de organizar a rota.', 422, 'ROUTE_NO_DELIVERIES');
   const points = [origin];
-  for (const assignment of assignments) points.push(await destination(assignment, deadline));
+  for (const assignment of assignments) points.push(await resolveRouteDestination(assignment, deadline));
   const count = points.length;
   const distances: number[][] = Array.from({ length: count }, () => []);
   const durations: number[][] = Array.from({ length: count }, () => []);
