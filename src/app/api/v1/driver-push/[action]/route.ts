@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import crypto from 'node:crypto';
 import { requireAccountSession, AccountSessionError } from '@/lib/auth/driver-account';
 import {
   getVapidPublicKey,
@@ -92,7 +93,8 @@ export async function POST(
           {
             userAgent,
             deviceType: 'android',
-          }
+          },
+          crypto.createHash('sha256').update(req.headers.get('x-account-session') || '').digest('hex')
         );
         return json({
           success: saved,
@@ -129,10 +131,13 @@ export async function POST(
     }
 
     if (action === 'unsubscribe') {
-      const endpoint = body?.endpoint;
+      const endpoint = typeof body?.endpoint === 'string' && body.endpoint.trim()
+        ? body.endpoint.trim()
+        : typeof body?.fcmToken === 'string' && body.fcmToken.trim()
+          ? `fcm:${body.fcmToken.trim()}` : undefined;
       const removed = await removeDriverSubscription(account.id, endpoint);
       return json({
-        success: true,
+        success: removed,
         unsubscribed: removed,
       });
     }

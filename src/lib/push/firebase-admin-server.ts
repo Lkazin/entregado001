@@ -100,7 +100,7 @@ export async function sendFcmNotification(
       code === 'messaging/registration-token-not-registered' ||
       code === 'messaging/invalid-registration-token';
 
-    console.warn(`[FirebaseAdmin] Erro ao enviar FCM para token ${token.slice(0, 15)}...:`, err?.message);
+    console.warn('[FirebaseAdmin] Falha ao enviar notificação:', code || 'FCM_SEND_FAILED');
     return {
       success: false,
       expired: isExpired,

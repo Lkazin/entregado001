@@ -12,6 +12,7 @@ export interface PushSubscriptionData {
   endpoint: string;
   keys: PushSubscriptionKeys;
   fcmToken?: string;
+  sessionHash?: string;
   userAgent?: string;
   deviceType?: string;
   accountId?: string;
@@ -77,7 +78,8 @@ export function isWebPushEnabled(): boolean {
 export async function saveDriverSubscription(
   accountId: string,
   sub: { endpoint: string; keys?: { p256dh?: string; auth?: string }; fcmToken?: string },
-  deviceInfo?: { userAgent?: string; deviceType?: string }
+  deviceInfo?: { userAgent?: string; deviceType?: string },
+  sessionHash?: string
 ): Promise<boolean> {
   if (!accountId || !sub?.endpoint) {
     return false;
@@ -87,12 +89,15 @@ export async function saveDriverSubscription(
   const p256dh = sub.keys?.p256dh?.trim() || 'fcm';
   const auth = sub.keys?.auth?.trim() || 'fcm';
   const fcmToken = sub.fcmToken || (endpoint.startsWith('fcm:') ? endpoint.replace(/^fcm:/, '') : undefined);
+  // Native tokens are kept in the existing private state so session binding
+  // does not depend on an unprovisioned column in the web-push table.
+  if (fcmToken && !/^[a-f0-9]{64}$/.test(sessionHash || '')) return false;
   const userAgent = deviceInfo?.userAgent || '';
   const deviceType = deviceInfo?.deviceType || 'unknown';
   const now = new Date().toISOString();
 
   // 1. Tenta salvar na tabela 'driver_push_subscriptions'
-  try {
+  if (!fcmToken) try {
     const { error: dbError } = await supabaseAdmin.from('driver_push_subscriptions').upsert(
       {
         account_id: accountId,
@@ -127,6 +132,7 @@ export async function saveDriverSubscription(
       endpoint,
       keys: { p256dh, auth },
       fcmToken,
+      sessionHash: fcmToken ? sessionHash : undefined,
       userAgent,
       deviceType,
       updatedAt: now,
@@ -180,6 +186,7 @@ export async function removeDriverSubscription(accountId: string, endpoint?: str
  */
 export async function getActiveSubscriptionsForAccount(accountId: string): Promise<PushSubscriptionData[]> {
   if (!accountId) return [];
+  const subscriptions = new Map<string, PushSubscriptionData>();
 
   // Tenta obter da tabela
   try {
@@ -190,13 +197,16 @@ export async function getActiveSubscriptionsForAccount(accountId: string): Promi
       .eq('is_active', true);
 
     if (!error && Array.isArray(data) && data.length > 0) {
-      return data.map((row) => ({
+      for (const row of data) {
+        if (row.endpoint?.startsWith('fcm:')) continue;
+        subscriptions.set(row.endpoint, {
         accountId: row.account_id,
         endpoint: row.endpoint,
         keys: { p256dh: row.p256dh, auth: row.auth },
         userAgent: row.user_agent,
         deviceType: row.device_type,
-      }));
+        });
+      }
     }
   } catch { }
 
@@ -207,10 +217,11 @@ export async function getActiveSubscriptionsForAccount(accountId: string): Promi
       ? state.pushSubscriptions
       : [];
 
-    return subs.filter((s) => s.accountId === accountId && s.endpoint && s.keys?.p256dh);
-  } catch {
-    return [];
-  }
+    for (const sub of subs) {
+      if (sub.accountId === accountId && sub.endpoint && sub.keys?.p256dh) subscriptions.set(sub.endpoint, sub);
+    }
+  } catch { }
+  return [...subscriptions.values()];
 }
 
 /**
@@ -222,6 +233,20 @@ export async function sendWebPush(
 ): Promise<{ success: boolean; expired?: boolean; statusCode?: number; error?: string }> {
   // Disparo nativo via Firebase Cloud Messaging para Android
   if (subscription.endpoint.startsWith('fcm:') || (subscription as any).fcmToken) {
+    if (!subscription.accountId || !/^[a-f0-9]{64}$/.test(subscription.sessionHash || '')) {
+      return { success: false, error: 'Ative novamente as notificações neste aparelho.' };
+    }
+    try {
+      const { data, error } = await supabaseAdmin.from('driver_accounts')
+        .select('active_session_hash,session_expires_at').eq('id', subscription.accountId).maybeSingle();
+      const expiresAt = Date.parse(data?.session_expires_at || '');
+      if (error || !data || data.active_session_hash !== subscription.sessionHash ||
+          !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+        return { success: false, error: 'Sessão da inscrição encerrada ou substituída.' };
+      }
+    } catch {
+      return { success: false, error: 'Não foi possível validar a sessão da notificação.' };
+    }
     const token = (subscription as any).fcmToken || subscription.endpoint.replace(/^fcm:/, '');
     const fcmRes = await sendFcmNotification(token, {
       title: payload.title,
@@ -230,8 +255,8 @@ export async function sendWebPush(
       data: payload.data,
     });
     if (fcmRes.expired && subscription.accountId) {
-      console.warn('[FirebaseAdmin] Token FCM expirado. Removendo endpoint ' + subscription.endpoint.slice(0, 30) + '...');
-      void removeDriverSubscription(subscription.accountId, subscription.endpoint);
+      console.warn('[FirebaseAdmin] Token FCM expirado. Removendo inscrição.');
+      await removeDriverSubscription(subscription.accountId, subscription.endpoint);
     }
     return {
       success: fcmRes.success,
@@ -241,7 +266,7 @@ export async function sendWebPush(
     };
   }
 
-  if (!ensureVapidConfig()) {
+  if (!isWebPushEnabled()) {
     return { success: false, error: 'VAPID não configurado no servidor.' };
   }
 
@@ -276,8 +301,8 @@ export async function sendWebPush(
     const expired = statusCode === 404 || statusCode === 410;
 
     if (expired && subscription.accountId) {
-      console.warn(`[WebPush] Inscrição expirada detectada (${statusCode}). Removendo endpoint ${subscription.endpoint.slice(0, 40)}...`);
-      void removeDriverSubscription(subscription.accountId, subscription.endpoint);
+      console.warn(`[WebPush] Inscrição expirada detectada (${statusCode}). Removendo inscrição.`);
+      await removeDriverSubscription(subscription.accountId, subscription.endpoint);
     }
 
     return {
@@ -333,10 +358,6 @@ export async function notifyDriversOfNewOffer(params: {
   eligibleDriverIds?: string[];
   liveDrivers: any[];
 }): Promise<{ totalNotified: number }> {
-  if (!isWebPushEnabled()) {
-    return { totalNotified: 0 };
-  }
-
   const {
     storeId,
     storeName,
@@ -375,11 +396,6 @@ export async function notifyDriversOfNewOffer(params: {
 
   // 2. Extrai IDs de conta únicos dos motoristas
   const candidateAccountIds = new Set<string>();
-  for (const drv of targetDrivers) {
-    if (drv.driverId && drv.driverId.startsWith('3e') || drv.driverId?.length === 36) {
-      candidateAccountIds.add(drv.driverId);
-    }
-  }
 
   // Se os driverId forem IDs legados, busca na tabela 'driver_account_memberships'
   const membershipIds = targetDrivers.map((d) => d.id).filter(Boolean);
@@ -388,6 +404,7 @@ export async function notifyDriversOfNewOffer(params: {
       const { data: mems } = await supabaseAdmin
         .from('driver_account_memberships')
         .select('account_id, membership_id')
+        .eq('store_id', storeId)
         .in('membership_id', membershipIds);
 
       if (Array.isArray(mems)) {
@@ -397,24 +414,6 @@ export async function notifyDriversOfNewOffer(params: {
       }
     } catch { }
   }
-
-  // Também verifica inscrições salvas no fallback pelo membershipId ou driverId
-  try {
-    const { state } = await readLogisticsState();
-    const subs: PushSubscriptionData[] = Array.isArray(state.pushSubscriptions)
-      ? state.pushSubscriptions
-      : [];
-
-    for (const sub of subs) {
-      if (
-        sub.accountId &&
-        (candidateAccountIds.has(sub.accountId) ||
-          targetDrivers.some((d) => d.id === sub.accountId || d.driverId === sub.accountId))
-      ) {
-        candidateAccountIds.add(sub.accountId);
-      }
-    }
-  } catch { }
 
   const accountIdsArray = Array.from(candidateAccountIds);
   if (!accountIdsArray.length) {

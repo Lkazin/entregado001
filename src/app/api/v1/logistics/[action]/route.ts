@@ -1,7 +1,7 @@
 import { customerTrackingSnapshot } from '@/lib/logistics/customer-tracking';
 import { buildAccountLedger } from '@/lib/logistics/account-ledger';
 import { valhallaRoute } from '@/lib/logistics/valhalla-client';
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse, after } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/server';
 import {
   signDriverToken,
@@ -89,6 +89,7 @@ let liveStateVersion = 0;
 let lastLocalLogisticsPersistAt = 0;
 let lastMutationId = '';
 let databaseRevision = 0;
+let persistedStateExtras: Record<string, unknown> = {};
 const mutationRequest = new AsyncLocalStorage<NextRequest>();
 
 const gShared = globalThis as unknown as {
@@ -292,6 +293,7 @@ async function loadLogisticsState(_forceCloud = false) {
   try {
     const {state: parsed, revision} = await readLogisticsState();
     databaseRevision = revision;
+    persistedStateExtras = parsed;
     {
       const cloudVersion = typeof parsed.stateVersion === 'number' ? parsed.stateVersion : 1;
 
@@ -372,6 +374,7 @@ async function persistLogisticsState(mutationId?: string): Promise<string> {
     }
     const nextVersion = Math.max(1, liveStateVersion) + 1;
     const payload = JSON.stringify({
+      ...persistedStateExtras,
       stateVersion: nextVersion,
       lastMutationId: mutId,
       updatedAt: new Date().toISOString(),
@@ -2508,7 +2511,8 @@ export async function POST(
           await persistLogisticsState();
 
           // Dispara Notificação Web Push para os motoboys destinatários (segundo plano/tela bloqueada)
-          void notifyDriversOfNewOffer({
+          const pushDrivers = liveDrivers.map(driver => ({ ...driver }));
+          after(() => notifyDriversOfNewOffer({
             storeId: effectiveStoreId,
             storeName: offerObj.storeName || settings.storeName || 'Bella Pizza',
             offerId: offerObj.id,
@@ -2518,10 +2522,10 @@ export async function POST(
             distributionMode: effectiveMode,
             targetDriverId: resolvedDriverId,
             eligibleDriverIds,
-            liveDrivers,
+            liveDrivers: pushDrivers,
           }).catch((pushErr) => {
-            console.warn('[Logistics] Aviso ao despachar Web Push:', pushErr);
-          });
+            console.warn('[Logistics] Falha ao despachar notificação.');
+          }));
 
           const orderIdSet = new Set(targetOrders.map((o: any) => String(o.id || o.orderId)));
           const orderNumberSet = new Set(
