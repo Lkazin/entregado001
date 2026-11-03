@@ -1,4 +1,5 @@
 import { supabaseAdmin } from '@/lib/supabase/server';
+import { publishTrackingInvalidation } from './tracking-realtime';
 
 export class StateStoreError extends Error {
   constructor(message: string, public status = 503, public code = 'LOGISTICS_UNAVAILABLE') {
@@ -43,5 +44,6 @@ export async function writeLogisticsState(
     throw new StateStoreError('Os dados foram atualizados por outra operação. Atualize e tente novamente.', 409, 'LOGISTICS_CONFLICT');
   }
   if (error || data === null || data === undefined || validRevision(data) !== nextRevision) throw unavailable();
+  await publishTrackingInvalidation(state, nextRevision);
   return nextRevision;
 }

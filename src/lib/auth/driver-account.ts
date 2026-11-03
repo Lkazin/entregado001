@@ -6,7 +6,7 @@ import { supabaseAdmin } from '@/lib/supabase/server';
 // across all server instances as soon as the database update commits.
 const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
 const SCRYPT_OPTIONS = { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
-const ACCOUNT_FIELDS = 'id,name,phone,vehicle_plate,vehicle_model,created_at';
+const ACCOUNT_FIELDS = 'id,name,phone,vehicle_plate,vehicle_model,home_address,created_at';
 
 function derivePassword(password: string, salt: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -21,6 +21,7 @@ export interface DriverAccount {
   vehiclePlate: string;
   vehicleModel: string;
   createdAt: string;
+  address?: string;
 }
 
 export class AccountSessionError extends Error {
@@ -48,6 +49,7 @@ function accountFromRow(row: any): DriverAccount {
     id: row.id, name: row.name, phone: row.phone,
     vehiclePlate: row.vehicle_plate || '', vehicleModel: row.vehicle_model || '',
     createdAt: row.created_at,
+    address: row.home_address || '',
   };
 }
 
@@ -118,35 +120,12 @@ export async function verifyDriverPassword(password: string, encoded: string): P
   return crypto.timingSafeEqual(key, Buffer.from(hash, 'hex'));
 }
 
-function validatePassword(value: unknown): string {
-  if (typeof value !== 'string' || value.length < 8 || value.length > 128) {
-    throw new AccountSessionError('A senha deve ter entre 8 e 128 caracteres.', 400, 'INVALID_PASSWORD');
-  }
-  return value;
+export async function verifyAuthorizationCode(_rawCode: unknown): Promise<never> {
+  throw new AccountSessionError('Use Primeiro acesso com seu telefone e o código enviado pelo lojista.', 410, 'FIRST_ACCESS_REQUIRED');
 }
 
-export async function registerDriverAccount(body: any): Promise<{ account: DriverAccount; accountToken: string }> {
-  const phone = normalizeDriverPhone(body?.phone);
-  const password = validatePassword(body?.password);
-  const name = String(body?.name || '').trim();
-  const plate = String(body?.vehiclePlate || '').trim().toUpperCase();
-  const model = String(body?.vehicleModel || '').trim();
-  if (name.length < 3 || name.length > 100 || plate.length > 12 || model.length > 100) {
-    throw new AccountSessionError('Confira seu nome e os dados do veículo.', 400, 'INVALID_PROFILE');
-  }
-  const accountToken = crypto.randomBytes(32).toString('hex');
-  const { data, error } = await supabaseAdmin.from('driver_accounts').insert({
-    phone, name, vehicle_plate: plate, vehicle_model: model,
-    password_hash: await hashDriverPassword(password),
-    active_session_hash: hashToken(accountToken),
-    session_expires_at: new Date(Date.now() + SESSION_MS).toISOString(),
-  }).select(ACCOUNT_FIELDS).single();
-  if (error?.code === '23505') {
-    throw new AccountSessionError('Este telefone já possui uma conta. Entre com sua senha.', 409, 'ACCOUNT_EXISTS');
-  }
-  if (error || !data) throw unavailable();
-  await audit('registered', data.id);
-  return { account: accountFromRow(data), accountToken };
+export async function registerDriverAccount(_body: any): Promise<never> {
+  throw new AccountSessionError('Use Primeiro acesso com seu telefone e o código enviado pelo lojista.', 410, 'FIRST_ACCESS_REQUIRED');
 }
 
 export async function loginDriverAccount(body: any): Promise<{ account: DriverAccount; accountToken: string }> {

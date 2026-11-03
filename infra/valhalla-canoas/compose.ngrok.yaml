@@ -1,0 +1,15 @@
+services:
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: novaesweb-maps-ngrok
+    restart: unless-stopped
+    command: ["start", "--all", "--config", "/run/secrets/ngrok.yml", "--log", "stdout", "--log-format", "json"]
+    ports:
+      - "127.0.0.1:4040:4040"
+    volumes:
+      - ./.secrets/ngrok.yml:/run/secrets/ngrok.yml:ro
+    depends_on:
+      - maps-gateway
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m

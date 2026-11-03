@@ -2,7 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/server';
 import { verifyAdminRequest } from '@/lib/auth/tokens';
 import crypto from 'crypto';
-import { readLogisticsState, writeLogisticsState } from '@/lib/logistics/state-store';
+import { ensureCustomerForOrder } from '@/lib/customer-accounts';
+import { readLogisticsState, writeLogisticsState, StateStoreError } from '@/lib/logistics/state-store';
+import { projectStoreOrders, mergeStageHistory } from '@/lib/logistics/order-timeline';
 
 export const dynamic = 'force-dynamic';
 
@@ -158,6 +160,24 @@ async function fetchCurrentOrders(targetStoreId?: string | null): Promise<any[]>
   return localList;
 }
 
+// Commit the merchant change to the same authoritative state read by dispatch.
+async function persistOrderProjection(order: any, storeId: string, changes: Record<string,any>): Promise<any> {
+  for (let attempt=0; attempt<3; attempt++) {
+    const {state,revision} = await readLogisticsState();
+    state.orderProjectionsByStore ||= {};
+    state.orderProjectionsByStore[storeId] ||= {};
+    const previous = state.orderProjectionsByStore[storeId][String(order.id)];
+    if (previous?.deletedAt && !changes.deletedAt) throw new StateStoreError('Este pedido foi removido. Atualize o painel.',404,'ORDER_REMOVED');
+    const fresh = projectStoreOrders([order],state,storeId).find(item=>String(item.id)===String(order.id)) || order;
+    const payment = previous?.orderProjectionUpdatedAt && Object.prototype.hasOwnProperty.call(previous,'paymentStatus') ? {paymentStatus:previous.paymentStatus} : {};
+    const committed = {...fresh,...payment,...changes,orderProjectionUpdatedAt:new Date().toISOString(),
+      stageHistory:mergeStageHistory(previous?.stageHistory,fresh.stageHistory)};
+    state.orderProjectionsByStore[storeId][String(order.id)] = committed;
+    try { await writeLogisticsState(state,revision); return committed; }
+    catch(error) { if (!(error instanceof StateStoreError) || error.status !== 409 || attempt===2) throw error; }
+  }
+}
+
 async function persistOrders(ordersList: any[], targetStoreId?: string | null): Promise<void> {
   const storeId = normalizeStoreId(targetStoreId);
   const cacheMap = gOrders.__novaesweb_orders_by_store__ || {};
@@ -264,6 +284,7 @@ async function cleanLogisticsForOrder(
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
+  'Cache-Control': 'no-store, max-age=0',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-store-id, x-admin-token',
 };
@@ -286,14 +307,17 @@ export async function GET(req: NextRequest) {
       adminCheck.storeId ||
       process.env.NEXT_PUBLIC_STORE_ID
     );
-    const orders = await fetchCurrentOrders(requestedStore);
+    const rawOrders = await fetchCurrentOrders(requestedStore);
+    // A Storage mirror/cache can lag behind an accepted offer. Never serve it alone.
+    const {state} = await readLogisticsState();
+    const orders = projectStoreOrders(rawOrders,state,requestedStore);
 
     // 1. Consulta pública individual por token de acompanhamento (/pedido/[token])
     if (token) {
       const found = orders.find(
         (o: any) =>
           o.trackingToken === token ||
-          o.id === token ||
+          (isAdmin && o.id === token) ||
           (isAdmin && String(o.orderNumber) === token.replace('#', ''))
       );
       if (!found) {
@@ -352,14 +376,7 @@ export async function POST(req: NextRequest) {
       Number(body.orderNumber) <= 999999
         ? Number(body.orderNumber)
         : null;
-    const providedToken =
-      typeof body.trackingToken === 'string' &&
-      body.trackingToken.length >= 8 &&
-      body.trackingToken.length <= 80
-        ? body.trackingToken
-        : null;
-
-    const trackingToken = providedToken || `tk-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+    const trackingToken = `tk-${crypto.randomBytes(32).toString('hex')}`;
     const pin = providedPin || String(Math.floor(1000 + Math.random() * 9000));
     const pinHash = crypto.createHash('sha256').update(pin).digest('hex');
     const storeId = normalizeStoreId(
@@ -447,10 +464,12 @@ export async function POST(req: NextRequest) {
         String(o.phone) === String(customer.phone)
     );
     if (duplicate) {
+      const customer = await ensureCustomerForOrder(req, duplicate).catch(()=>null);
       return NextResponse.json(
         {
           success: true,
           orderId: duplicate.id,
+          customerProfileSaved: Boolean(customer?.customerId),
           orderNumber: duplicate.orderNumber,
           trackingToken: duplicate.trackingToken,
           deliveryPin: duplicate.deliveryPin,
@@ -458,12 +477,14 @@ export async function POST(req: NextRequest) {
           duplicate: true,
           createdAt: new Date().toISOString(),
         },
-        { headers: corsHeaders }
+        { headers: { ...corsHeaders, ...(customer?.setCookie ? { 'Set-Cookie': customer.setCookie } : {}) } }
       );
     }
 
     const updated = [newOrderObj, ...current.filter((o) => o.id !== newOrderObj.id)];
     await persistOrders(updated, storeId);
+    // Include newly received orders in the same confirmed projection used by delay alerts.
+    await persistOrderProjection(newOrderObj, storeId, {}).catch(()=>{});
 
     // Tenta persistir nas tabelas relacionais se existirem
     try {
@@ -517,9 +538,11 @@ export async function POST(req: NextRequest) {
       // Fallback garantido pelo Supabase Storage
     }
 
+    const customerAccount = await ensureCustomerForOrder(req, newOrderObj).catch(()=>null);
     return NextResponse.json(
       {
         success: true,
+        customerProfileSaved: Boolean(customerAccount?.customerId),
         orderId: newOrderObj.id,
         orderNumber,
         trackingToken,
@@ -527,7 +550,7 @@ export async function POST(req: NextRequest) {
         status: 'recebido',
         createdAt: new Date().toISOString(),
       },
-      { headers: corsHeaders }
+      { headers: { ...corsHeaders, ...(customerAccount?.setCookie ? { 'Set-Cookie': customerAccount.setCookie } : {}) } }
     );
   } catch (err: any) {
     return NextResponse.json(
@@ -565,35 +588,32 @@ export async function PATCH(req: NextRequest) {
       req.nextUrl.searchParams.get('storeId') ||
       process.env.NEXT_PUBLIC_STORE_ID
     );
-    let current = await fetchCurrentOrders(patchStoreId);
+    const {state:patchState} = await readLogisticsState();
+    let current = projectStoreOrders(await fetchCurrentOrders(patchStoreId),patchState,patchStoreId).map(order=>({...order}));
     let orderIndex = current.findIndex(
       (o) => o.id === orderId || String(o.orderNumber).replace('#', '') === String(orderId).replace('#', '')
     );
 
     // Se nao achou no arquivo da loja especifica, busca no arquivo raiz orders.json
     if (orderIndex === -1 && patchStoreId !== DEFAULT_STORE_ID) {
-      const rootOrders = await fetchCurrentOrders(DEFAULT_STORE_ID);
+      const rootOrders = projectStoreOrders(await fetchCurrentOrders(DEFAULT_STORE_ID),patchState,patchStoreId);
       const rootIdx = rootOrders.findIndex(
         (o) => o.id === orderId || String(o.orderNumber).replace('#', '') === String(orderId).replace('#', '')
       );
       if (rootIdx !== -1) {
-        current = rootOrders;
+        current = rootOrders.map(order=>({...order}));
         orderIndex = rootIdx;
       }
     }
 
     if (orderIndex !== -1) {
-      if (status) current[orderIndex].status = status;
-      if (paymentStatus) current[orderIndex].paymentStatus = paymentStatus;
-      if (driverName !== undefined) current[orderIndex].driverName = driverName;
-      if (dispatchStatus !== undefined)
-        current[orderIndex].dispatchStatus = dispatchStatus;
-      if (assignedDriverName !== undefined)
-        current[orderIndex].assignedDriverName = assignedDriverName;
-      if (offerGroupId !== undefined) current[orderIndex].offerGroupId = offerGroupId;
-      if (cancellationReason !== undefined)
-        current[orderIndex].cancellationReason = cancellationReason;
-      if (canceledAt !== undefined) current[orderIndex].canceledAt = canceledAt;
+      const changes: Record<string,any> = {};
+      if (status) changes.status = status;
+      if (paymentStatus) changes.paymentStatus = paymentStatus;
+      for (const [key,value] of Object.entries({driverName,dispatchStatus,assignedDriverName,offerGroupId,cancellationReason,canceledAt})) {
+        if (value !== undefined) changes[key] = value;
+      }
+      current[orderIndex] = await persistOrderProjection(current[orderIndex], patchStoreId, changes);
       await persistOrders(current, patchStoreId);
     }
 
@@ -634,12 +654,14 @@ export async function DELETE(req: NextRequest) {
       );
     }
 
-    const current = await fetchCurrentOrders();
-    const filtered = current.filter(
-      (o) => o.id !== orderId && String(o.orderNumber) !== String(orderId)
-    );
-    await persistOrders(filtered);
-    await cleanLogisticsForOrder(orderId, 'delete_order');
+    const deleteStore = normalizeStoreId(verifyAdminRequest(req).storeId);
+    const {state} = await readLogisticsState();
+    const current = projectStoreOrders(await fetchCurrentOrders(deleteStore),state,deleteStore);
+    const target = current.find(o => o.id === orderId || String(o.orderNumber) === String(orderId));
+    if (target) await persistOrderProjection(target,deleteStore,{deletedAt:new Date().toISOString()});
+    const filtered = current.filter(o => o.id !== target?.id);
+    await persistOrders(filtered,deleteStore);
+    if (target) await cleanLogisticsForOrder(target.id, 'delete_order');
 
     return NextResponse.json(
       { success: true, message: 'Pedido removido com sucesso' },

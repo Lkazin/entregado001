@@ -21,6 +21,11 @@ export interface TrackingMapProps {
   interactive?: boolean;
 }
 
+function validPoint(point?: MapPoint | null): point is MapPoint {
+  return Boolean(point && Number.isFinite(point.latitude) && Math.abs(point.latitude) <= 90 &&
+    Number.isFinite(point.longitude) && Math.abs(point.longitude) <= 180);
+}
+
 export default function TrackingMap({
   storeLocation,
   destinationLocation,
@@ -40,20 +45,17 @@ export default function TrackingMap({
 
   const [mapLoaded, setMapLoaded] = useState(false);
 
+  useEffect(() => {
+    hasFittedBoundsRef.current = false;
+  }, [destinationLocation?.latitude, destinationLocation?.longitude]);
+
   // 1. Inicializa o Mapa MapLibre GL com tiles OpenStreetMap oficiais (100% livres, sem API Key)
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) return;
 
-    const initialLng =
-      driverLocation?.longitude ||
-      destinationLocation?.longitude ||
-      storeLocation?.longitude ||
-      -51.1781;
-    const initialLat =
-      driverLocation?.latitude ||
-      destinationLocation?.latitude ||
-      storeLocation?.latitude ||
-      -29.9189;
+    const initial = [driverLocation, destinationLocation, storeLocation].find(validPoint);
+    const initialLng = initial?.longitude ?? -51.1781;
+    const initialLat = initial?.latitude ?? -29.9189;
 
     const map = new maplibregl.Map({
       container: mapContainerRef.current,
@@ -80,7 +82,7 @@ export default function TrackingMap({
       center: [initialLng, initialLat],
       zoom: 13.5,
       interactive,
-      attributionControl: false,
+      attributionControl: { compact: true },
     });
 
     if (interactive) {
@@ -113,9 +115,7 @@ export default function TrackingMap({
 
     // --- Marcador da Loja (Pizzaria) ---
     if (
-      storeLocation &&
-      typeof storeLocation.longitude === 'number' &&
-      typeof storeLocation.latitude === 'number'
+      validPoint(storeLocation)
     ) {
       if (!storeMarkerRef.current) {
         const el = document.createElement('div');
@@ -128,7 +128,7 @@ export default function TrackingMap({
             🍕
           </div>
           <div style="font-size:10px;font-weight:800;background:rgba(24,24,27,0.92);color:#ffffff;padding:2px 6px;border-radius:6px;margin-top:2px;white-space:nowrap;border:1px solid rgba(255,255,255,0.2);">
-            ${storeLocation.label || 'Bella Pizza'}
+            Loja
           </div>
         `;
         storeMarkerRef.current = new maplibregl.Marker({ element: el })
@@ -137,6 +137,8 @@ export default function TrackingMap({
       } else {
         storeMarkerRef.current.setLngLat([storeLocation.longitude, storeLocation.latitude]);
       }
+      const storeLabel = storeMarkerRef.current.getElement().lastElementChild;
+      if (storeLabel) storeLabel.textContent = storeLocation.label || 'Loja';
 
       if (!driverLocation && !destinationLocation) {
         map.easeTo({
@@ -144,13 +146,14 @@ export default function TrackingMap({
           duration: 600,
         });
       }
+    } else if (storeMarkerRef.current) {
+      storeMarkerRef.current.remove();
+      storeMarkerRef.current = null;
     }
 
     // --- Marcador do Destino (Cliente) ---
     if (
-      destinationLocation &&
-      typeof destinationLocation.longitude === 'number' &&
-      typeof destinationLocation.latitude === 'number'
+      validPoint(destinationLocation)
     ) {
       if (!destMarkerRef.current) {
         const el = document.createElement('div');
@@ -163,7 +166,7 @@ export default function TrackingMap({
             📍
           </div>
           <div style="font-size:10px;font-weight:800;background:rgba(24,24,27,0.92);color:#34d399;padding:2px 6px;border-radius:6px;margin-top:2px;white-space:nowrap;border:1px solid rgba(52,211,153,0.3);max-width:160px;overflow:hidden;text-overflow:ellipsis;">
-            ${destinationLocation.label || 'Seu Endereço'}
+            Seu endereço
           </div>
         `;
         destMarkerRef.current = new maplibregl.Marker({ element: el })
@@ -175,13 +178,16 @@ export default function TrackingMap({
           destinationLocation.latitude,
         ]);
       }
+      const destinationLabel = destMarkerRef.current.getElement().lastElementChild;
+      if (destinationLabel) destinationLabel.textContent = destinationLocation.label || 'Seu endereço';
+    } else if (destMarkerRef.current) {
+      destMarkerRef.current.remove();
+      destMarkerRef.current = null;
     }
 
     // --- Marcador do Motoboy em Trânsito ---
     if (
-      driverLocation &&
-      typeof driverLocation.longitude === 'number' &&
-      typeof driverLocation.latitude === 'number'
+      validPoint(driverLocation)
     ) {
       if (!driverMarkerRef.current) {
         const el = document.createElement('div');
@@ -194,7 +200,7 @@ export default function TrackingMap({
             🏍️
           </div>
           <div style="font-size:10px;font-weight:800;background:rgba(24,24,27,0.92);color:#fb923c;padding:2px 6px;border-radius:6px;margin-top:2px;white-space:nowrap;border:1px solid rgba(251,146,60,0.3);text-align:center;">
-            ${driverLocation.name || 'Entregador'}
+            Entregador
           </div>
         `;
         driverMarkerRef.current = new maplibregl.Marker({ element: el })
@@ -203,6 +209,8 @@ export default function TrackingMap({
       } else {
         driverMarkerRef.current.setLngLat([driverLocation.longitude, driverLocation.latitude]);
       }
+      const driverLabel = driverMarkerRef.current.getElement().lastElementChild;
+      if (driverLabel) driverLabel.textContent = driverLocation.name || 'Entregador';
     } else if (driverMarkerRef.current) {
       driverMarkerRef.current.remove();
       driverMarkerRef.current = null;
@@ -217,7 +225,9 @@ export default function TrackingMap({
     const sourceId = 'route-source';
     const layerId = 'route-layer';
 
-    if (routeCoordinates && routeCoordinates.length > 1) {
+    if (routeCoordinates && routeCoordinates.length > 1 && routeCoordinates.every(coord =>
+      Array.isArray(coord) && coord.length >= 2 && Number.isFinite(coord[0]) && Math.abs(coord[0]) <= 180 &&
+      Number.isFinite(coord[1]) && Math.abs(coord[1]) <= 90)) {
       const geojson: GeoJSON.Feature<GeoJSON.LineString> = {
         type: 'Feature',
         properties: {},
@@ -271,18 +281,24 @@ export default function TrackingMap({
         map.fitBounds(bounds, { padding: 55, maxZoom: 16 });
         hasFittedBoundsRef.current = true;
       }
-    } else if (!hasFittedBoundsRef.current) {
+    } else {
+      // Remove the previous customer's geometry when a delivery ends or changes.
+      if (map.getLayer(layerId)) map.removeLayer(layerId);
+      if (map.getLayer(`${layerId}-glow`)) map.removeLayer(`${layerId}-glow`);
+      if (map.getSource(sourceId)) map.removeSource(sourceId);
+      if (!storeLocation && !destinationLocation && !driverLocation) hasFittedBoundsRef.current = false;
+      if (hasFittedBoundsRef.current) return;
       const bounds = new maplibregl.LngLatBounds();
       let hasPoints = false;
-      if (storeLocation) {
+      if (validPoint(storeLocation)) {
         bounds.extend([storeLocation.longitude, storeLocation.latitude]);
         hasPoints = true;
       }
-      if (destinationLocation) {
+      if (validPoint(destinationLocation)) {
         bounds.extend([destinationLocation.longitude, destinationLocation.latitude]);
         hasPoints = true;
       }
-      if (driverLocation) {
+      if (validPoint(driverLocation)) {
         bounds.extend([driverLocation.longitude, driverLocation.latitude]);
         hasPoints = true;
       }
@@ -306,7 +322,7 @@ export default function TrackingMap({
         <Navigation className="w-3 h-3 text-orange-400" />
         <span className="font-semibold text-zinc-300">MapLibre GL</span>
         <span className="text-zinc-600">•</span>
-        <span>OpenStreetMap & OSRM</span>
+        <span>OpenStreetMap</span>
       </div>
     </div>
   );

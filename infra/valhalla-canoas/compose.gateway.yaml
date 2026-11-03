@@ -1,0 +1,23 @@
+services:
+  maps-gateway:
+    image: python:3.12-alpine
+    container_name: novaesweb-maps-gateway
+    restart: unless-stopped
+    command: ["python", "-B", "/app/gateway.py"]
+    user: "65534:65534"
+    ports:
+      - "127.0.0.1:8003:8003"
+    volumes:
+      - ./gateway.py:/app/gateway.py:ro
+    secrets:
+      - valhalla_api_key
+    depends_on:
+      - valhalla
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 32
+    mem_limit: 128m
+secrets:
+  valhalla_api_key:
+    file: ./.secrets/valhalla_api_key

@@ -95,6 +95,26 @@ function fixture(options = {}) {
 }
 module.exports={fixture,driver,assignment,ACCOUNT_A,ACCOUNT_B,TOKEN_A,TOKEN_B,STORE_A,STORE_B};
 
+test('GPS só armazena captura recente após retirada e não aceita posição atrasada', async () => {
+  const d = driver('gps-member','gps-driver');
+  const f = fixture({ drivers:[d], memberships:[{membership_id:d.id,account_id:ACCOUNT_A,driver_id:d.driverId,store_id:STORE_A}],
+    assignments:[assignment('gps-assignment',d.driverId)] });
+  const payload = {assignmentId:'gps-assignment',latitude:-29.9,longitude:-51.1,accuracy:10,timestamp:Date.now()-100};
+  const ignored = await f.post('tracking-location-push',payload,'a',f.driverHeaders(d));
+  assert.equal(ignored.status,200); assert.equal(ignored.body.ignored,true); assert.equal(f.backing.writes,0);
+  f.backing.state.assignments[0].status='picked_up';
+  for (const patch of [{latitude:91},{longitude:181},{accuracy:101},{timestamp:Date.now()-60000},{timestamp:Date.now()+10000}]) {
+    const denied=await f.post('tracking-location-push',{...payload,...patch},'a',f.driverHeaders(d));
+    assert.equal(denied.status,400); assert.equal(f.backing.writes,0);
+  }
+  const stored=await f.post('tracking-location-push',payload,'a',f.driverHeaders(d));
+  assert.equal(stored.status,200); assert.ok(!stored.body.ignored);
+  assert.equal(f.stored().tracking[d.driverId].capturedAt,new Date(payload.timestamp).toISOString());
+  const writes=f.backing.writes;
+  const delayed=await f.post('tracking-location-push',{...payload,timestamp:payload.timestamp-1},'a',f.driverHeaders(d));
+  assert.equal(delayed.body.ignored,true); assert.equal(f.backing.writes,writes);
+});
+
   test('bootstrap só retorna vínculos e ganhos autorizados da conta em qualquer aparelho',async()=>{
     const da=driver('membership-a','driver-a'),db=driver('membership-b','driver-b',STORE_B);
     const f=fixture({drivers:[da,db],memberships:[{membership_id:da.id,account_id:ACCOUNT_A,driver_id:da.driverId,store_id:da.storeId},{membership_id:db.id,account_id:ACCOUNT_B,driver_id:db.driverId,store_id:db.storeId}],
@@ -156,3 +176,18 @@ module.exports={fixture,driver,assignment,ACCOUNT_A,ACCOUNT_B,TOKEN_A,TOKEN_B,ST
     assert.equal(f.backing.limitKeys.every(k=>/^[a-f0-9]{64}$/.test(k)),true);assert.equal(f.backing.writes,0);assert.equal(f.backing.storageWrites,0);
     const outage=fixture();outage.backing.failLimit=true;const unavailable=await outage.post('invite-activate',{inviteCode:'NW-NOT-ISSUED'});assert.equal(unavailable.status,503);assert.equal(outage.backing.writes,0);
   });
+
+test('revisão do banco prevalece sobre versão JSON antiga e preserva novo pré-cadastro', async () => {
+  const f=fixture({drivers:[driver('existing','legacy-driver')]});
+  f.backing.state.stateVersion=99;
+  assert.equal((await f.get('drivers','admin')).status,200);
+  f.backing.state.drivers.push(driver('new-first-access','new-driver',STORE_A,{status:'aguardando_motoboy',presence:'indisponivel'}));
+  f.backing.state.stateVersion=2;
+  f.backing.revision++;
+  const updated=await f.get('drivers','admin');
+  assert.equal(updated.status,200);
+  assert.ok(updated.body.drivers.some(d=>d.id==='new-first-access'));
+  const saved=await f.post('settings-update',{distributionMode:'broadcast_enabled'},'admin');
+  assert.equal(saved.status,200);
+  assert.ok(f.stored().drivers.some(d=>d.id==='new-first-access'));
+});

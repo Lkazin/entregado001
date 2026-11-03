@@ -17,8 +17,9 @@ function fixture() {
   const limits = new Map();
   let fail = false;
   const db = {
-    rpc: async (_name, {p_key, p_limit}) => {
+    rpc: async (_name, args) => {
       if (fail) return {error: {message: 'test outage'}};
+      const {p_key,p_limit} = args;
       limits.set(p_key, (limits.get(p_key) || 0) + 1);
       return {data: limits.get(p_key) <= p_limit, error: null};
     },
@@ -51,32 +52,32 @@ function fixture() {
   };
   const context = {exports:{}, Buffer, Date, console, require:name => name === '@/lib/supabase/server' ? {supabaseAdmin:db} : require(name)};
   vm.createContext(context); vm.runInContext(compiled,context,{filename});
-  return {api:context.exports,accounts,events,limits,outage:value=>{fail=value;}};
+  return {api:context.exports,accounts,events,limits,outage:value=>{fail=value;},seed:async profile=>{
+    const accountToken=crypto.randomBytes(32).toString('hex');
+    const row={id:crypto.randomUUID(),created_at:new Date().toISOString(),name:profile.name,phone:context.exports.normalizeDriverPhone(profile.phone),vehicle_plate:profile.vehiclePlate,vehicle_model:profile.vehicleModel,home_address:profile.address||'',password_hash:await context.exports.hashDriverPassword(profile.password),active_session_hash:crypto.createHash('sha256').update(accountToken).digest('hex'),session_expires_at:new Date(Date.now()+86400000).toISOString()};
+    accounts.push(row);return{account:{id:row.id,phone:row.phone},accountToken};
+  }};
 }
 
-const profile = {name:'Entregador de teste',phone:'11999990001',vehiclePlate:'ABC1D23',vehicleModel:'Moto',password:'test-password-123'};
+const profile = {name:'Entregador de teste',phone:'11999990001',vehiclePlate:'ABC1D23',vehicleModel:'Moto',password:'test-password-123',registrationCode:'CAD-ABCDEF123456'};
 const request = token => ({headers:{get:name=>name === 'x-account-session' ? token : name === 'x-vercel-forwarded-for' ? '192.0.2.1' : null}});
 
-test('cadastro central usa identidade estável e hash; telefone duplicado não cria outra conta', async () => {
-  const f = fixture(); const session = await f.api.registerDriverAccount(profile);
-  assert.equal(f.accounts.length,1);
-  assert.equal(session.account.phone,'+5511999990001');
-  assert.notEqual(f.accounts[0].password_hash, profile.password);
-  assert.match(f.accounts[0].password_hash,/^scrypt\$/);
-  assert.notEqual(f.accounts[0].active_session_hash,session.accountToken);
-  assert.equal((await f.api.requireAccountSession(request(session.accountToken))).id,session.account.id);
-  await assert.rejects(f.api.registerDriverAccount({...profile,phone:'+55 (11) 99999-0001'}),e=>e.status===409);
+test('cadastro antigo e verify-code falham fechados sem criar conta', async () => {
+  const f=fixture();
+  await assert.rejects(f.api.registerDriverAccount(profile),e=>e.status===410&&e.code==='FIRST_ACCESS_REQUIRED');
+  await assert.rejects(f.api.verifyAuthorizationCode('NW-123456'),e=>e.status===410&&e.code==='FIRST_ACCESS_REQUIRED');
+  assert.equal(f.accounts.length,0);
 });
 
 test('senha errada não entra nem revoga a sessão corrente', async () => {
-  const f = fixture(); const a = await f.api.registerDriverAccount(profile);
+  const f = fixture(); const a = await f.seed(profile);
   await assert.rejects(f.api.loginDriverAccount({identifier:profile.phone,password:'wrong-pass'}),e=>e.status===401);
   assert.equal((await f.api.requireAccountSession(request(a.accountToken))).id,a.account.id);
   assert.equal(f.events.at(-1).event,'login_failed');
 });
 
 test('último login revoga aparelho anterior e logout atrasado não revoga novo aparelho', async () => {
-  const f = fixture(); const a = await f.api.registerDriverAccount(profile);
+  const f = fixture(); const a = await f.seed(profile);
   const b = await f.api.loginDriverAccount({identifier:profile.phone,password:profile.password});
   assert.equal(a.account.id,b.account.id);
   await assert.rejects(f.api.requireAccountSession(request(a.accountToken)),e=>e.status===401&&e.code==='ACCOUNT_SESSION_REPLACED');
@@ -87,15 +88,15 @@ test('último login revoga aparelho anterior e logout atrasado não revoga novo 
 });
 
 test('dois logins concorrentes deixam somente um token autorizado', async () => {
-  const f = fixture(); await f.api.registerDriverAccount(profile);
+  const f = fixture(); await f.seed(profile);
   const sessions = await Promise.all([1,2].map(()=>f.api.loginDriverAccount({identifier:profile.phone,password:profile.password})));
   const checks = await Promise.allSettled(sessions.map(s=>f.api.requireAccountSession(request(s.accountToken))));
   assert.equal(checks.filter(c=>c.status==='fulfilled').length,1);
 });
 
 test('contas isoladas, expiração e indisponibilidade não autorizam sessão', async () => {
-  const f = fixture(); const a = await f.api.registerDriverAccount(profile);
-  const b = await f.api.registerDriverAccount({...profile,phone:'21999990002'});
+  const f = fixture(); const a = await f.seed(profile);
+  const b = await f.seed({...profile,phone:'21999990002',registrationCode:'CAD-ABCDEF123458'});
   assert.notEqual(a.account.id,b.account.id);
   assert.equal((await f.api.requireAccountSession(request(a.accountToken))).id,a.account.id);
   assert.equal((await f.api.requireAccountSession(request(b.accountToken))).id,b.account.id);

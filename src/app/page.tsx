@@ -10,6 +10,7 @@ import PizzaBuilder from '@/components/PizzaBuilder';
 import CatalogSection from '@/components/CatalogSection';
 import CartCheckoutDrawer from '@/components/CartCheckoutDrawer';
 import Footer from '@/components/Footer';
+import CustomerSiteNotices from '@/components/CustomerSiteNotices';
 import WhatsAppButton from '@/components/WhatsAppButton';
 import CookieBanner from '@/components/CookieBanner';
 import ScrollToTop from '@/components/ScrollToTop';
@@ -100,6 +101,7 @@ export default function HomePage() {
 
   return (
     <div className="min-h-screen bg-zinc-950 text-white flex flex-col">
+      <CustomerSiteNotices token={lastCreatedOrder?.trackingToken} />
       <Navbar
         cartCount={cartItems.reduce((acc, item) => acc + item.quantity, 0)}
         cartTotal={cartTotal}
@@ -159,6 +161,7 @@ export default function HomePage() {
               <p className="text-xs text-zinc-400 mt-1">
                 Seu pedido foi encaminhado para a cozinha da Bella Pizza!
               </p>
+              {lastCreatedOrder.profileSaveWarning && <p role="status" className="mt-2 text-xs text-amber-300">{lastCreatedOrder.profileSaveWarning}</p>}
             </div>
 
             {/* Código PIN de Entrega */}

@@ -1,0 +1,8 @@
+custom_files/
+*.osm
+*.pbf
+*.log
+preparo-pronto
+
+.secrets/
+__pycache__/

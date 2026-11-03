@@ -7,12 +7,22 @@ import {
   Flame, LayoutDashboard, ShoppingCart, UtensilsCrossed, Bike, Settings, 
   CheckCircle2, Clock, AlertTriangle, ArrowRight, Printer, XCircle, Search, 
   UserPlus, ShieldAlert, KeyRound, Check, RefreshCw, Send, Lock, PlusCircle,
-  Copy, MessageSquare, MessageCircle, Trash2, CheckSquare, Square, X, MapPin, Package, Users
+  Copy, MessageSquare, MessageCircle, Trash2, CheckSquare, Square, X, MapPin, Package, Users, Star
 } from 'lucide-react';
 import { PIZZA_FLAVORS } from '@/lib/constants';
 
 import AdminPinAuth from '@/components/AdminPinAuth';
 import DriverInTransitList from '@/components/DriverInTransitList';
+import FirstAccessInvitePanel from '@/components/FirstAccessInvitePanel';
+import StoreNotificationCenter from '@/components/StoreNotificationCenter';
+import CustomerAdminPanel from '@/components/CustomerAdminPanel';
+import AdminNavigationDrawer from '@/components/AdminNavigationDrawer';
+import AdminModalLayer from '@/components/AdminModalLayer';
+import CustomerRatingsAdminPanel from '@/components/CustomerRatingsAdminPanel';
+import CustomerTrackingSettings from '@/components/CustomerTrackingSettings';
+import OrderStageTiming from '@/components/OrderStageTiming';
+import OrderDelayAlerts, { OrderDelayBadge, useOrderAlarmSettings } from '@/components/OrderDelayAlerts';
+import { orderDelay } from '@/lib/order-delay-alerts';
 import { printThermalOrder, testPrintThermal, PaperWidth } from '@/lib/thermalPrinter';
 
 function getAdminHeaders(extra?: Record<string, string>): Record<string, string> {
@@ -21,7 +31,7 @@ function getAdminHeaders(extra?: Record<string, string>): Record<string, string>
     ...(extra || {}),
   };
   if (typeof window !== 'undefined') {
-    const token = sessionStorage.getItem('novaesweb_admin_token') || '615210';
+    const token = sessionStorage.getItem('novaesweb_admin_token') || '';
     if (token) {
       headers['x-admin-token'] = token;
       headers['Authorization'] = `Bearer ${token}`;
@@ -78,6 +88,11 @@ interface AdminOrder {
   assignedDriverName?: string | null;
   offerGroupId?: string | null;
   createdAt: string;
+  acceptedAt?: string;
+  preparingAt?: string;
+  readyAt?: string;
+  dispatchedAt?: string;
+  stageHistory?: Array<{stage: string; at: string; reason?: string; attemptId?: string}>;
   pickedUpAt?: string;
   deliveredAt?: string;
   cancellationReason?: string;
@@ -139,12 +154,66 @@ const STATUS_HIERARCHY: Record<string, number> = {
 
 export default function AdminDashboardPage() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'kanban' | 'menu' | 'logistics' | 'settings' | 'canceled'>('kanban');
+  const [activeTab, setActiveTabState] = useState<'overview' | 'kanban' | 'menu' | 'logistics' | 'settings' | 'canceled' | 'first_access' | 'customers' | 'ratings'>('kanban');
+  const [navigationOpen, setNavigationOpen] = useState(false);
+  const navigationButtonRef = React.useRef<HTMLButtonElement>(null);
+  const tvRequestedRef = React.useRef(false);
+  const setActiveTab = (tab: typeof activeTab) => {
+    tvRequestedRef.current = false;
+    setActiveTabState(tab); setNavigationOpen(false); setIsHeaderCollapsed(false);
+    if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+    const url = new URL(window.location.href); url.searchParams.set('section', tab);
+    window.history.pushState({}, '', url); window.scrollTo({ top: 0 });
+  };
+  useEffect(() => {
+    const restore = () => {
+      const tab = new URL(window.location.href).searchParams.get('section');
+      const valid = ['overview', 'kanban', 'menu', 'logistics', 'settings', 'canceled', 'first_access', 'customers', 'ratings'];
+      setActiveTabState(valid.includes(tab || '') ? tab as typeof activeTab : 'kanban');
+      tvRequestedRef.current = false;
+      setIsHeaderCollapsed(false); setNavigationOpen(false);
+      if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+    };
+    restore(); window.addEventListener('popstate', restore);
+    return () => window.removeEventListener('popstate', restore);
+  }, []);
+  const leaveTvMode = () => {
+    tvRequestedRef.current = false;
+    setIsHeaderCollapsed(false);
+    if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+  };
+  const enterTvMode = () => {
+    tvRequestedRef.current = true;
+    setActiveTabState('kanban'); setNavigationOpen(false); setIsHeaderCollapsed(true);
+    // The document includes notification portals and order dialogs.
+    if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+      void document.documentElement.requestFullscreen().then(() => {
+        // Escape or navigation may happen before the browser grants fullscreen.
+        if (!tvRequestedRef.current && document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+      }).catch(() => {});
+    }
+  };
+  useEffect(() => {
+    const onFullscreen = () => { if (!document.fullscreenElement) { tvRequestedRef.current = false; setIsHeaderCollapsed(false); } };
+    const onEscape = (event: KeyboardEvent) => { if (event.key === 'Escape' && tvRequestedRef.current) leaveTvMode(); };
+    document.addEventListener('fullscreenchange', onFullscreen); window.addEventListener('keydown', onEscape);
+    return () => { document.removeEventListener('fullscreenchange', onFullscreen); window.removeEventListener('keydown', onEscape); };
+  }, []);
   const [canceledSearch, setCanceledSearch] = useState('');
   const [ordersSearch, setOrdersSearch] = useState('');
 
   // Estado REAL sem dados fakes (carregados da API e do banco)
   const [orders, setOrders] = useState<AdminOrder[]>([]);
+  const ordersFetchInFlight = React.useRef(false);
+  const ordersEpoch = React.useRef(0);
+  const applyLocalOrders: typeof setOrders = update => { ordersEpoch.current++; setOrders(update); };
+  const [stageNow, setStageNow] = useState(0);
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    setStageNow(Date.now());
+    const timer = setInterval(() => setStageNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [isAuthenticated]);
   const [drivers, setDrivers] = useState<AdminDriver[]>([]);
   const [storeSettings, setStoreSettings] = useState<StoreDispatchSettings>({
     storeId: 'store_bella_pizza',
@@ -157,6 +226,8 @@ export default function AdminDashboardPage() {
     storeCity: 'Canoas',
     storeState: 'RS',
   });
+  const [orderAlarmSettings] = useOrderAlarmSettings(storeSettings.storeId);
+  const delayedOrderCount = orders.filter(order => orderDelay(order, stageNow, orderAlarmSettings) !== null).length;
   // Enquanto o lojista edita configurações, o polling não pode sobrescrever a escolha (causa do "entregador fixo trocar sozinho")
   const settingsDirtyRef = React.useRef(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
@@ -183,12 +254,7 @@ export default function AdminDashboardPage() {
     return false;
   });
     // Modo Cozinha (Recolher Topo) e Fila de Novos Pedidos
-  const [isHeaderCollapsed, setIsHeaderCollapsed] = useState<boolean>(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('novaesweb_kitchen_mode') === 'true';
-    }
-    return false;
-  });
+  const [isHeaderCollapsed, setIsHeaderCollapsed] = useState(false);
   const [pendingNewOrders, setPendingNewOrders] = useState<AdminOrder[]>([]);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [paperWidth, setPaperWidth] = useState<PaperWidth>(() => {
@@ -200,15 +266,23 @@ export default function AdminDashboardPage() {
   });
   const knownOrderIdsRef = React.useRef<Set<string> | null>(null);
 
+  useEffect(() => {
+    if (isLoading || !isAuthenticated) return;
+    const received = new Map(orders.filter(order => order.status === 'recebido').map(order => [order.id, order]));
+    // An order advanced/canceled in another tab must leave this device's arrival alarm too.
+    setPendingNewOrders(previous => {
+      const remaining = previous.filter(order => received.has(order.id));
+      return remaining.length === previous.length ? previous : remaining;
+    });
+  }, [orders, isLoading, isAuthenticated]);
+
   // Deteccao de novos pedidos para fila e impressao automatica
   useEffect(() => {
-    if (isLoading) return;
+    if (isLoading || !isAuthenticated) return;
     const currentIds = new Set(orders.map(o => o.id));
-    if (knownOrderIdsRef.current === null) {
-      knownOrderIdsRef.current = currentIds;
-      return;
-    }
-    const known = knownOrderIdsRef.current;
+    const initialLoad = knownOrderIdsRef.current === null;
+    const known = knownOrderIdsRef.current || new Set<string>();
+    knownOrderIdsRef.current = known;
     const freshOrders = orders.filter(o => !known.has(o.id) && o.status === 'recebido');
     currentIds.forEach(id => known.add(id));
 
@@ -219,21 +293,44 @@ export default function AdminDashboardPage() {
         return [...prev, ...toAdd];
       });
 
-      if (autoPrint) {
+      if (autoPrint && !initialLoad) {
         freshOrders.forEach(ord => printThermalOrder(ord, paperWidth));
       }
     }
-  }, [orders, isLoading, autoPrint, paperWidth]);
+  }, [orders, isLoading, isAuthenticated, autoPrint, paperWidth]);
+
+  const alarmAudioRef = React.useRef<AudioContext | null>(null);
+  useEffect(() => {
+    const unlock = () => {
+      try {
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        if (!AudioCtx) return;
+        const ctx = alarmAudioRef.current || new AudioCtx();
+        alarmAudioRef.current = ctx;
+        if (ctx.state === 'suspended') void ctx.resume().catch(() => {});
+      } catch {}
+    };
+    window.addEventListener('pointerdown', unlock);
+    window.addEventListener('keydown', unlock);
+    return () => {
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+      void alarmAudioRef.current?.close().catch(() => {});
+      alarmAudioRef.current = null;
+    };
+  }, []);
 
   // Alarme Sonoro Continuo Tipo Campainha de Delivery (Ding-Dong)
   useEffect(() => {
-    if (pendingNewOrders.length === 0 || isMuted) return;
+    if (pendingNewOrders.length === 0 || delayedOrderCount > 0 || isMuted || !isAuthenticated || !orderAlarmSettings.enabled || orderAlarmSettings.volume === 0) return;
 
     const playDingDong = () => {
       try {
         const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
         if (!AudioCtx) return;
-        const ctx = new AudioCtx();
+        const ctx = alarmAudioRef.current || new AudioCtx();
+        alarmAudioRef.current = ctx;
+        if (ctx.state === 'suspended') { void ctx.resume().catch(() => {}); return; }
         const now = ctx.currentTime;
 
         // Tom 1: Ding (880 Hz)
@@ -241,36 +338,51 @@ export default function AdminDashboardPage() {
         const gain1 = ctx.createGain();
         osc1.type = 'triangle';
         osc1.frequency.setValueAtTime(880, now);
-        gain1.gain.setValueAtTime(0.35, now);
+        gain1.gain.setValueAtTime(orderAlarmSettings.volume / 100 * 0.35, now);
         gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
         osc1.connect(gain1);
         gain1.connect(ctx.destination);
         osc1.start(now);
         osc1.stop(now + 0.4);
+        osc1.onended = () => { osc1.disconnect(); gain1.disconnect(); };
 
         // Tom 2: Dong (659 Hz)
         const osc2 = ctx.createOscillator();
         const gain2 = ctx.createGain();
         osc2.type = 'sine';
         osc2.frequency.setValueAtTime(659.25, now + 0.22);
-        gain2.gain.setValueAtTime(0.35, now + 0.22);
+        gain2.gain.setValueAtTime(orderAlarmSettings.volume / 100 * 0.35, now + 0.22);
         gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.85);
         osc2.connect(gain2);
         gain2.connect(ctx.destination);
         osc2.start(now + 0.22);
         osc2.stop(now + 0.85);
+        osc2.onended = () => { osc2.disconnect(); gain2.disconnect(); };
       } catch (e) {}
     };
 
     playDingDong();
-    const interval = setInterval(playDingDong, 1800);
+    const interval = setInterval(playDingDong, orderAlarmSettings.repeatSeconds * 1000);
     return () => clearInterval(interval);
-  }, [pendingNewOrders.length, isMuted]);
+  }, [pendingNewOrders.length, delayedOrderCount, isMuted, isAuthenticated, orderAlarmSettings.enabled, orderAlarmSettings.volume, orderAlarmSettings.repeatSeconds]);
 
-  // Checar autenticação via PIN 615210
+  // O marcador local não comprova que a sessão do servidor continua válida.
   useEffect(() => {
-    const auth = typeof window !== 'undefined' ? sessionStorage.getItem('novaesweb_admin_auth') : null;
-    setIsAuthenticated(auth === 'authenticated');
+    let active = true;
+    const expired = () => {
+      sessionStorage.removeItem('novaesweb_admin_auth');
+      sessionStorage.removeItem('novaesweb_admin_token');
+      if (active) setIsAuthenticated(false);
+    };
+    window.addEventListener('novaesweb:admin-session-expired', expired);
+    fetch('/api/admin/auth', {headers:getAdminHeaders(), cache:'no-store'})
+      .then(async response => {
+        const data = await response.json().catch(() => ({}));
+        if (!active) return;
+        if (response.ok && data.authenticated) setIsAuthenticated(true);
+        else expired();
+      }).catch(() => {if (active) setIsAuthenticated(false);});
+    return () => {active=false;window.removeEventListener('novaesweb:admin-session-expired', expired);};
   }, []);
 
   // Carregar cache local de pedidos para nunca sumir nada
@@ -281,15 +393,8 @@ export default function AdminDashboardPage() {
         if (cached) {
           const parsed = JSON.parse(cached);
           if (Array.isArray(parsed)) {
-            // Filtrar pedidos de demonstração antigos
-            const realOnly = parsed.filter((o: any) => 
-              !o.customerName?.includes('Teste') && 
-              !o.customerName?.includes('Fictício') &&
-              !o.customerName?.includes('João') &&
-              !o.customerName?.includes('Maria')
-            );
-            setOrders(realOnly);
-            localStorage.setItem('novaesweb_orders', JSON.stringify(realOnly));
+            // Nomes de clientes não identificam dados de demonstração.
+            setOrders(parsed);
           }
         }
       } catch (e) {}
@@ -299,7 +404,8 @@ export default function AdminDashboardPage() {
         if (e.key === 'novaesweb_orders' && e.newValue) {
           try {
             const newOrders = JSON.parse(e.newValue);
-            if (Array.isArray(newOrders)) setOrders(newOrders);
+            // Other tabs may hold an older snapshot; ask the server instead.
+            if (Array.isArray(newOrders) && sessionStorage.getItem('novaesweb_admin_token')) void fetchData(true);
           } catch (err) {}
         }
       };
@@ -330,6 +436,9 @@ export default function AdminDashboardPage() {
 
   // FUNÇÃO DE BUSCA DOS DADOS REAIS
   const fetchData = async (silent = false) => {
+    if (ordersFetchInFlight.current) return;
+    ordersFetchInFlight.current = true;
+    const epoch = ordersEpoch.current;
     if (!silent) setIsRefreshing(true);
     try {
       // 1. Buscar Pedidos Reais
@@ -341,16 +450,13 @@ export default function AdminDashboardPage() {
         return;
       }
       const dataOrders = await resOrders.json().catch(() => null);
+      if (epoch !== ordersEpoch.current) return;
       if (dataOrders && dataOrders.success && Array.isArray(dataOrders.orders)) {
         setOrders(prevOrders => {
-          // Filtrar quaisquer pedidos de demonstração remanescentes
-          const incoming: AdminOrder[] = dataOrders.orders.filter((o: any) => 
-            !o.customerName?.includes('Teste') && 
-            !o.customerName?.includes('Fictício') &&
-            !o.customerName?.includes('João') &&
-            !o.customerName?.includes('Maria')
-          );
-          
+          if (epoch !== ordersEpoch.current) return prevOrders;
+          // Todo pedido retornado pelo servidor deve ser exibido, independentemente do nome.
+          const incoming: AdminOrder[] = dataOrders.orders;
+
           // Se a lista no servidor estiver vazia (ex: limpeza de demonstração pelo lojista), limpa tudo
           if (incoming.length === 0) {
             if (typeof window !== 'undefined') {
@@ -359,34 +465,9 @@ export default function AdminDashboardPage() {
             return [];
           }
 
-          // Ordem de progressão natural do status (anti-regressão garantida pelo módulo)
 
-          const result = incoming.map(o => {
-            const existing = prevOrders.find(p => p.id === o.id || String(p.orderNumber).replace('#', '') === String(o.orderNumber).replace('#', ''));
-            if (existing) {
-              const currentRank = STATUS_HIERARCHY[existing.status] || 0;
-              const incomingRank = STATUS_HIERARCHY[o.status] || 0;
-
-              // Se o status local já avançou (ex: lojista clicou em preparar/pronto ou motoboy concluiu),
-              // e a resposta do servidor veio com status anterior por latência/cache,
-              // preserva sempre o status mais avançado (NUNCA regride de concluído para recebido ou de preparando para recebido!)
-              let resolvedStatus = o.status;
-              if (o.status === 'cancelado' || existing.status === 'cancelado') {
-                resolvedStatus = 'cancelado';
-              } else if (currentRank > incomingRank) {
-                resolvedStatus = existing.status;
-              }
-
-              return {
-                ...o,
-                status: resolvedStatus,
-                dispatchStatus: existing.dispatchStatus || o.dispatchStatus,
-                assignedDriverName: existing.assignedDriverName || o.assignedDriverName,
-                offerGroupId: existing.offerGroupId || o.offerGroupId
-              };
-            }
-            return o;
-          });
+          // O servidor inclui as devoluções ao despacho e o estado confirmado.
+          const result = incoming;
 
           if (typeof window !== 'undefined') {
             localStorage.setItem('novaesweb_orders', JSON.stringify(result));
@@ -409,7 +490,6 @@ export default function AdminDashboardPage() {
             // Entregadores com vínculo removido/convite revogado são tratados como excluídos (histórico segue preservado no servidor)
             const validDrivers: AdminDriver[] = cloudData.drivers.filter(
               (d: any) =>
-                !d.name?.includes('Rodrigo Silva') &&
                 d.status !== 'vinculo_removido' &&
                 d.status !== 'revogado'
             );
@@ -424,154 +504,8 @@ export default function AdminDashboardPage() {
             }
           }
 
-          // SINCRONIZAÇÃO AUTOMÁTICA EM TEMPO REAL: Aceite, Retirada e Conclusão das Entregas
-          const cloudOffers = Array.isArray(cloudData.offers) ? cloudData.offers : [];
-          const cloudAssignments = Array.isArray(cloudData.assignments) ? cloudData.assignments : [];
+          // Os pedidos já vêm projetados pelo servidor com aceite, retirada e conclusão.
 
-          setOrders(prevOrders => {
-            let hasChanged = false;
-            const updated = prevOrders.map(order => {
-              // Pedidos concluídos ou cancelados NUNCA devem regredir para pronto ou recebido!
-              if (order.status === 'cancelado' || order.status === 'concluido') {
-                return order;
-              }
-              const currentRank = STATUS_HIERARCHY[order.status] || 1;
-              const orderIdStr = String(order.id);
-              const orderNumStr = String(order.orderNumber).replace('#', '');
-
-              // 1. Verificar em Assignments (tarefas do motoboy)
-              const asg = cloudAssignments.find((a: any) => 
-                String(a.orderId) === orderIdStr ||
-                String(a.orderNumber).replace('#', '') === orderNumStr
-              );
-
-              if (asg) {
-                const asgDriver = asg.driverName || asg.driverId || order.assignedDriverName || order.driverName;
-
-                // Status: Concluído com validação de PIN
-                if (asg.status === 'delivered' || asg.status === 'entregue') {
-                  if ((order.status as string) !== 'concluido' || order.dispatchStatus !== 'concluido') {
-                    hasChanged = true;
-                    return {
-                      ...order,
-                      status: 'concluido' as const,
-                      dispatchStatus: 'concluido' as const,
-                      driverName: asgDriver,
-                      assignedDriverName: asgDriver,
-                      deliveredAt: asg.deliveredAt || new Date().toISOString()
-                    };
-                  }
-                  return order;
-                }
-
-                // Status: Retirada confirmada na loja -> Em Rota de Entrega
-                if (asg.status === 'picked_up' || asg.status === 'in_transit') {
-                  if (order.status !== 'em_entrega' || order.dispatchStatus !== 'em_entrega') {
-                    hasChanged = true;
-                    return {
-                      ...order,
-                      status: 'em_entrega' as const,
-                      dispatchStatus: 'em_entrega' as const,
-                      driverName: asgDriver,
-                      assignedDriverName: asgDriver,
-                      pickedUpAt: asg.pickupConfirmedAt || order.pickedUpAt
-                    };
-                  }
-                  return order;
-                }
-
-                // Status: Aceito pelo motoboy -> Aguardando Retirada no Balcão
-                if (asg.status === 'waiting_pickup') {
-                  if (order.dispatchStatus !== 'aceito_aguardando_retirada' || order.driverName !== asgDriver) {
-                    hasChanged = true;
-                    // Mantém status em_entrega se já tiver saído, nunca regride
-                    const resolvedStatus = currentRank >= 4 ? order.status : ('pronto' as const);
-                    return {
-                      ...order,
-                      status: resolvedStatus,
-                      dispatchStatus: 'aceito_aguardando_retirada' as const,
-                      driverName: asgDriver,
-                      assignedDriverName: asgDriver
-                    };
-                  }
-                  return order;
-                }
-              }
-
-              // 2. Verificar em Offers (ofertas enviadas)
-              const offer = cloudOffers.find((o: any) => {
-                if (String(o.orderId) === orderIdStr || String(o.orderNumber).replace('#', '') === orderNumStr) return true;
-                if (Array.isArray(o.orderIds) && o.orderIds.some((id: any) => String(id) === orderIdStr)) return true;
-                if (Array.isArray(o.orders) && o.orders.some((item: any) => 
-                  String(item.orderId || item.id) === orderIdStr || 
-                  String(item.orderNumber).replace('#', '') === orderNumStr
-                )) return true;
-                return false;
-              });
-
-              if (offer) {
-                const offerDriver = offer.driverName || offer.targetDriverName || order.assignedDriverName || order.driverName;
-
-                // Oferta aceita pelo motoboy
-                if (offer.status === 'atribuida' || offer.status === 'accepted') {
-                  if (order.dispatchStatus !== 'aceito_aguardando_retirada' || order.driverName !== offerDriver) {
-                    hasChanged = true;
-                    const resolvedStatus = currentRank >= 4 ? order.status : ('pronto' as const);
-                    return {
-                      ...order,
-                      status: resolvedStatus,
-                      dispatchStatus: 'aceito_aguardando_retirada' as const,
-                      driverName: offerDriver,
-                      assignedDriverName: offerDriver
-                    };
-                  }
-                  return order;
-                }
-
-                // Oferta aguardando aceite
-                if (offer.status === 'pendente') {
-                  if (order.dispatchStatus !== 'aguardando_aceite') {
-                    hasChanged = true;
-                    const resolvedStatus = currentRank >= 4 ? order.status : ('pronto' as const);
-                    return {
-                      ...order,
-                      status: resolvedStatus,
-                      dispatchStatus: 'aguardando_aceite' as const,
-                      assignedDriverName: offerDriver,
-                      driverName: offerDriver
-                    };
-                  }
-                  return order;
-                }
-
-                // Oferta recusada ou expirada
-                if (offer.status === 'recusada' || offer.status === 'expirada' || offer.status === 'cancelada') {
-                  if (order.dispatchStatus === 'aguardando_aceite') {
-                    hasChanged = true;
-                    const resolvedStatus = currentRank >= 4 ? order.status : ('pronto' as const);
-                    return {
-                      ...order,
-                      status: resolvedStatus,
-                      dispatchStatus: 'disponivel' as const,
-                      assignedDriverName: null,
-                      driverName: null
-                    };
-                  }
-                  return order;
-                }
-              }
-
-              return order;
-            });
-
-            if (hasChanged) {
-              if (typeof window !== 'undefined') {
-                localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
-              }
-              return updated;
-            }
-            return prevOrders;
-          });
         }
       } catch (cloudErr) {
         console.warn('Erro ao sincronizar logistics.json do Supabase:', cloudErr);
@@ -579,6 +513,7 @@ export default function AdminDashboardPage() {
     } catch (err) {
       console.error('Erro ao sincronizar dados:', err);
     } finally {
+      ordersFetchInFlight.current = false;
       setIsLoading(false);
       setIsRefreshing(false);
     }
@@ -586,12 +521,13 @@ export default function AdminDashboardPage() {
 
   // POLLING AUTOMÁTICO A CADA 3 SEGUNDOS (Tempo Real Conectado ao App do Entregador)
   useEffect(() => {
+    if (!isAuthenticated) return;
     fetchData();
     const interval = setInterval(() => {
       fetchData(true);
     }, 3000);
     return () => clearInterval(interval);
-  }, []);
+  }, [isAuthenticated]);
 
   // Transições do Kanban Conectadas à API
   const handleAdvanceStatus = async (orderId: string, currentStatus: AdminOrder['status']) => {
@@ -601,7 +537,7 @@ export default function AdminDashboardPage() {
       const nextStatus = sequence[currentIdx + 1];
       
       // Atualização imediata otimista no estado e no cache local
-      setOrders(prev => {
+      applyLocalOrders(prev => {
         const updated = prev.map(o => o.id === orderId ? { ...o, status: nextStatus } : o);
         if (typeof window !== 'undefined') {
           localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
@@ -638,7 +574,7 @@ export default function AdminDashboardPage() {
 
   // Confirmar Pix Manual Conectado à API
   const handleConfirmPix = async (orderId: string) => {
-    setOrders(prev => {
+    applyLocalOrders(prev => {
       const updated = prev.map(o => o.id === orderId ? { ...o, paymentStatus: 'confirmado_manual' as const } : o);
       if (typeof window !== 'undefined') {
         localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
@@ -670,7 +606,7 @@ export default function AdminDashboardPage() {
 
     setIsCancelingOrder(true);
 
-    setOrders(prev => {
+    applyLocalOrders(prev => {
       const updated = prev.map(o => o.id === orderId ? { 
         ...o, 
         status: 'cancelado' as const,
@@ -725,7 +661,7 @@ export default function AdminDashboardPage() {
   const handleRestoreOrder = async (orderId: string) => {
     if (!confirm('Deseja restaurar este pedido de volta para a coluna "1. Recebido" do Kanban?')) return;
 
-    setOrders(prev => {
+    applyLocalOrders(prev => {
       const updated = prev.map(o => o.id === orderId ? { 
         ...o, 
         status: 'recebido' as const, 
@@ -762,7 +698,7 @@ export default function AdminDashboardPage() {
   const handleDeleteOrderPermanently = async (orderId: string) => {
     if (!confirm('Tem certeza que deseja excluir definitivamente este registro do histórico de cancelados?')) return;
 
-    setOrders(prev => {
+    applyLocalOrders(prev => {
       const updated = prev.filter(o => o.id !== orderId);
       if (typeof window !== 'undefined') {
         localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
@@ -826,6 +762,8 @@ export default function AdminDashboardPage() {
         ? options?.driverIdOverride || storeSettings.fixedDriverId || selectedDriverId
         : null;
 
+    const destination = targetDriverId ? drivers.find(d => d.id === targetDriverId || d.driverId === targetDriverId) : null;
+    if (!window.confirm(`Enviar ${targetOrders.length} pedido(s) para ${destination?.driverName || destination?.name || (targetDriverId ? 'o entregador selecionado' : 'os entregadores habilitados')}?`)) return;
     setIsSendingDispatch(true);
     setDispatchWarningBanner(null);
 
@@ -887,7 +825,7 @@ export default function AdminDashboardPage() {
           : 'Entregador Fixo');
 
       const selectedIdSet = new Set(targetOrders.map((o) => o.id));
-      setOrders((prev) => {
+      applyLocalOrders((prev) => {
         const updated = prev.map((o) =>
           selectedIdSet.has(o.id)
             ? {
@@ -961,7 +899,7 @@ export default function AdminDashboardPage() {
   const handleCancelDispatch = async (orderId: string) => {
     if (!confirm('Deseja retirar este pedido do despacho e torná-lo disponível novamente?')) return;
 
-    setOrders((prev) => {
+    applyLocalOrders((prev) => {
       const updated = prev.map((o) =>
         o.id === orderId
           ? {
@@ -1040,7 +978,7 @@ export default function AdminDashboardPage() {
         headers: getAdminHeaders(),
         body: JSON.stringify({
           ...nextSettings,
-          applyLimitToAllDrivers: true,
+          applyLimitToAllDrivers: false,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -1077,6 +1015,9 @@ export default function AdminDashboardPage() {
         headers: getAdminHeaders(),
         body: JSON.stringify({
           validityDays: days,
+          driverName: newDriverName.trim() || undefined,
+          phone: newDriverPhone.trim() || undefined,
+          vehiclePlate: newDriverPlate.trim() || undefined,
           bindImmediately: false,
           maxDeliveries: storeSettings.maxConcurrentDeliveries || 5,
         }),
@@ -1100,6 +1041,7 @@ export default function AdminDashboardPage() {
   };
 
   const handleCopyCode = (code: string) => {
+    if (!code) return;
     if (typeof navigator !== 'undefined' && navigator.clipboard) {
       navigator.clipboard.writeText(code);
       setCodeCopied(true);
@@ -1107,8 +1049,9 @@ export default function AdminDashboardPage() {
     }
   };
 
-  const getWhatsAppShareUrl = (code: string) => {
-    const text = `Olá! Seu código de vínculo/plantão na Bella Pizza é: ${code}. Abra seu app NovaesWeb Entregador e insira o código para iniciar.`;
+  const getWhatsAppShareUrl = (code?: string) => {
+    if (!code) return undefined;
+    const text = `Olá! Seu código de plantão na Bella Pizza é: ${code}. Entre na sua conta do NovaesWeb Entregador e use este código para conectar-se à loja. Este código não cria uma conta nova.`;
     return `https://wa.me/?text=${encodeURIComponent(text)}`;
   };
 
@@ -1221,7 +1164,7 @@ export default function AdminDashboardPage() {
         if (typeof window !== 'undefined') {
           localStorage.removeItem('novaesweb_orders');
         }
-        setOrders([]);
+        applyLocalOrders([]);
         setDispatchAlert('Todos os pedidos e demonstrações foram excluídos com sucesso. Painel 100% limpo!');
         setTimeout(() => setDispatchAlert(null), 4000);
         fetchData(true);
@@ -1248,7 +1191,7 @@ export default function AdminDashboardPage() {
   const selectedOrders = orders.filter(o => selectedOrderIds.includes(o.id));
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-white flex flex-col">
+    <div inert={navigationOpen} className={`bg-zinc-950 text-white flex flex-col ${isHeaderCollapsed ? 'fixed inset-0 z-40 h-dvh overflow-y-auto' : 'min-h-screen'}`}>
       
       {/* Aviso de novo pedido */}
       {newOrderAlert && (
@@ -1287,26 +1230,24 @@ export default function AdminDashboardPage() {
         <div className="fixed top-3 right-4 z-40 animate-fade-in">
           <button
             type="button"
-            onClick={() => {
-              setIsHeaderCollapsed(false);
-              localStorage.setItem('novaesweb_kitchen_mode', 'false');
-            }}
+            onClick={leaveTvMode}
             className="px-3.5 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-black flex items-center gap-2 shadow-2xl shadow-red-600/50 transition transform active:scale-95"
             title="Sair do modo tela cheia e exibir menu"
           >
             <Minimize2 className="w-4 h-4" />
-            <span>Exibir Menu Principal</span>
+            <span>Sair do modo TV</span>
           </button>
         </div>
       )}
 
       {/* Topo do Painel Administrativo (Recolhivel no Modo Cozinha) */}
-      <header className={`border-b border-zinc-800 bg-zinc-900/90 backdrop-blur-md px-6 py-4 sticky top-0 z-30 transition-all duration-300 ${
+      <header className={`border-b border-zinc-800 bg-zinc-900/90 backdrop-blur-md px-3 sm:px-6 py-3 sm:py-4 sticky top-0 z-30 transition-all duration-300 ${
         isHeaderCollapsed ? 'hidden' : 'block'
       }`}>
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           
-          <div className="flex items-center gap-3">
+          <div className="flex items-center flex-wrap gap-2 sm:gap-3">
+            <button ref={navigationButtonRef} type="button" aria-expanded={navigationOpen} aria-controls="admin-navigation" onClick={() => setNavigationOpen(true)} className="rounded-xl border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm font-bold hover:bg-zinc-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-400">☰ Menu {delayedOrderCount > 0 && <span className="ml-2 rounded-full bg-red-600 px-2 py-0.5 text-xs text-white" aria-label={`${delayedOrderCount} pedidos atrasados`}>{delayedOrderCount}</span>}</button>
             <Link href="/" className="flex items-center gap-2 group">
               <div className="w-8 h-8 rounded-xl bg-red-600 flex items-center justify-center text-white">
                 <Flame className="w-5 h-5 text-amber-300" />
@@ -1321,11 +1262,12 @@ export default function AdminDashboardPage() {
             </span>
             <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800/40 text-[11px] font-semibold">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span>Sincronização em Tempo Real Ativa</span>
+              <span>Atualização automática</span>
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center flex-wrap gap-2">
+            <StoreNotificationCenter getHeaders={getAdminHeaders} onOpenOrder={id=>setDetailOrderId(id)} onOpenRatings={()=>setActiveTab('ratings')} floating={isHeaderCollapsed} />
             <button
               onClick={() => fetchData()}
               disabled={isRefreshing}
@@ -1340,6 +1282,16 @@ export default function AdminDashboardPage() {
             >
               Ver Site Público
             </Link>
+            <button
+              type="button"
+              onClick={() => setActiveTab('first_access')}
+              className="px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-black transition flex items-center gap-1.5 shadow-md shadow-amber-500/20"
+              title="Cadastrar motoboy e gerar código para o aplicativo NovaesWeb Entregador"
+            >
+              <KeyRound className="w-3.5 h-3.5" />
+              <span>+ Cadastrar Motoboy</span>
+            </button>
+
             <button
               onClick={() => {
                 sessionStorage.removeItem('novaesweb_admin_auth');
@@ -1356,9 +1308,10 @@ export default function AdminDashboardPage() {
         </div>
 
         {/* Abas Principais de Navegação */}
-        <div className="flex gap-2 mt-4 pt-3 border-t border-zinc-800/80 overflow-x-auto text-xs font-bold">
+        <AdminNavigationDrawer open={navigationOpen} onClose={() => setNavigationOpen(false)} triggerRef={navigationButtonRef}>
+        <nav id="admin-navigation" aria-label="Seções do painel" className="admin-tabs grid gap-2 text-sm font-bold [&>button]:justify-start [&>button]:text-left [&>button]:!whitespace-normal">
           <button
-            onClick={() => setActiveTab('kanban')}
+            aria-current={activeTab === 'kanban' ? 'page' : undefined} onClick={() => setActiveTab('kanban')}
             className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
               activeTab === 'kanban'
                 ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
@@ -1366,11 +1319,23 @@ export default function AdminDashboardPage() {
             }`}
           >
             <ShoppingCart className="w-4 h-4" />
-            <span>Kanban de Pedidos ({orders.filter(o => o.status !== 'concluido' && o.status !== 'cancelado').length})</span>
+            <span>Pedidos ({orders.filter(o => o.status !== 'concluido' && o.status !== 'cancelado').length}) {delayedOrderCount > 0 && <span className="ml-1 rounded-full bg-red-950 px-2 py-0.5 text-xs text-red-200">{delayedOrderCount} atrasados</span>}</span>
           </button>
 
           <button
-            onClick={() => setActiveTab('logistics')}
+            aria-current={activeTab === 'first_access' ? 'page' : undefined} onClick={() => setActiveTab('first_access')}
+            className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
+              activeTab === 'first_access'
+                ? 'bg-amber-500 text-zinc-950 font-black shadow-lg shadow-amber-500/30'
+                : 'text-amber-400 hover:text-white hover:bg-zinc-800/60'
+            }`}
+          >
+            <KeyRound className="w-4 h-4 text-amber-400" />
+            <span>Cadastrar Motoboy (Primeiro Acesso)</span>
+          </button>
+
+          <button
+            aria-current={activeTab === 'logistics' ? 'page' : undefined} onClick={() => setActiveTab('logistics')}
             className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
               activeTab === 'logistics'
                 ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
@@ -1382,7 +1347,7 @@ export default function AdminDashboardPage() {
           </button>
 
           <button
-            onClick={() => setActiveTab('overview')}
+            aria-current={activeTab === 'overview' ? 'page' : undefined} onClick={() => setActiveTab('overview')}
             className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
               activeTab === 'overview'
                 ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
@@ -1394,7 +1359,7 @@ export default function AdminDashboardPage() {
           </button>
 
           <button
-            onClick={() => setActiveTab('menu')}
+            aria-current={activeTab === 'menu' ? 'page' : undefined} onClick={() => setActiveTab('menu')}
             className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
               activeTab === 'menu'
                 ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
@@ -1406,7 +1371,7 @@ export default function AdminDashboardPage() {
           </button>
 
           <button
-            onClick={() => setActiveTab('settings')}
+            aria-current={activeTab === 'settings' ? 'page' : undefined} onClick={() => setActiveTab('settings')}
             className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
               activeTab === 'settings'
                 ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
@@ -1417,8 +1382,25 @@ export default function AdminDashboardPage() {
             <span>Configurações</span>
           </button>
 
+          <button type="button" aria-current={activeTab === 'customers' ? 'page' : undefined} onClick={()=>setActiveTab('customers')} className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${activeTab==='customers'?'bg-red-600 text-white':'text-zinc-400 hover:text-white hover:bg-zinc-800/60'}`}>
+            <Users className="h-4 w-4"/><span>Clientes</span>
+          </button>
+
           <button
-            onClick={() => setActiveTab('canceled')}
+            type="button"
+            aria-current={activeTab === 'ratings' ? 'page' : undefined} onClick={() => setActiveTab('ratings')}
+            className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
+              activeTab === 'ratings'
+                ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
+                : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60'
+            }`}
+          >
+            <Star className="w-4 h-4 text-amber-400 fill-amber-400" />
+            <span>Avaliações dos Clientes</span>
+          </button>
+
+          <button
+            aria-current={activeTab === 'canceled' ? 'page' : undefined} onClick={() => setActiveTab('canceled')}
             className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${
               activeTab === 'canceled'
                 ? 'bg-red-600 text-white shadow-lg shadow-red-600/30'
@@ -1428,6 +1410,10 @@ export default function AdminDashboardPage() {
             <XCircle className="w-4 h-4 text-red-400" />
             <span>Pedidos Cancelados ({orders.filter(o => o.status === 'cancelado').length})</span>
           </button>
+        </nav>
+        </AdminNavigationDrawer>
+        <div className="mt-3 border-t border-zinc-800 pt-3 text-sm font-bold text-zinc-200">
+          {{ kanban: 'Pedidos', logistics: 'Logística e entregadores', overview: 'Visão geral e relatórios', menu: 'Cardápio e preços', settings: 'Configurações', customers: 'Clientes e endereços', ratings: 'Avaliações dos clientes', canceled: 'Pedidos cancelados', first_access: 'Cadastrar entregador' }[activeTab]}
         </div>
       </header>
 
@@ -1440,9 +1426,12 @@ export default function AdminDashboardPage() {
       )}
 
       {/* Conteúdo Dinâmico por Aba */}
-      <main className="flex-1 p-3 sm:p-5 lg:p-6 w-full max-w-none mx-auto">
+      <main className={`flex-1 p-3 sm:p-5 lg:p-6 w-full max-w-none mx-auto ${isHeaderCollapsed ? 'pt-16 sm:pt-16' : ''}`}>
+        <div className="mb-4"><OrderDelayAlerts orders={orders} now={stageNow} storeId={storeSettings.storeId} onOpenOrder={setDetailOrderId} muted={isMuted}/></div>
         
         {/* ABA 1: KANBAN DE PEDIDOS */}
+        {activeTab === 'customers' && <CustomerAdminPanel getHeaders={getAdminHeaders} />}
+        {activeTab === 'ratings' && <CustomerRatingsAdminPanel getHeaders={getAdminHeaders} />}
         {activeTab === 'kanban' && (
           <div className="space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -1505,16 +1494,12 @@ export default function AdminDashboardPage() {
 
                 <button
                   type="button"
-                  onClick={() => {
-                    const next = !isHeaderCollapsed;
-                    setIsHeaderCollapsed(next);
-                    localStorage.setItem('novaesweb_kitchen_mode', String(next));
-                  }}
+                  onClick={isHeaderCollapsed ? leaveTvMode : enterTvMode}
                   className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold flex items-center gap-1.5 transition border border-zinc-700/60"
-                  title="Recolher topo para o Kanban ocupar toda a tela da cozinha"
+                  title="Exibir somente pedidos em tela cheia"
                 >
                   <Maximize2 className="w-3.5 h-3.5 text-zinc-400" />
-                  <span>{isHeaderCollapsed ? 'Restaurar Menu' : 'Modo Tela Cheia (Recolher Topo)'}</span>
+                  <span>{isHeaderCollapsed ? 'Sair do modo TV' : 'Modo TV · tela cheia'}</span>
                 </button>
               </div>
             </div>
@@ -1539,20 +1524,21 @@ export default function AdminDashboardPage() {
               )}
             </div>
 
-            {/* As 5 Colunas do Kanban */}
-            <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+            {/* Etapas do pedido */}
+            <div className="admin-kanban">
               
               {[
                 { key: 'recebido', label: '1. Recebido', color: 'border-blue-500/40 text-blue-400' },
                 { key: 'preparando', label: '2. Preparando', color: 'border-amber-500/40 text-amber-400' },
-                { key: 'pronto', label: '3. Pronto / Despacho', color: 'border-purple-500/40 text-purple-400' },
-                { key: 'em_entrega', label: '4. Em Entrega', color: 'border-orange-500/40 text-orange-400' },
-                { key: 'concluido', label: '5. Concluído', color: 'border-emerald-500/40 text-emerald-400' },
+                { key: 'pronto', label: '3. Despacho', color: 'border-purple-500/40 text-purple-400' },
+                { key: 'retirada', label: '4. Retirada', color: 'border-cyan-500/40 text-cyan-400' },
+                { key: 'em_entrega', label: '5. Em Entrega', color: 'border-orange-500/40 text-orange-400' },
+                { key: 'concluido', label: '6. Concluídos', color: 'border-emerald-500/40 text-emerald-400' },
               ].map((col) => {
                 const q = ordersSearch.toLowerCase();
                 const colOrders = orders.filter(
                   (o) =>
-                    o.status === col.key &&
+                    (o.status === 'pronto' && o.dispatchStatus === 'aceito_aguardando_retirada' ? 'retirada' : o.status) === col.key &&
                     [
                       String(o.orderNumber),
                       o.customerName,
@@ -1607,10 +1593,13 @@ export default function AdminDashboardPage() {
                       ) : (
                         colOrders.map((order) => {
                           const orderTimeMs = order.createdAtISO ? new Date(order.createdAtISO).getTime() : 0;
-                          const elapsedMins = orderTimeMs ? Math.max(0, Math.floor((Date.now() - orderTimeMs) / 60000)) : null;
+                          const elapsedMins = orderTimeMs && stageNow ? Math.max(0, Math.floor((stageNow - orderTimeMs) / 60000)) : null;
 
                           // Estilo Tematico por Coluna/Status
-                          const cardTheme = selectedOrderIds.includes(order.id)
+                          const delay = orderDelay(order, stageNow, orderAlarmSettings);
+                          const cardTheme = delay
+                            ? 'border-red-500 bg-red-950/70 shadow-lg shadow-red-950/50'
+                            : selectedOrderIds.includes(order.id)
                             ? 'border-red-600/90 bg-red-950/30 shadow-lg shadow-red-950/40'
                             : col.key === 'recebido'
                             ? 'border-blue-500/70 bg-gradient-to-b from-blue-950/35 to-zinc-900/95 shadow-lg shadow-blue-950/20 hover:border-blue-400'
@@ -1639,6 +1628,7 @@ export default function AdminDashboardPage() {
                                 {col.key === 'recebido' && 'Novo Pedido'}
                                 {col.key === 'preparando' && '🔥 No Forno'}
                                 {col.key === 'pronto' && 'Pronto p/ Despacho'}
+                                {col.key === 'retirada' && 'Aguardando retirada'}
                                 {col.key === 'em_entrega' && 'Na Rua'}
                                 {col.key === 'concluido' && 'Entregue ✓'}
                               </span>
@@ -1652,10 +1642,12 @@ export default function AdminDashboardPage() {
                                     : 'bg-zinc-800 text-zinc-300'
                                 }`}>
                                   <Clock className="w-2.5 h-2.5" />
-                                  <span>{elapsedMins} min</span>
+                                  <span>Total: {elapsedMins} min</span>
                                 </span>
                               )}
                             </div>
+                            <OrderDelayBadge order={order} now={stageNow} settings={orderAlarmSettings} />
+                            <OrderStageTiming order={order} now={stageNow} />
                             {/* Checkbox de seleção para despacho em lote */}
                             {col.key === 'pronto' && order.dispatchStatus !== 'aguardando_aceite' && order.dispatchStatus !== 'aceito_aguardando_retirada' && (
                               <button
@@ -1903,6 +1895,7 @@ export default function AdminDashboardPage() {
         {/* ABA 2: MÓDULO DE LOGÍSTICA */}
         {activeTab === 'logistics' && (
           <div className="space-y-8">
+            <button type="button" onClick={() => setActiveTab('first_access')} className="px-4 py-3 rounded-xl bg-amber-500 text-zinc-950 text-sm font-bold">Cadastrar motoboy e gerenciar primeiro acesso</button>
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div>
                 <h2 className="text-xl font-black text-white">Visão dos Entregadores da Loja & Logística</h2>
@@ -1975,7 +1968,7 @@ export default function AdminDashboardPage() {
                 </div>
               </div>
 
-              <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-x-auto shadow-xl">
+            <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-x-auto shadow-xl">
                 <table className="w-full text-left text-xs">
                   <thead className="bg-zinc-950/80 border-b border-zinc-800 text-zinc-400 uppercase text-[10px] font-bold">
                     <tr>
@@ -2039,11 +2032,12 @@ export default function AdminDashboardPage() {
                                 </p>
                                 <div className="flex items-center gap-1.5">
                                   <span className="font-mono font-black text-amber-400 bg-zinc-950 px-2 py-0.5 rounded border border-amber-500/30 text-[11px]">
-                                    {drv.inviteCode}
+                                    {drv.inviteCode || 'Primeiro acesso'}
                                   </span>
                                   <button
                                     type="button"
                                     onClick={() => handleCopyCode(drv.inviteCode)}
+                                    disabled={!drv.inviteCode}
                                     className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition"
                                     title="Copiar Código"
                                   >
@@ -2092,7 +2086,7 @@ export default function AdminDashboardPage() {
                                   </span>
                                 )}
                                 <p className="text-[10px] text-zinc-500">
-                                  Capacidade: <strong className="text-zinc-300">{drv.activeDeliveries || 0}/{drv.maxDeliveries || storeSettings.maxConcurrentDeliveries}</strong> pedidos
+                                  Capacidade: <strong className="text-zinc-300">{drv.activeDeliveries || 0}</strong> pedidos
                                 </p>
                               </div>
                             </td>
@@ -2270,6 +2264,133 @@ export default function AdminDashboardPage() {
           </div>
         )}
 
+        {/* ABA: CADASTRAR MOTOBOY / PRIMEIRO ACESSO */}
+        {activeTab === 'first_access' && (
+          <div className="space-y-8 max-w-5xl mx-auto">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-zinc-800">
+              <div>
+                <h2 className="text-xl font-black text-white flex items-center gap-2">
+                  <KeyRound className="w-5 h-5 text-amber-400" />
+                  <span>Cadastrar Motoboy & Primeiro Acesso ao Aplicativo</span>
+                </h2>
+                <p className="text-xs text-zinc-400 mt-1">
+                  Gere o código de autorização e primeiro acesso para vincular entregadores ao aplicativo NovaesWeb Entregador.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveTab('kanban')}
+                className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-bold transition flex items-center gap-1.5 self-start sm:self-auto"
+              >
+                <ShoppingCart className="w-3.5 h-3.5" />
+                <span>Voltar ao Kanban</span>
+              </button>
+            </div>
+
+            {/* BLOCO 1: PRIMEIRO ACESSO COM CADASTRO GUIADO */}
+            <FirstAccessInvitePanel getHeaders={getAdminHeaders} onChanged={() => {void fetchData(true);}} />
+
+            {/* BLOCO 2: CÓDIGO DE PLANTÃO / VÍNCULO RÁPIDO NW-XXXXXX */}
+            <div className="p-6 rounded-2xl bg-zinc-900/60 border border-zinc-800 shadow-xl space-y-4">
+              <div>
+                <h3 className="font-extrabold text-base text-white flex items-center gap-2">
+                  <UserPlus className="w-4 h-4 text-amber-400" />
+                  <span>Código de autorização / plantão para motoboy com conta</span>
+                </h3>
+                <p className="text-xs text-zinc-400 mt-0.5">
+                  Para quem já possui conta, gere um código de vínculo ou plantão (<code className="text-amber-400 font-bold">NW-XXXXXX</code>) e envie pelo WhatsApp. Para novo cadastro, utilize o bloco de primeiro acesso acima.
+                </p>
+              </div>
+
+              <form onSubmit={handleGenerateShiftCode} className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end max-w-xl">
+                <div>
+                  <label htmlFor="fa-new-driver-name" className="text-zinc-300 font-semibold block mb-1">Nome do entregador (opcional)</label>
+                  <input id="fa-new-driver-name" value={newDriverName} onChange={event => setNewDriverName(event.target.value)} maxLength={100} placeholder="Ex: Lucas Motoboy" className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-white" />
+                </div>
+                <div>
+                  <label htmlFor="fa-new-driver-phone" className="text-zinc-300 font-semibold block mb-1">Telefone com DDD (opcional)</label>
+                  <input id="fa-new-driver-phone" type="tel" value={newDriverPhone} onChange={event => setNewDriverPhone(event.target.value)} maxLength={20} placeholder="(51) 99999-9999" className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-white" />
+                </div>
+                <div>
+                  <label className="text-zinc-300 font-semibold block mb-1">Validade do Código</label>
+                  <select value={shiftValidity} onChange={(e) => setShiftValidity(e.target.value)} className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-white font-semibold">
+                    <option value="1">1 dia (24h)</option>
+                    <option value="3">3 dias</option>
+                    <option value="7">7 dias (Recomendado)</option>
+                    <option value="30">30 dias</option>
+                  </select>
+                </div>
+                <div>
+                  <button type="submit" disabled={isGeneratingShiftCode} className="w-full py-2.5 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-zinc-950 font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-amber-500/20 transition">
+                    <KeyRound className="w-4 h-4" />
+                    <span>{isGeneratingShiftCode ? 'Gerando...' : 'Gerar Código de Autorização'}</span>
+                  </button>
+                </div>
+              </form>
+
+              {generatedShiftCode && (
+                <div className="mt-4 p-4 rounded-2xl bg-zinc-950 border border-amber-500/40 flex flex-col sm:flex-row items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-bold text-amber-300">Código exclusivo gerado:</span>
+                    <span className="text-2xl font-mono font-black text-amber-400 tracking-wider select-all">{generatedShiftCode}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button type="button" onClick={() => handleCopyCode(generatedShiftCode)} className="px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white font-bold text-xs flex items-center gap-1.5">
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>{codeCopied ? 'Copiado!' : 'Copiar Código'}</span>
+                    </button>
+                    <a href={getWhatsAppShareUrl(generatedShiftCode)} target="_blank" rel="noopener noreferrer" className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5">
+                      <MessageSquare className="w-3.5 h-3.5" />
+                      <span>Enviar no WhatsApp</span>
+                    </a>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* BLOCO 3: ENTREGADORES ATIVOS DA LOJA */}
+            <div className="p-6 rounded-2xl bg-zinc-900/60 border border-zinc-800 shadow-xl space-y-4">
+              <div>
+                <h3 className="font-extrabold text-base text-white flex items-center gap-2">
+                  <Bike className="w-4 h-4 text-cyan-400" />
+                  <span>Entregadores Vinculados à Loja ({drivers.length})</span>
+                </h3>
+                <p className="text-xs text-zinc-400 mt-0.5">
+                  Motoboys conectados que recebem as ofertas de entrega da Bella Pizza.
+                </p>
+              </div>
+
+              {drivers.length === 0 ? (
+                <p className="text-zinc-500 text-xs py-4 text-center">Nenhum motoboy vinculado no momento. Gere um código acima para cadastrar.</p>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {drivers.map(drv => (
+                    <div key={drv.id} className="p-3.5 rounded-xl bg-zinc-950 border border-zinc-800 flex items-center justify-between">
+                      <div className="space-y-1">
+                        <p className="font-bold text-white text-xs">{drv.driverName || drv.name || 'Aguardando Cadastro'}</p>
+                        <p className="text-[10px] text-zinc-400">{drv.phone || 'Sem telefone'}</p>
+                        <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                          drv.presence === 'disponivel' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-zinc-800 text-zinc-400'
+                        }`}>
+                          {drv.presence === 'disponivel' ? '● Online (Disponível)' : '○ Indisponível'}
+                        </span>
+                      </div>
+                      <div className="text-right space-y-1">
+                        <span className="text-[11px] font-mono text-amber-400 bg-zinc-900 px-2 py-1 rounded border border-amber-500/20 block">
+                          {drv.inviteCode || 'Ativo'}
+                        </span>
+                        <span className="text-[10px] text-zinc-500 block">
+                          {drv.activeDeliveries || 0} entregas ativas
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* ABA 3: VISÃO GERAL */}
         {activeTab === 'overview' && (
           <div className="space-y-6">
@@ -2345,6 +2466,7 @@ export default function AdminDashboardPage() {
         {/* ABA 5: CONFIGURAÇÕES — ENTREGADORES E DESPACHO */}
         {activeTab === 'settings' && (
           <div className="space-y-8 text-xs max-w-5xl">
+            <CustomerTrackingSettings getHeaders={getAdminHeaders} />
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div>
                 <h2 className="text-xl font-black text-white">Configurações • Entregadores e Despacho</h2>
@@ -2470,7 +2592,7 @@ export default function AdminDashboardPage() {
                           .filter(d => d.status !== 'vinculo_removido' && d.status !== 'revogado')
                           .map((drv) => (
                             <option key={drv.id} value={drv.driverId || drv.id}>
-                              {drv.driverName || drv.name || `Código ${drv.inviteCode}`} ({drv.status === 'ativo' ? 'Ativo' : drv.status}) — {drv.activeDeliveries || 0}/{drv.maxDeliveries || storeSettings.maxConcurrentDeliveries} entregas
+                              {drv.driverName || drv.name || `Código ${drv.inviteCode || 'Primeiro acesso'}`} ({drv.status === 'ativo' ? 'Ativo' : drv.status}) — {drv.activeDeliveries || 0} entregas
                             </option>
                           ))}
                       </select>
@@ -2504,16 +2626,9 @@ export default function AdminDashboardPage() {
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2 border-t border-zinc-800/80 items-end">
                 <div>
                   <label className="text-zinc-300 font-semibold block mb-1">
-                    Limite Simultâneo de Pedidos por Entregador
+                    Pedidos por entregador
                   </label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={10}
-                    value={storeSettings.maxConcurrentDeliveries}
-                    onChange={(e) => { settingsDirtyRef.current = true; setStoreSettings(prev => ({ ...prev, maxConcurrentDeliveries: Number(e.target.value) || 3 })); }}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-white font-bold"
-                  />
+                  <p className="text-sm text-zinc-400">Sem limite fixo. Selecione a quantidade desejada no despacho.</p>
                 </div>
 
                 <div>
@@ -2541,19 +2656,23 @@ export default function AdminDashboardPage() {
               </div>
             </div>
 
-            {/* BLOCO 2: CADASTRAR OU CONVIDAR ENTREGADORES & GERAR CÓDIGOS DE VÍNCULO */}
+            <button type="button" onClick={() => setActiveTab('first_access')} className="px-4 py-3 rounded-xl bg-amber-500 text-zinc-950 text-sm font-bold">Cadastrar motoboy e gerenciar primeiro acesso</button>
+
+            {/* BLOCO 2: GERAR CÓDIGO PARA MOTOBOY & AUTORIZAÇÃO DE CADASTRO */}
             <div className="p-6 rounded-2xl bg-zinc-900/60 border border-zinc-800 shadow-xl space-y-4">
               <div>
                 <h3 className="font-extrabold text-base text-white flex items-center gap-2">
                   <UserPlus className="w-4 h-4 text-red-500" />
-                  <span>Cadastrar Entregador ou Gerar Código de Vínculo</span>
+                  <span>Código de plantão para entregador com conta</span>
                 </h3>
                 <p className="text-xs text-zinc-400 mt-0.5">
-                  Cadastre um entregador já vinculado à loja ou gere um código de convite exclusivo (<code className="text-amber-400">NW-XXXXXX</code>) para o motoboy ativar no app.
+                  Para quem já possui conta, gere um código de vínculo ou plantão (<code className="text-amber-400 font-bold">NW-XXXXXX</code>). Para cadastrar um novo entregador, utilize o bloco de primeiro acesso acima.
                 </p>
               </div>
 
               <form onSubmit={handleGenerateShiftCode} className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end max-w-xl">
+                <div><label htmlFor="new-selected-driver-name" className="text-zinc-300 font-semibold block mb-1">Nome do entregador (opcional)</label><input id="new-selected-driver-name" value={newDriverName} onChange={event => setNewDriverName(event.target.value)} maxLength={100} placeholder="Ex: Lucas Motoboy" className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-white" /></div>
+                <div><label htmlFor="new-selected-driver-phone" className="text-zinc-300 font-semibold block mb-1">Telefone com DDD (opcional)</label><input id="new-selected-driver-phone" type="tel" value={newDriverPhone} onChange={event => setNewDriverPhone(event.target.value)} maxLength={20} placeholder="(51) 99999-9999" className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-white" /></div>
                 <div>
                   <label className="text-zinc-300 font-semibold block mb-1">
                     Validade do Código
@@ -2565,7 +2684,7 @@ export default function AdminDashboardPage() {
                   >
                     <option value="1">1 dia (24h)</option>
                     <option value="3">3 dias</option>
-                    <option value="7">7 dias</option>
+                    <option value="7">7 dias (Recomendado)</option>
                     <option value="30">30 dias</option>
                   </select>
                 </div>
@@ -2576,7 +2695,7 @@ export default function AdminDashboardPage() {
                     className="w-full py-2.5 px-4 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-extrabold text-xs flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 transition"
                   >
                     <KeyRound className="w-4 h-4" />
-                    <span>{isGeneratingShiftCode ? 'Gerando...' : 'Gerar Código de Vínculo'}</span>
+                    <span>{isGeneratingShiftCode ? 'Gerando...' : 'Gerar código de plantão'}</span>
                   </button>
                 </div>
               </form>
@@ -2584,7 +2703,7 @@ export default function AdminDashboardPage() {
               {generatedShiftCode && (
                 <div className="mt-4 p-4 rounded-2xl bg-zinc-950 border border-amber-500/40 flex flex-col sm:flex-row items-center justify-between gap-4">
                   <div className="flex items-center gap-3">
-                    <span className="text-xs font-bold text-amber-300">Código gerado:</span>
+                    <span className="text-xs font-bold text-amber-300">Código exclusivo gerado:</span>
                     <span className="text-2xl font-mono font-black text-amber-400 tracking-wider select-all">
                       {generatedShiftCode}
                     </span>
@@ -2605,7 +2724,7 @@ export default function AdminDashboardPage() {
                       className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5"
                     >
                       <MessageSquare className="w-3.5 h-3.5" />
-                      <span>Compartilhar no WhatsApp</span>
+                      <span>Enviar no WhatsApp</span>
                     </a>
                   </div>
                 </div>
@@ -2655,11 +2774,12 @@ export default function AdminDashboardPage() {
                             <td className="p-3.5">
                               <div className="flex items-center gap-1.5">
                                 <span className="font-mono font-black text-amber-400 bg-zinc-950 px-2 py-0.5 rounded border border-amber-500/30">
-                                  {drv.inviteCode}
+                                  {drv.inviteCode || 'Primeiro acesso'}
                                 </span>
                                 <button
                                   type="button"
                                   onClick={() => handleCopyCode(drv.inviteCode)}
+                                    disabled={!drv.inviteCode}
                                   className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white"
                                 >
                                   <Copy className="w-3 h-3" />
@@ -2979,7 +3099,7 @@ export default function AdminDashboardPage() {
 
       {/* MODAL / DRAWER INTEGRADO DE DESPACHO (SELEÇÃO DE 1 OU MÚLTIPLOS PEDIDOS) */}
       {isDispatchDrawerOpen && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto animate-in fade-in duration-200">
+        <AdminModalLayer><div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto animate-in fade-in duration-200">
           <div className="bg-zinc-900 border border-zinc-700/80 rounded-3xl max-w-3xl w-full max-h-[92vh] flex flex-col shadow-2xl overflow-hidden my-auto">
             
             {/* Cabeçalho do Modal */}
@@ -3221,7 +3341,6 @@ export default function AdminDashboardPage() {
                       const isWaiting = (!drv.driverName && !drv.name) || drv.status === 'aguardando_motoboy' || drv.status === 'aguardando_vinculo';
                       const isBlocked = drv.status === 'bloqueado' || drv.status === 'revogado' || drv.status === 'vinculo_removido';
                       const isOnline = drv.presence === 'disponivel';
-                      const isMaxReached = (drv.activeDeliveries || 0) >= (drv.maxDeliveries || storeSettings.maxConcurrentDeliveries || 3);
 
                       return (
                         <div
@@ -3263,8 +3382,8 @@ export default function AdminDashboardPage() {
 
                             <div className="flex items-center justify-between">
                               <span>Carga ativa:</span>
-                              <span className={`font-bold ${isMaxReached ? 'text-red-400' : 'text-zinc-200'}`}>
-                                {drv.activeDeliveries || 0} de {drv.maxDeliveries || storeSettings.maxConcurrentDeliveries || 3} corridas
+                              <span className="font-bold text-zinc-200">
+                                {drv.activeDeliveries || 0} corridas
                               </span>
                             </div>
                           </div>
@@ -3272,7 +3391,7 @@ export default function AdminDashboardPage() {
                           <button type="button" onClick={(event) => {event.stopPropagation();handleLinkDriverAccount(drv);}} className="text-[11px] text-sky-300 underline">Associar conta cadastrada</button>
                           {isWaiting && (
                             <p className="text-[10px] text-amber-400/90 mt-1 font-semibold">
-                              Código: {drv.inviteCode} (Aguardando vínculo)
+                              Código: {drv.inviteCode || 'Primeiro acesso'} (Aguardando vínculo)
                             </p>
                           )}
                           {isBlocked && (
@@ -3352,7 +3471,7 @@ export default function AdminDashboardPage() {
             </div>
 
           </div>
-        </div>
+        </div></AdminModalLayer>
       )}
       {/* MODAL FULL-SCREEN: NOVO PEDIDO COM ALARME SONORO E FILA EMPILHADA */}
       {pendingNewOrders.length > 0 && (() => {
@@ -3383,7 +3502,7 @@ export default function AdminDashboardPage() {
         };
 
         return (
-          <div className="fixed inset-0 z-50 flex flex-col items-center justify-center p-4 bg-black/90 backdrop-blur-md animate-fade-in">
+          <AdminModalLayer><div className="fixed inset-0 z-50 flex flex-col items-center justify-center p-4 bg-black/90 backdrop-blur-md animate-fade-in">
             {/* Header com Alarme Pulsante */}
             <div className="w-full max-w-xl text-center mb-3">
               <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-red-600/30 border border-red-500 text-red-300 text-sm font-black animate-pulse mb-2">
@@ -3398,6 +3517,7 @@ export default function AdminDashboardPage() {
             {/* Card Principal de Destaque */}
             <div className="w-full max-w-xl rounded-2xl bg-zinc-900 border-2 border-red-500 shadow-2xl shadow-red-600/40 overflow-hidden flex flex-col max-h-[75vh]">
               <div className="p-5 overflow-y-auto space-y-4 text-sm flex-1">
+                <OrderDelayBadge order={topOrder} now={stageNow} settings={orderAlarmSettings} />
                 {/* Cliente & Telefone */}
                 <div className="flex items-start justify-between gap-3 pb-3 border-b border-zinc-800">
                   <div>
@@ -3528,7 +3648,7 @@ export default function AdminDashboardPage() {
                 <span>{isMuted ? 'Mudo (30s)' : 'Pausar Som'}</span>
               </button>
             </div>
-          </div>
+          </div></AdminModalLayer>
         );
       })()}
 
@@ -3580,7 +3700,7 @@ export default function AdminDashboardPage() {
         };
 
         return (
-          <div
+          <AdminModalLayer><div
             className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
             onClick={() => setDetailOrderId(null)}
           >
@@ -3787,18 +3907,18 @@ export default function AdminDashboardPage() {
                 </button>
               </div>
             </div>
-          </div>
+          </div></AdminModalLayer>
         );
       })()}
 
       {/* MODAL PERSONALIZADO DE CANCELAMENTO DE PEDIDO (SEM USAR PROMPT) */}
       {orderToCancel && (
-        <div
-          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in"
+        <AdminModalLayer><div
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto animate-in fade-in"
           onClick={() => !isCancelingOrder && setOrderToCancel(null)}
         >
           <div
-            className="bg-zinc-900 border border-zinc-700/80 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4"
+            className="bg-zinc-900 border border-zinc-700/80 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4 max-h-[90dvh] overflow-y-auto my-auto"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
@@ -3855,7 +3975,7 @@ export default function AdminDashboardPage() {
               </button>
             </div>
           </div>
-        </div>
+        </div></AdminModalLayer>
       )}
 
     </div>
