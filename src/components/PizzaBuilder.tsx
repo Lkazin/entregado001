@@ -104,6 +104,31 @@ export default function PizzaBuilder({ onAddToCart }: PizzaBuilderProps) {
           </p>
         </div>
 
+        {/* Indicador de progresso visual */}
+        <div className="flex items-center justify-center gap-2 mb-8 max-w-md mx-auto">
+          {[
+            { num: 1, label: 'Tamanho' },
+            { num: 2, label: 'Sabores' },
+            { num: 3, label: 'Borda' },
+          ].map((step, idx) => {
+            const isActive = idx === 0 ? true : idx === 1 ? selectedFlavors.length > 0 : selectedCrust.id !== PIZZA_CRUSTS[0].id;
+            const isCurrent = idx === 0 ? selectedFlavors.length === 0 && selectedCrust.id === PIZZA_CRUSTS[0].id : idx === 1 ? selectedFlavors.length > 0 && selectedCrust.id === PIZZA_CRUSTS[0].id : selectedCrust.id !== PIZZA_CRUSTS[0].id;
+            return (
+              <React.Fragment key={step.num}>
+                <div className="flex flex-col items-center gap-1">
+                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold transition-all duration-300 ${isCurrent ? 'bg-gradient-to-r from-pizza-gold-dark via-pizza-gold to-pizza-gold-light text-pizza-black shadow-gold-sm scale-110' : isActive ? 'bg-pizza-gold/20 border border-pizza-gold/40 text-pizza-gold' : 'bg-zinc-800 border border-zinc-700 text-zinc-500'}`}>
+                    {step.num}
+                  </div>
+                  <span className={`text-[10px] font-semibold transition-colors ${isCurrent ? 'text-pizza-gold' : 'text-zinc-500'}`}>{step.label}</span>
+                </div>
+                {idx < 2 && (
+                  <div className={`w-12 h-0.5 rounded-full transition-colors duration-300 ${isActive && idx < 1 ? 'bg-pizza-gold/40' : 'bg-zinc-800'}`} />
+                )}
+              </React.Fragment>
+            );
+          })}
+        </div>
+
         {/* Alerta de validação */}
         {flavorWarning && (
           <div className="max-w-2xl mx-auto mb-6 p-4 rounded-xl bg-amber-950/50 border border-amber-800/50 flex items-center gap-3 text-amber-300 text-sm animate-pulse">
@@ -317,7 +342,7 @@ export default function PizzaBuilder({ onAddToCart }: PizzaBuilderProps) {
                 <button
                   type="button"
                   onClick={handleAdd}
-                  className="w-full py-4 rounded-xl bg-gradient-to-r from-pizza-gold-dark via-pizza-gold to-pizza-gold-light hover:brightness-110 text-pizza-black font-bold text-sm flex items-center justify-center gap-2 transition-all duration-150 shadow-lg shadow-gold-sm hover:shadow-gold active:scale-[0.98]"
+                  className="ripple w-full py-4 rounded-xl bg-gradient-to-r from-pizza-gold-dark via-pizza-gold to-pizza-gold-light hover:brightness-110 text-pizza-black font-bold text-sm flex items-center justify-center gap-2 transition-all duration-150 shadow-lg shadow-gold-sm hover:shadow-gold active:scale-[0.98]"
                 >
                   <ShoppingBag className="w-4 h-4" />
                   Adicionar ao Pedido

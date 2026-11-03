@@ -71,10 +71,67 @@ h1, h2, h3, h4, .font-serif {
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
-/* Selection */
-::selection {
-  background: rgba(212, 175, 55, 0.35);
-  color: #fff;
+.ripple-effect {
+  position: absolute;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.3);
+  transform: scale(0);
+  animation: ripple 0.6s linear;
+  pointer-events: none;
+  width: 20px;
+  height: 20px;
+  margin-left: -10px;
+  margin-top: -10px;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes bounce-slow {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out;
+}
+
+.animate-bounce-slow {
+  animation: bounce-slow 2s ease-in-out infinite;
+}
+
+/* Ripple effect */
+.ripple {
+  position: relative;
+  overflow: hidden;
+}
+
+.ripple::after {
+  content: '';
+  position: absolute;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.25);
+  transform: scale(0);
+  animation: ripple 0.6s linear;
+  pointer-events: none;
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Parallax helper */
+.parallax-bg {
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
 }
 
 /* Focus ring */

@@ -1,12 +1,30 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { Flame, Sparkles, ShieldCheck, ArrowRight, Award, Star } from 'lucide-react';
 
 export default function Hero() {
+  const bgRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (prefersReduced) return;
+
+    const handleScroll = () => {
+      if (!bgRef.current) return;
+      const y = window.scrollY;
+      bgRef.current.style.transform = `translate3d(0, ${y * 0.15}px, 0)`;
+    };
+
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, []);
+
   return (
     <section className="relative overflow-hidden pt-10 pb-20 lg:py-28 bg-pizza-black grain">
-      {/* Luz ambiente de fundo */}
-      <div className="absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[700px] h-[700px] bg-pizza-gold/5 rounded-full blur-[160px] pointer-events-none" />
-      <div className="absolute bottom-0 right-0 w-[500px] h-[500px] bg-pizza-red/5 rounded-full blur-[140px] pointer-events-none" />
+      {/* Luz ambiente de fundo com parallax */}
+      <div ref={bgRef} className="parallax-bg absolute inset-0 pointer-events-none">
+        <div className="absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[700px] h-[700px] bg-pizza-gold/5 rounded-full blur-[160px]" />
+        <div className="absolute bottom-0 right-0 w-[500px] h-[500px] bg-pizza-red/5 rounded-full blur-[140px]" />
+      </div>
 
       {/* Linha decorativa superior */}
       <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-pizza-gold/40 to-transparent" />
@@ -53,7 +71,7 @@ export default function Hero() {
             <div className="flex flex-col sm:flex-row items-center justify-center lg:justify-start gap-4 pt-4">
               <a
                 href="#montar-pizza"
-                className="w-full sm:w-auto px-8 py-4 rounded-xl bg-gradient-to-r from-pizza-gold-dark via-pizza-gold to-pizza-gold-light hover:brightness-110 active:scale-95 text-pizza-black font-extrabold text-base flex items-center justify-center gap-3 shadow-gold transition duration-200"
+                className="ripple w-full sm:w-auto px-8 py-4 rounded-xl bg-gradient-to-r from-pizza-gold-dark via-pizza-gold to-pizza-gold-light hover:brightness-110 active:scale-95 text-pizza-black font-extrabold text-base flex items-center justify-center gap-3 shadow-gold transition duration-200"
               >
                 <span>Montar Minha Pizza</span>
                 <ArrowRight className="w-5 h-5" />
@@ -64,6 +82,15 @@ export default function Hero() {
               >
                 Ver Todas as Pizzas
               </a>
+            </div>
+
+            {/* Tempo de entrega animado */}
+            <div className="flex items-center justify-center lg:justify-start gap-2 pt-2">
+              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-pizza-card/60 border border-pizza-gold/20 text-xs font-semibold text-zinc-300">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                <span>Entrega em</span>
+                <span className="text-pizza-gold font-bold animate-pulse">35-45 min</span>
+              </span>
             </div>
           </div>
 

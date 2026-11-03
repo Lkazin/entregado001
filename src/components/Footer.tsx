@@ -71,9 +71,16 @@ export default function Footer() {
 
         <div className="mt-14 pt-8 border-t border-pizza-border text-center text-zinc-600 flex flex-col sm:flex-row items-center justify-between gap-4">
           <p className="font-light">© 2026 Bella Pizza • Desenvolvido com padrão NovaesWeb de Engenharia.</p>
-          <p className="text-[11px] text-zinc-600 font-light">
-            Ambiente Isolado de Testes • Supabase Test Database
-          </p>
+          <div className="flex items-center gap-3">
+            <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-pizza-card border border-pizza-gold/20 text-[10px] text-zinc-400">
+              <ShieldCheck className="w-3.5 h-3.5 text-pizza-gold" />
+              Ambiente Oficial de Homologação NovaesWeb
+            </div>
+            <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-pizza-card border border-pizza-border text-[10px] text-zinc-500">
+              <Clock className="w-3.5 h-3.5 text-pizza-gold" />
+              Entrega em 35-45 min
+            </div>
+          </div>
         </div>
       </div>
     </footer>

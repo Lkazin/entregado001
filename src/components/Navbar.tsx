@@ -64,7 +64,7 @@ export default function Navbar({ cartCount, cartTotal, onOpenCart }: NavbarProps
           <button
             type="button"
             onClick={onOpenCart}
-            className="flex items-center gap-3 bg-gradient-to-r from-pizza-gold-dark via-pizza-gold to-pizza-gold-light hover:brightness-110 active:scale-95 text-pizza-black px-5 py-2.5 rounded-xl font-bold text-sm shadow-gold transition duration-200"
+            className="ripple flex items-center gap-3 bg-gradient-to-r from-pizza-gold-dark via-pizza-gold to-pizza-gold-light hover:brightness-110 active:scale-95 text-pizza-black px-5 py-2.5 rounded-xl font-bold text-sm shadow-gold transition duration-200"
           >
             <div className="relative">
               <ShoppingBag className="w-5 h-5" />

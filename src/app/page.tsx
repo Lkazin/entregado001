@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Navbar from '@/components/Navbar';
 import Hero from '@/components/Hero';
 import ScrollReveal from '@/components/ScrollReveal';
@@ -10,6 +10,9 @@ import PizzaBuilder from '@/components/PizzaBuilder';
 import CatalogSection from '@/components/CatalogSection';
 import CartCheckoutDrawer from '@/components/CartCheckoutDrawer';
 import Footer from '@/components/Footer';
+import WhatsAppButton from '@/components/WhatsAppButton';
+import CookieBanner from '@/components/CookieBanner';
+import ScrollToTop from '@/components/ScrollToTop';
 import { useRouter } from 'next/navigation';
 import { PizzaFlavorMock } from '@/lib/constants';
 import { CheckCircle2, ShieldCheck, ArrowRight, ExternalLink } from 'lucide-react';
@@ -76,6 +79,25 @@ export default function HomePage() {
 
   const cartTotal = cartItems.reduce((acc, item) => acc + item.totalPrice, 0);
 
+  // Ripple effect global handler
+  useEffect(() => {
+    const handleRipple = (e: MouseEvent) => {
+      const target = (e.target as HTMLElement).closest('.ripple');
+      if (!target) return;
+      const rect = target.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const ripple = document.createElement('span');
+      ripple.style.left = `${x}px`;
+      ripple.style.top = `${y}px`;
+      ripple.className = 'ripple-effect';
+      target.appendChild(ripple);
+      setTimeout(() => ripple.remove(), 600);
+    };
+    document.addEventListener('click', handleRipple);
+    return () => document.removeEventListener('click', handleRipple);
+  }, []);
+
   return (
     <div className="min-h-screen bg-zinc-950 text-white flex flex-col">
       <Navbar
@@ -107,6 +129,11 @@ export default function HomePage() {
       </main>
 
       <Footer />
+
+      {/* Componentes flutuantes */}
+      <WhatsAppButton />
+      <CookieBanner />
+      <ScrollToTop />
 
       {/* Drawer do Carrinho e Checkout */}
       <CartCheckoutDrawer

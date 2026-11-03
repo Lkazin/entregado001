@@ -1,8 +1,9 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { PIZZA_FLAVORS, DRINKS, PizzaFlavorMock } from '@/lib/constants';
 import { Plus, Flame, Wine, Sparkles } from 'lucide-react';
+import SkeletonCard from '@/components/SkeletonCard';
 
 interface CatalogSectionProps {
   onSelectFlavorForBuilder: (flavor: PizzaFlavorMock) => void;
@@ -11,6 +12,12 @@ interface CatalogSectionProps {
 
 export default function CatalogSection({ onSelectFlavorForBuilder, onAddDrink }: CatalogSectionProps) {
   const [activeTab, setActiveTab] = useState<'todos' | 'tradicional' | 'especial' | 'doce'>('todos');
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setIsLoading(false), 600);
+    return () => clearTimeout(timer);
+  }, []);
 
   const filteredFlavors = PIZZA_FLAVORS.filter(flavor => {
     if (activeTab === 'todos') return true;
@@ -55,7 +62,10 @@ export default function CatalogSection({ onSelectFlavorForBuilder, onAddDrink }:
 
         {/* Grade de Sabores de Pizza */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 mb-16">
-          {filteredFlavors.map((flavor) => (
+          {isLoading ? (
+            Array.from({ length: 6 }).map((_, i) => <SkeletonCard key={i} variant="flavor" />)
+          ) : (
+            filteredFlavors.map((flavor) => (
             <div
               key={flavor.id}
               className="bg-zinc-900/60 border border-zinc-800/80 rounded-2xl overflow-hidden hover:border-zinc-700 hover:bg-zinc-900 transition-all duration-300 flex flex-col group shadow-lg"
@@ -104,7 +114,8 @@ export default function CatalogSection({ onSelectFlavorForBuilder, onAddDrink }:
                 </div>
               </div>
             </div>
-          ))}
+          ))
+          )}
         </div>
 
         {/* SEÇÃO DE BEBIDAS */}

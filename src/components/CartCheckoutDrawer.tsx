@@ -285,7 +285,34 @@ export default function CartCheckoutDrawer({
             </button>
           </div>
 
-          {/* Erro */}
+          {/* Indicador visual de etapas */}
+          <div className="px-5 py-3 border-b border-zinc-800 bg-zinc-950/40">
+            <div className="flex items-center justify-between">
+              {[
+                { num: 1, label: 'Carrinho' },
+                { num: 2, label: 'Entrega' },
+                { num: 3, label: 'Confirmação' },
+              ].map((s, idx) => {
+                const currentStep = step === 'cart' ? 1 : 2;
+                const isActive = s.num <= currentStep;
+                const isCurrent = s.num === currentStep;
+                return (
+                  <React.Fragment key={s.num}>
+                    <div className="flex flex-col items-center gap-1">
+                      <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-all duration-300 ${isCurrent ? 'bg-gradient-to-r from-pizza-gold-dark via-pizza-gold to-pizza-gold-light text-pizza-black shadow-gold-sm scale-110' : isActive ? 'bg-pizza-gold/20 border border-pizza-gold/40 text-pizza-gold' : 'bg-zinc-800 border border-zinc-700 text-zinc-500'}`}>
+                        {s.num}
+                      </div>
+                      <span className={`text-[10px] font-semibold transition-colors ${isCurrent ? 'text-pizza-gold' : 'text-zinc-500'}`}>{s.label}</span>
+                    </div>
+                    {idx < 2 && (
+                      <div className={`flex-1 h-0.5 mx-2 rounded-full transition-colors duration-300 ${s.num < currentStep ? 'bg-pizza-gold/40' : 'bg-zinc-800'}`} />
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </div>
+          </div>
+
           {errorMsg && (
             <div className="p-3 m-4 rounded-xl bg-pizza-card/60 border border-pizza-gold/30 text-pizza-gold-light text-xs flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 flex-shrink-0" />
