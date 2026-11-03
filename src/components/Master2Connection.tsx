@@ -35,9 +35,9 @@ export default function Master2Connection({ onSelect }: { onSelect: (store: Rece
   const prompt = [
     'Codex do Master 1: implemente o botão Enviar ao Master 2 no painel administrativo.',
     'Valide a sessão administrativa, localize a loja por managed_sites.id e confirme situação ativa, plano Business ou Premium e autorização vigente do Kit no servidor.',
-    'Envie POST para ' + endpoint + ' somente pelo backend. Configure MASTER2_MASTER1_SECRET nos dois servidores com o mesmo segredo privado de pelo menos 32 caracteres e cadastre o grupo autorizado no Master 2.',
+    'Envie POST para ' + endpoint + ' somente pelo backend. Configure MASTER2_MASTER1_SECRET nos dois servidores com o mesmo segredo privado de pelo menos 32 caracteres e cadastre o grupo autorizado no Master 2 quando estiver definido.',
     'Use Content-Type application/json, x-master1-mode: live, x-master1-timestamp com Date.now() e x-master1-signature com o HMAC-SHA256 hexadecimal de master1:master2-live:<timestamp>:<corpo JSON exato>.',
-    'Envie apenas os campos abaixo. Use o UUID oficial, domínio sem protocolo, ID de evento estável por operação e revisão inteira crescente por loja. Use a referência do grupo, sem URLs de banco ou credenciais.',
+    'Envie apenas os campos abaixo. Use o UUID oficial, domínio sem protocolo, ID de evento estável por operação e revisão inteira crescente por loja. Use a referência do grupo autorizado ou null se ainda não estiver definido. A loja será recebida como pendente de diagnóstico.',
     JSON.stringify(example, null, 2),
     'Confirme HTTP 200 e received:true, eventId, officialStoreId e revision. Em falha de rede ou 503, repita o mesmo evento e corpo com timestamp e assinatura novos. Em 409, revise event_conflict ou stale_revision antes de reenviar. Em 401 confira assinatura e relógio. Em 422 confira contrato e grupo.',
     'Consulte status pelo mesmo POST assinado com o corpo { "schemaVersion": 1, "eventType": "kit.status", "officialStoreId": "<UUID>" }. Leia store.status, store.revision e store.updated_at. HTTP 404 significa loja ainda não recebida.',
@@ -77,7 +77,7 @@ export default function Master2Connection({ onSelect }: { onSelect: (store: Rece
 
   return <section className="space-y-4">
     <h2 className="text-2xl font-black">Conectar Painel Master 1</h2>
-    <p role="status">{configured === undefined ? 'Consultando configuração…' : !configured ? 'Aguardando configuração da chave e dos grupos Supabase.' : events.some(event => event.outcome === 'received') ? 'Envio oficial registrado.' : 'Configurado. Aguardando primeiro envio oficial.'}</p>
+    <p role="status">{configured === undefined ? 'Consultando configuração…' : !configured ? 'Aguardando configuração da chave entre os servidores.' : events.some(event => event.outcome === 'received') ? 'Envio oficial registrado.' : 'Configurado. Aguardando primeiro envio oficial.'}</p>
     <p className="break-all text-sm text-zinc-300">POST {endpoint}</p>
     <label className="block">Contrato e prompt para o Codex do Master 1<textarea readOnly value={prompt} rows={14} className="mt-2 w-full rounded-xl border border-zinc-700 bg-zinc-950 p-3 text-sm" /></label>
     <div className="flex flex-wrap gap-2">

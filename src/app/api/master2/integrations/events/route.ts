@@ -64,11 +64,12 @@ async function receiveOfficial(request: NextRequest) {
       !['business','premium'].includes(String(event.basePlan)) || typeof event.eventId !== 'string' || !/^[\w-]{1,100}$/.test(event.eventId) ||
       typeof event.revision !== 'number' || !Number.isSafeInteger(event.revision) || event.revision < 1 ||
       typeof event.domain !== 'string' || event.domain.length > 253 || !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}$/i.test(event.domain) ||
-      typeof event.supabaseGroupId !== 'string' || !/^[\w-]{1,80}$/.test(event.supabaseGroupId)) return reply({ error: 'Evento inválido ou loja sem autorização.' }, 422);
+      (event.supabaseGroupId != null && (typeof event.supabaseGroupId !== 'string' || !/^[\w-]{1,80}$/.test(event.supabaseGroupId)))) return reply({ error: 'Evento inválido ou loja sem autorização.' }, 422);
     const groups = JSON.parse(process.env.MASTER2_SUPABASE_GROUPS || '{}');
-    const group = Object.hasOwn(groups, event.supabaseGroupId) ? groups[event.supabaseGroupId] : null;
-    if (!group || !/^[a-z0-9]{20}$/.test(group.staging) || !/^[a-z0-9]{20}$/.test(group.production) || group.staging === group.production) return reply({ error: 'Grupo Supabase não autorizado.' }, 422);
-    const profile = { name: event.name, domain: event.domain.toLowerCase(), plan: event.basePlan, group: event.supabaseGroupId, staging: group.staging, production: group.production };
+    const groupId = typeof event.supabaseGroupId === 'string' ? event.supabaseGroupId : null;
+    const group = groupId && Object.hasOwn(groups, groupId) ? groups[groupId] : null;
+    if (groupId && (!group || !/^[a-z0-9]{20}$/.test(group.production) || (group.staging && (!/^[a-z0-9]{20}$/.test(group.staging) || group.staging === group.production)))) return reply({ error: 'Grupo Supabase não autorizado.' }, 422);
+    const profile = { name: event.name, domain: event.domain.toLowerCase(), plan: event.basePlan, group: groupId || '', staging: group?.staging || '', production: group?.production || '' };
     try { generateInstallationPrompts({ id: event.officialStoreId, ...profile }); }
     catch { return reply({ error: 'Dados da loja inválidos.' }, 422); }
     const fingerprint = createHash('sha256').update(JSON.stringify([event.officialStoreId.toLowerCase(), event.revision, event.eventType, profile])).digest('hex');

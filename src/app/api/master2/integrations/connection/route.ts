@@ -10,7 +10,7 @@ const reply = (data: object, status = 200) => NextResponse.json(data, { headers,
 
 export async function GET(request: NextRequest) {
   if (!await verifyMaster2Session(request.cookies.get(MASTER2_COOKIE)?.value)) return reply({ error: 'Sessão inválida.' }, 401);
-  const configured = (process.env.MASTER2_MASTER1_SECRET?.length ?? 0) >= 32 && !!process.env.MASTER2_SUPABASE_GROUPS;
+  const configured = (process.env.MASTER2_MASTER1_SECRET?.length ?? 0) >= 32;
   if (!configured) return reply({ configured, stores: [], events: [] });
   const [stores, events] = await Promise.all([
     supabaseAdmin.from('master2_received_stores').select('id,profile,status,revision,updated_at').order('updated_at', { ascending: false }).limit(200),
