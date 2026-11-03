@@ -8,6 +8,8 @@ interface AdminPinAuthProps {
 }
 
 export default function AdminPinAuth({ onSuccess }: AdminPinAuthProps) {
+  const [master2, setMaster2] = useState(false);
+  const [masterPin, setMasterPin] = useState('');
   const [pin, setPin] = useState<string[]>(['', '', '', '', '', '']);
   const [error, setError] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
@@ -91,6 +93,24 @@ export default function AdminPinAuth({ onSuccess }: AdminPinAuthProps) {
     }, 500);
   };
 
+  async function enterMaster2(event: React.FormEvent) {
+    event.preventDefault();
+    if (isValidating) return;
+    setIsValidating(true);
+    setErrorMessage('');
+    try {
+      const response = await fetch('/api/master2/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: masterPin }),
+      });
+      if (response.ok) { window.location.assign('/master2'); return; }
+      const result = await response.json();
+      setErrorMessage(result.error || 'Falha ao entrar no Master 2.');
+    } catch { setErrorMessage('Falha ao conectar. Tente novamente.'); }
+    finally { setIsValidating(false); }
+  }
+
   const handleKeypadPress = (num: string) => {
     const firstEmpty = pin.findIndex(d => d === '');
     if (firstEmpty !== -1) {
@@ -117,6 +137,16 @@ export default function AdminPinAuth({ onSuccess }: AdminPinAuthProps) {
 
       <div className="max-w-sm w-full bg-zinc-900 border border-zinc-800 rounded-3xl p-8 shadow-2xl relative z-10 text-center space-y-6">
         
+        <div className="flex flex-wrap justify-center gap-2 text-sm">
+          <button type="button" disabled={isValidating} aria-pressed={!master2} onClick={() => { setMaster2(false); setErrorMessage(''); }} className="rounded-xl border border-zinc-700 p-2 text-white">Painel do lojista</button>
+          <button type="button" disabled={isValidating} aria-pressed={master2} onClick={() => { setMaster2(true); setErrorMessage(''); }} className="rounded-xl border border-fuchsia-700 p-2 text-white">Master 2</button>
+        </div>
+        {master2 ? <form onSubmit={enterMaster2} className="space-y-4 text-white">
+          <h1 className="text-xl font-bold">Entrar no Master 2</h1>
+          <label className="block">PIN do Master 2<input type="password" inputMode="numeric" autoComplete="current-password" pattern="[0-9]{1,6}" maxLength={6} required value={masterPin} onChange={event => setMasterPin(event.target.value.replace(/[^0-9]/g, ''))} className="mt-2 w-full rounded-xl border border-zinc-700 bg-zinc-950 p-3" /></label>
+          {errorMessage && <p role="alert">{errorMessage}</p>}
+          <button disabled={isValidating} className="rounded-xl bg-fuchsia-700 px-4 py-3">Entrar</button>
+        </form> : <>
         {/* Cabeçalho */}
         <div className="space-y-2">
           <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-pizza-gold-dark to-pizza-gold flex items-center justify-center text-white mx-auto shadow-lg shadow-gold-sm">
@@ -209,6 +239,7 @@ export default function AdminPinAuth({ onSuccess }: AdminPinAuthProps) {
           <span>Proteção de Terminal NovaesWeb</span>
         </div>
 
+        </>}
       </div>
 
     </div>
