@@ -1,5 +1,15 @@
 # Master 2 — Central de Integração NovaesWeb
 
+## Conectar Painel Master 1
+
+O endpoint `POST /api/master2/integrations/events` aceita eventos oficiais com `x-master1-mode: live`. Configure `MASTER2_MASTER1_SECRET` nos dois backends e `MASTER2_SUPABASE_GROUPS` somente no Master 2, no formato `{"grupo":{"staging":"<referência>","production":"<referência>"}}`. Use referências de 20 caracteres verificadas e diferentes. A conexão exige a migration `20261103000200_master2_connection.sql` aplicada após backup e teste em homologação.
+
+A assinatura HMAC-SHA256 hexadecimal cobre `master1:master2-live:<timestamp-ms>:<JSON exato>`. Envie `x-master1-timestamp` e `x-master1-signature`. A janela é de cinco minutos. O envio aceita `schemaVersion: 1`, `eventType: "kit.authorized"`, `eventId`, `officialStoreId`, `name`, `domain`, `basePlan`, `storeStatus: "active"`, `kitAuthorized: true`, `supabaseGroupId` e `revision`. O servidor resolve as referências do grupo. Para consultar status, assine o corpo com apenas `schemaVersion: 1`, `eventType: "kit.status"` e `officialStoreId`.
+
+A RPC grava loja e recibo na mesma transação. Mesmo evento e conteúdo normalizado retorna o resultado anterior. Evento reutilizado com conteúdo diferente ou revisão não crescente retorna conflito. A atualização administrativa preserva a coluna de status. O recebimento oficial inicia em `pending_diagnosis`. O checklist e o progresso das etapas continuam locais, por isso ainda não são refletidos no status consultado pelo Master 1. A tela abre os prompts da loja recebida pelo mesmo UUID, preservando o rascunho local.
+
+A simulação da tela valida assinatura e adulteração no servidor sem gravar loja. O histórico de eventos oficiais lista eventos validados e persistidos. Tentativas de simulação aparecem durante a sessão da tela. A comunicação entre projetos será homologada quando o Master 1 implementar o envio.
+
 ## Referência verificada para o Kit
 
 | Peça | Referência na Bella Pizza | Adaptação da nova loja |
