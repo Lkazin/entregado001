@@ -1,0 +1,32 @@
+# Master 2 — Central de Integração NovaesWeb
+
+## Primeira etapa implementada
+
+Área `/master2`, fora da operação do lojista e do site público. Usa a mesma senha administrativa por escolha do proprietário, a validação e o limitador existentes, mas com cookie separado, HttpOnly, SameSite Strict e restrito a `/api/master2`. Só funciona quando o laboratório está habilitado e o ID autorizado corresponde à loja assinada. O caminho diferente sozinho não constitui autorização. Metadados impedem indexação da página.
+
+As páginas são Planos e Recursos, Integrar Nova Loja, Lojas, Homologação e Contrato de Integração. O assistente existente é reaproveitado para gerar prompts. Dados e checklists desta etapa são rascunhos locais no navegador, não dados oficiais recebidos do Master 1. Limpar o navegador apaga os rascunhos. Não há instalação automática, ativação comercial, descoberta de bancos ou homologação comprovada.
+
+Business, Premium e Personalizado são planos base possíveis; Start aparece como referência institucional, sem presumir elegibilidade logística. O Kit exige autorização própria do catálogo comercial. Não há preços nem benefícios comerciais novos. Recurso declarado pelo operador não equivale a direito contratado.
+
+## Contrato futuro Master 1 → Master 2 (não implementado)
+
+`POST /api/master2/integrations/events` receberá `schemaVersion`, `eventId`, `eventType`, `issuedAt`, `revision`, `officialStoreId`, `name`, `domain`, `basePlan`, `storeStatus`, `authorizedAddons`, `supabaseGroupId`, `stagingProjectRef`, `productionProjectRef`, `integrationVersion`. Esses campos são referências, nunca chaves de acesso. Usar UUID oficial de `managed_sites.id`, sem gerar identidade substituta.
+
+Autenticação servidor-servidor deverá usar credencial própria, rotacionável, com emissor, audiência e prazo; assinatura validada antes de processar. Recusar emissor não autorizado, loja suspensa, adicional ausente, assinatura inválida, esquema desconhecido e revisão antiga. Deduplicar por emissor + eventId com unicidade transacional. Mesmo ID com corpo diferente deve causar conflito, sem sobrescrever. Auditar resultado e hash do evento sem credenciais nem dados de clientes. O Master 2 não cria contratos nem ativa adicionais.
+
+Master 2 devolverá estados técnicos e versão pelo canal autenticado de retorno, com a mesma proteção de repetição e revisão. Endpoints aqui descritos são projeto de contrato, não rotas disponíveis. Nenhuma URL informada pelo operador será acessada automaticamente; futura verificação de endpoints deve bloquear SSRF e exigir domínio autorizado.
+
+## Dados propostos para aprovação (nenhuma migration executada)
+
+- Instalações: UUID oficial único, mapeamento do ID local, plano referencial, grupo, referências homologação/produção, versão e estado técnico.
+- Eventos recebidos: emissor + eventId únicos, hash, revisão e processamento.
+- Execuções de homologação: instalação, ambiente, versão, caso, evidência, resultado, operador e data.
+- Auditoria: operador, instalação, ação, versão e data, sem segredos.
+
+Revisar tabelas existentes no Master antes de criar qualquer duplicação. Uma execução pertence a uma instalação; referências devem ter integridade. Dados operacionais de pedidos e entregadores permanecem nos sistemas atuais. RLS e autorização servidor devem impedir acesso de lojistas/motoboys à central; operadores recebem permissões explícitas. O Master não será consultado com service_role exposta. Nenhum projeto Supabase deve confiar no tenant enviado livremente pelo navegador.
+
+## Homologação e liberação futuras
+
+Preparação → Aguardando implementação → Testes → Homologação → Integrado, mais Não iniciado e Erro/Pendência. Rascunho manual não pode provar autorização ou marcar integração real. Produção exige contrato vigente confirmado pelo Master 1, execução homologada para a versão específica e aprovação explícita. Suspender o módulo preserva históricos.
+
+Testar entre duas lojas e usuários reais: leitura, escrita, arquivos, eventos, sessão e endpoints. Executar fluxo antigo, aceite/recusa, retirada, PIN, conclusão, GPS, notificações no aparelho, duplicação e reconexão. Compilação e testes simulados não comprovam isolamento real nem notificações recebidas. Publicação ou migrations são etapas autorizadas separadamente.
