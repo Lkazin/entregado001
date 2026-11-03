@@ -5,6 +5,8 @@ import crypto from 'crypto';
 import { ensureCustomerForOrder } from '@/lib/customer-accounts';
 import { readLogisticsState, writeLogisticsState, StateStoreError } from '@/lib/logistics/state-store';
 import { projectStoreOrders, mergeStageHistory } from '@/lib/logistics/order-timeline';
+import { dispatchReadyOrder, type AutomaticDispatchResult } from '@/lib/logistics/automatic-dispatch';
+import { isPickupOrder } from '@/lib/order-fulfillment';
 
 export const dynamic = 'force-dynamic';
 
@@ -357,9 +359,22 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { customer, address, items, subtotal, deliveryFee, total, payment } = body;
+    const { customer, items, subtotal, deliveryFee, total, payment } = body;
+    if (body.fulfillmentType !== undefined && !['delivery','pickup'].includes(body.fulfillmentType)) {
+      return NextResponse.json({success:false,error:'Escolha entrega ou retirada na loja.'},{status:400,headers:corsHeaders});
+    }
+    const pickup = isPickupOrder(body);
+    const fulfillmentType = pickup ? 'pickup' : 'delivery';
+    const address = pickup ? {} : body.address || {};
+    const validAmount = (value: unknown) => (typeof value === 'number' || typeof value === 'string' && value.trim() !== '') && Number.isFinite(Number(value)) && Number(value) >= 0;
+    if (pickup && (![subtotal,total ?? subtotal,deliveryFee ?? 0].every(validAmount))) {
+      return NextResponse.json({success:false,error:'Confira os valores do pedido de retirada.'},{status:400,headers:corsHeaders});
+    }
+    const finalSubtotal = Number(subtotal) || 0;
+    const finalDeliveryFee = pickup ? 0 : Number(deliveryFee) || 0;
+    const finalTotal = pickup ? finalSubtotal : Number(total) || 0;
 
-    if (!customer?.name || !customer?.phone || !address?.street || !Array.isArray(items) || items.length === 0) {
+    if (!customer?.name || !customer?.phone || (!pickup && !address?.street) || !Array.isArray(items) || items.length === 0) {
       return NextResponse.json(
         { success: false, error: 'Dados obrigatórios do pedido ausentes.' },
         { status: 400, headers: corsHeaders }
@@ -377,8 +392,8 @@ export async function POST(req: NextRequest) {
         ? Number(body.orderNumber)
         : null;
     const trackingToken = `tk-${crypto.randomBytes(32).toString('hex')}`;
-    const pin = providedPin || String(Math.floor(1000 + Math.random() * 9000));
-    const pinHash = crypto.createHash('sha256').update(pin).digest('hex');
+    const pin = pickup ? null : providedPin || String(Math.floor(1000 + Math.random() * 9000));
+    const pinHash = pin ? crypto.createHash('sha256').update(pin).digest('hex') : null;
     const storeId = normalizeStoreId(
       body.storeId ||
       req.headers.get('x-store-id') ||
@@ -414,15 +429,16 @@ export async function POST(req: NextRequest) {
       id: `ord-${Date.now()}-${orderNumber}`,
       orderNumber,
       storeId,
+      fulfillmentType,
       customerName: customer.name,
       phone: customer.phone,
-      address: `${address.street}, ${address.number} ${address.complement ? '- ' + address.complement : ''}`,
-      region: address.neighborhood || address.region || 'Centro',
-      city: address.city || 'Canoas',
-      state: address.state || 'RS',
+      address: pickup ? '' : `${address.street}, ${address.number} ${address.complement ? '- ' + address.complement : ''}`,
+      region: pickup ? '' : address.neighborhood || address.region || 'Centro',
+      city: pickup ? '' : address.city || 'Canoas',
+      state: pickup ? '' : address.state || 'RS',
       cep: address.cep || '',
       itemsSummary,
-      total: Number(total) || 0,
+      total: finalTotal,
       status: 'recebido',
       dispatchStatus: 'disponivel',
       paymentMethod: payment?.method || 'pix_manual',
@@ -438,10 +454,10 @@ export async function POST(req: NextRequest) {
       }),
       createdAtISO: new Date().toISOString(),
       notes: typeof body.notes === 'string' ? body.notes.slice(0, 500) : '',
-      subtotal: Number(subtotal) || 0,
-      deliveryFee: Number(deliveryFee) || 0,
+      subtotal: finalSubtotal,
+      deliveryFee: finalDeliveryFee,
       changeFor: payment?.changeFor ?? null,
-      addressDetail: {
+      addressDetail: pickup ? null : {
         street: address.street || '',
         number: address.number || '',
         complement: address.complement || '',
@@ -472,7 +488,11 @@ export async function POST(req: NextRequest) {
           customerProfileSaved: Boolean(customer?.customerId),
           orderNumber: duplicate.orderNumber,
           trackingToken: duplicate.trackingToken,
-          deliveryPin: duplicate.deliveryPin,
+          deliveryPin: isPickupOrder(duplicate) ? null : duplicate.deliveryPin,
+          fulfillmentType: isPickupOrder(duplicate) ? 'pickup' : 'delivery',
+          subtotal: duplicate.subtotal,
+          deliveryFee: isPickupOrder(duplicate) ? 0 : duplicate.deliveryFee,
+          total: duplicate.total,
           status: duplicate.status,
           duplicate: true,
           createdAt: new Date().toISOString(),
@@ -503,18 +523,18 @@ export async function POST(req: NextRequest) {
             customer_id: customerData.id,
             tracking_token: trackingToken,
             status: 'recebido',
-            fulfillment_type: 'delivery',
-            address_snapshot_json: address,
-            subtotal,
-            delivery_fee: deliveryFee,
-            total,
+            fulfillment_type: fulfillmentType,
+            address_snapshot_json: pickup ? {} : address,
+            subtotal: finalSubtotal,
+            delivery_fee: finalDeliveryFee,
+            total: finalTotal,
             customer_notes: body.notes || null,
           })
           .select()
           .single();
 
         if (orderData) {
-          await supabaseAdmin
+          if (!pickup) await supabaseAdmin
             .from('delivery_confirmation_secrets')
             .insert({
               store_id: storeId,
@@ -529,7 +549,7 @@ export async function POST(req: NextRequest) {
             method: payment?.method || 'pix_manual',
             status:
               payment?.method === 'pix_manual' ? 'aguardando_conferencia' : 'pendente',
-            amount: total,
+            amount: finalTotal,
             change_for: payment?.changeFor || null,
           });
         }
@@ -547,6 +567,10 @@ export async function POST(req: NextRequest) {
         orderNumber,
         trackingToken,
         deliveryPin: pin,
+        fulfillmentType,
+        subtotal: finalSubtotal,
+        deliveryFee: finalDeliveryFee,
+        total: finalTotal,
         status: 'recebido',
         createdAt: new Date().toISOString(),
       },
@@ -562,7 +586,8 @@ export async function POST(req: NextRequest) {
 
 export async function PATCH(req: NextRequest) {
   try {
-    if (!verifyAdminRequest(req).valid) {
+    const adminCheck = verifyAdminRequest(req);
+    if (!adminCheck.valid) {
       return NextResponse.json(
         { success: false, error: 'Não autorizado. Faça login no painel do lojista.' },
         { status: 401, headers: corsHeaders }
@@ -583,11 +608,7 @@ export async function PATCH(req: NextRequest) {
     } = await req.json();
     const orderId = rawOrderId || rawId;
 
-    const patchStoreId = normalizeStoreId(
-      req.headers.get('x-store-id') ||
-      req.nextUrl.searchParams.get('storeId') ||
-      process.env.NEXT_PUBLIC_STORE_ID
-    );
+    const patchStoreId = normalizeStoreId(adminCheck.storeId);
     const {state:patchState} = await readLogisticsState();
     let current = projectStoreOrders(await fetchCurrentOrders(patchStoreId),patchState,patchStoreId).map(order=>({...order}));
     let orderIndex = current.findIndex(
@@ -606,12 +627,25 @@ export async function PATCH(req: NextRequest) {
       }
     }
 
+    if (orderIndex === -1) return NextResponse.json({success:false,error:'Pedido não encontrado nesta loja.'},{status:404,headers:corsHeaders});
+    const previousStatus = current[orderIndex].status;
+    const pickup = isPickupOrder(current[orderIndex]);
+    if (pickup && status && !['recebido','preparando','pronto','concluido','cancelado'].includes(status)) {
+      return NextResponse.json({success:false,error:'Retirada na loja não possui etapa de entrega por motoboy.'},{status:409,headers:corsHeaders});
+    }
+    if (pickup && status === 'concluido' && !['pronto','concluido'].includes(previousStatus)) {
+      return NextResponse.json({success:false,error:'Marque o pedido como pronto antes de confirmar a retirada pelo cliente.'},{status:409,headers:corsHeaders});
+    }
     if (orderIndex !== -1) {
       const changes: Record<string,any> = {};
       if (status) changes.status = status;
       if (paymentStatus) changes.paymentStatus = paymentStatus;
       for (const [key,value] of Object.entries({driverName,dispatchStatus,assignedDriverName,offerGroupId,cancellationReason,canceledAt})) {
         if (value !== undefined) changes[key] = value;
+      }
+      if (pickup) {
+        Object.assign(changes,{driverId:null,driverName:null,assignedDriverName:null,offerGroupId:null,dispatchStatus:(status || previousStatus) === 'concluido' ? 'concluido' : 'disponivel'});
+        if (status === 'concluido') changes.collectedAt = current[orderIndex].collectedAt || new Date().toISOString();
       }
       current[orderIndex] = await persistOrderProjection(current[orderIndex], patchStoreId, changes);
       await persistOrders(current, patchStoreId);
@@ -624,8 +658,26 @@ export async function PATCH(req: NextRequest) {
       await cleanLogisticsForOrder(orderId, 'cancel_dispatch');
     }
 
+    let automaticDispatch: AutomaticDispatchResult | undefined;
+    if (status === 'pronto') {
+      const updatedOrder = current[orderIndex];
+      automaticDispatch = await dispatchReadyOrder(updatedOrder, previousStatus, patchState.settingsByStore?.[patchStoreId], async body => {
+        // Execute the same authorized route in-process; do not make an external request
+        // or introduce a second implementation of dispatch/acceptance.
+        const { POST } = await import('@/app/api/v1/logistics/[action]/route');
+        const headers = new Headers(req.headers);
+        headers.delete('content-length');
+        headers.set('content-type','application/json');
+        headers.set('x-store-id',patchStoreId);
+        headers.set('x-idempotency-key',`auto-ready:${patchStoreId}:${updatedOrder.id}`);
+        const dispatchRequest = new NextRequest(new URL('/api/v1/logistics/offer-create',req.url), {method:'POST',headers,body:JSON.stringify(body)});
+        const response = await POST(dispatchRequest,{params:Promise.resolve({action:'offer-create'})});
+        return {ok:response.ok,data:await response.json()};
+      });
+    }
+
     return NextResponse.json(
-      { success: true, message: 'Pedido atualizado com sucesso' },
+      { success: true, message: 'Pedido atualizado com sucesso', ...(automaticDispatch ? {automaticDispatch} : {}) },
       { headers: corsHeaders }
     );
   } catch (err: any) {

@@ -7,6 +7,7 @@ import CustomerOrderNotice from '@/components/CustomerOrderNotice';
 import CustomerOrderRating from '@/components/CustomerOrderRating';
 import { useParams } from 'next/navigation';
 import { normalizeOrderStatus } from '@/lib/logistics/order-timeline';
+import { isPickupOrder } from '@/lib/order-fulfillment';
 import {
   Flame,
   Clock,
@@ -30,9 +31,10 @@ import {
 function mapOrderData(found: any, prev: any, isServerConfirmed: boolean) {
   const normStatus = normalizeOrderStatus(found.status);
   const isFinished = normStatus === 'concluido';
+  const pickup = isPickupOrder(found);
 
   // deliveredAt oficial do servidor (nunca inventado pelo cliente)
-  const deliveredAt = found.deliveredAt || (prev?.isServerConfirmed && prev?.status === 'concluido' ? prev?.deliveredAt : null);
+  const deliveredAt = (pickup ? found.collectedAt : null) || found.deliveredAt || found.completedAt || (prev?.isServerConfirmed && prev?.status === 'concluido' ? prev?.deliveredAt : null);
 
   // Instante em que o cliente confirmou com o servidor (referência temporária para transição se deliveredAt estiver ausente)
   const serverConfirmedAt = prev?.serverConfirmedAt || (isFinished && isServerConfirmed ? Date.now() : null);
@@ -42,13 +44,14 @@ function mapOrderData(found: any, prev: any, isServerConfirmed: boolean) {
     trackingToken: found.trackingToken || prev?.trackingToken || '',
     orderNumber: String(found.orderNumber || '').replace('#', ''),
     status: normStatus,
+    fulfillmentType: pickup ? 'pickup' : 'delivery',
     dispatchStatus: found.dispatchStatus || (isFinished ? 'entregue' : 'disponivel'),
     deliveredAt,
     serverConfirmedAt,
     pickedUpAt: found.pickedUpAt || prev?.pickedUpAt || null,
-    driverName: found.driverName || found.assignedDriverName || prev?.driverName || null,
+    driverName: pickup ? null : found.driverName || found.assignedDriverName || prev?.driverName || null,
     isServerConfirmed,
-    rating: found.rating || prev?.rating || null,
+    rating: pickup && (found.rating || prev?.rating) ? { ...(found.rating || prev?.rating), driverName: null, driverStars: null } : found.rating || prev?.rating || null,
     customer: {
       name: found.customerName || found.customer?.name || prev?.customer?.name || '',
       phone: found.phone || found.customer?.phone || prev?.customer?.phone || ''
@@ -64,17 +67,17 @@ function mapOrderData(found: any, prev: any, isServerConfirmed: boolean) {
     items: Array.isArray(found.items) && found.items.length > 0
       ? found.items
       : prev?.items || [{ name: found.itemsSummary || 'Pizza Artesanal Selecionada', details: 'Item do pedido', price: found.total, qty: 1 }],
-    subtotal: found.subtotal ?? prev?.subtotal ?? (found.total - 6),
-    deliveryFee: found.deliveryFee ?? prev?.deliveryFee ?? 6.00,
+    subtotal: found.subtotal ?? prev?.subtotal ?? (pickup ? found.total : found.total - 6),
+    deliveryFee: pickup ? 0 : found.deliveryFee ?? prev?.deliveryFee ?? 6.00,
     total: found.total ?? prev?.total,
     paymentMethod:
       found.paymentMethod === 'pix_manual'
         ? 'Pix Manual'
         : found.paymentMethod === 'card_terminal'
-        ? 'Cartão na Entrega'
-        : found.paymentMethod || prev?.paymentMethod || 'Dinheiro na Entrega',
-    deliveryPin: found.deliveryPin || prev?.deliveryPin || '****',
-    estimatedMinutes: found.estimatedMinutes || prev?.estimatedMinutes || 30,
+        ? pickup ? 'Cartão na Retirada' : 'Cartão na Entrega'
+        : found.paymentMethod || prev?.paymentMethod || (pickup ? 'Dinheiro na Retirada' : 'Dinheiro na Entrega'),
+    deliveryPin: pickup ? null : found.deliveryPin || prev?.deliveryPin || '****',
+    estimatedMinutes: pickup ? null : found.estimatedMinutes || prev?.estimatedMinutes || 30,
     createdAt: found.createdAt || prev?.createdAt || 'Hoje'
   };
 }
@@ -169,7 +172,7 @@ export default function OrderTrackingPage() {
             // Cache provisório nunca antecipa confirmação de entrega do backend
             setOrder(
               mapOrderData(
-                { ...found, status: provStatus === 'concluido' ? 'em_entrega' : provStatus },
+                { ...found, status: provStatus === 'concluido' ? isPickupOrder(found) ? 'pronto' : 'em_entrega' : provStatus },
                 null,
                 false
               )
@@ -367,7 +370,7 @@ export default function OrderTrackingPage() {
     };
   }, [token]);
 
-  // Lista dos 5 passos do pedido
+  const pickup = isPickupOrder(order);
   const steps = [
     {
       key: 'recebido',
@@ -392,9 +395,9 @@ export default function OrderTrackingPage() {
     {
       key: 'pronto',
       stepNumber: 3,
-      title: 'Pronto / Despacho',
+      title: pickup ? 'Pronto para retirar' : 'Pronto / Despacho',
       subtitle: 'Embalado e aquecido',
-      description: 'Pedido finalizado na embalagem térmica, pronto para saída com nosso entregador.',
+      description: pickup ? 'Seu pedido está pronto. Apresente o número do pedido no balcão da loja para a conferência.' : 'Pedido finalizado na embalagem térmica, pronto para saída com nosso entregador.',
       icon: PackageCheck,
       activeColor: 'from-purple-600 to-indigo-500',
       badgeColor: 'bg-purple-950/80 border-purple-600/50 text-purple-400'
@@ -411,15 +414,15 @@ export default function OrderTrackingPage() {
     },
     {
       key: 'concluido',
-      stepNumber: 5,
-      title: 'Pedido Entregue',
+      stepNumber: pickup ? 4 : 5,
+      title: pickup ? 'Pedido Retirado' : 'Pedido Entregue',
       subtitle: 'Bom apetite!',
-      description: 'Entrega finalizada com sucesso. Esperamos que aproveite cada pedaço!',
+      description: pickup ? 'Retirada confirmada pela loja. Obrigado pela preferência!' : 'Entrega finalizada com sucesso. Esperamos que aproveite cada pedaço!',
       icon: CheckCircle2,
       activeColor: 'from-emerald-600 to-teal-500',
       badgeColor: 'bg-emerald-950/80 border-emerald-600/50 text-emerald-400'
     }
-  ];
+  ].filter(step => !pickup || step.key !== 'em_entrega');
 
   // Regras de Entrega Confirmada e Tempo Decorrido
   const isDelivered = Boolean(order?.status === 'concluido' && order?.isServerConfirmed);
@@ -559,7 +562,7 @@ export default function OrderTrackingPage() {
 
   return (
     <div className="min-h-screen bg-zinc-950 text-white flex flex-col">
-      <CustomerOrderNotice token={token} status={order.status} confirmed={Boolean(order.isServerConfirmed && order.trackingToken === token)} />
+      <CustomerOrderNotice token={token} status={order.status} fulfillmentType={order.fulfillmentType} confirmed={Boolean(order.isServerConfirmed && order.trackingToken === token)} />
       {/* Top Header */}
       <header className="border-b border-zinc-800/80 bg-zinc-900/70 py-4 px-6 backdrop-blur-md sticky top-0 z-30">
         <div className="max-w-4xl mx-auto flex items-center justify-between">
@@ -597,6 +600,7 @@ export default function OrderTrackingPage() {
 
       {/* Main Container */}
       <main className="flex-1 max-w-4xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
+        <p className="rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-3 text-sm font-bold text-zinc-200">{pickup ? 'Retirada na loja' : 'Entrega no endereço'}</p>
 
         {/* Banner Discreto de Estado da Conexão */}
         {connectionState === 'offline' && (
@@ -636,7 +640,7 @@ export default function OrderTrackingPage() {
           </div>
         ) : showFinalThankYou ? (
           /* 2. APÓS ~10s DE ENTREGA CONFIRMADA: Substitui área de acompanhamento pela Mensagem Final */
-          <section className="p-8 sm:p-12 rounded-3xl bg-zinc-900/90 border border-emerald-800/40 shadow-2xl text-center space-y-6" aria-label="Agradecimento da entrega">
+          <section className="p-8 sm:p-12 rounded-3xl bg-zinc-900/90 border border-emerald-800/40 shadow-2xl text-center space-y-6" aria-label={pickup ? 'Agradecimento da retirada' : 'Agradecimento da entrega'}>
             <div className="w-16 h-16 rounded-2xl bg-emerald-950/80 border-2 border-emerald-500/60 flex items-center justify-center mx-auto text-emerald-400 shadow-xl shadow-emerald-950/50">
               <CheckCircle2 className="w-9 h-9" />
             </div>
@@ -645,14 +649,14 @@ export default function OrderTrackingPage() {
               <span className="text-xs text-zinc-400 font-semibold uppercase tracking-wider block">
                 Pedido #{order.orderNumber}
               </span>
-              <h1 className="text-2xl sm:text-3xl font-black text-white">Pedido entregue!</h1>
+              <h1 className="text-2xl sm:text-3xl font-black text-white">{pickup ? 'Pedido retirado!' : 'Pedido entregue!'}</h1>
               <p className="text-base text-zinc-300 font-medium">
                 Agradecemos pela sua compra e pela preferência.
               </p>
               {/* Mostra "Entregue às HH:mm" utilizando o horário confirmado pelo servidor (sem inventar horário se ausente) */}
               {order.deliveredAt && Number.isFinite(Date.parse(order.deliveredAt)) && (
                 <p className="text-xs text-zinc-500 font-medium">
-                  Entregue às {new Date(order.deliveredAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                  {pickup ? 'Retirado às' : 'Entregue às'} {new Date(order.deliveredAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
                 </p>
               )}
             </div>
@@ -724,13 +728,13 @@ export default function OrderTrackingPage() {
                   <div className="p-4 rounded-2xl bg-zinc-950/90 border border-zinc-800/80 text-left sm:text-right shadow-inner">
                     <div className="flex items-center sm:justify-end gap-1.5 text-xs text-zinc-400 font-semibold mb-1">
                       <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                      <span>{isDelivered ? 'Código de Entrega Validado' : 'Seu Código de Entrega (PIN)'}</span>
+                      <span>{pickup ? 'Número para conferência no balcão' : isDelivered ? 'Código de Entrega Validado' : 'Seu Código de Entrega (PIN)'}</span>
                     </div>
                     <div className={`font-mono text-3xl font-black tracking-widest bg-zinc-900 px-4 py-1.5 rounded-xl border border-zinc-800 inline-block shadow-sm ${isDelivered ? 'text-emerald-400' : 'text-amber-400'}`}>
-                      {order.deliveryPin}
+                      {pickup ? `#${order.orderNumber}` : order.deliveryPin}
                     </div>
                     <p className="text-[11px] text-zinc-500 mt-1 max-w-[240px]">
-                      {isDelivered ? 'Entrega validada com sucesso pelo entregador.' : 'Informe este código ao motoboy apenas na entrega.'}
+                      {pickup ? isDelivered ? 'Retirada confirmada pela loja.' : 'Apresente o número do pedido à equipe da loja. Aguarde a confirmação de que está pronto para retirar.' : isDelivered ? 'Entrega validada com sucesso pelo entregador.' : 'Informe este código ao motoboy apenas na entrega.'}
                     </p>
                   </div>
                 </div>
@@ -747,7 +751,7 @@ export default function OrderTrackingPage() {
                           {currentStep.title}
                         </span>
                         <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase border ${currentStep.badgeColor}`}>
-                          {isDelivered ? '✓ Concluído' : `Passo ${currentStep.stepNumber} de 5`}
+                          {isDelivered ? pickup ? '✓ Retirado' : '✓ Concluído' : `Passo ${currentStep.stepNumber} de ${steps.length}`}
                         </span>
                       </div>
                       <p className="text-xs text-zinc-400 mt-1 max-w-lg leading-relaxed">
@@ -758,14 +762,14 @@ export default function OrderTrackingPage() {
 
                   {/* Previsão de Chegada e Entregador (Removidos após entrega confirmada) */}
                   <div className="flex flex-col sm:items-end gap-2 shrink-0 pt-3 sm:pt-0 border-t sm:border-t-0 border-zinc-800/60">
-                    {!isDelivered && order.status !== 'em_entrega' && (
+                    {!pickup && !isDelivered && order.status !== 'em_entrega' && (
                       <div className="flex items-center gap-2 text-xs font-semibold text-zinc-300 bg-zinc-900 px-3 py-1.5 rounded-xl border border-zinc-800">
                         <Clock className="w-4 h-4 text-amber-400" />
                         <span>Previsão: <strong className="text-white">~{order.estimatedMinutes} min</strong></span>
                       </div>
                     )}
 
-                    {order.driverName && (order.status === 'em_entrega' || order.status === 'pronto' || isDelivered) && (
+                    {!pickup && order.driverName && (order.status === 'em_entrega' || order.status === 'pronto' || isDelivered) && (
                       <div className="flex items-center gap-2 text-xs font-bold text-orange-300 bg-orange-950/60 border border-orange-800/50 px-3 py-1.5 rounded-xl">
                         <Bike className="w-4 h-4 text-orange-400" />
                         <span>Entregador: <strong className="text-white">{order.driverName}</strong></span>
@@ -777,13 +781,13 @@ export default function OrderTrackingPage() {
             </div>
 
             {/* Mapa de Rastreio (Encerra imediatamente na entrega confirmada) */}
-            {!isDelivered ? (
+            {!pickup && !isDelivered ? (
               <CustomerDeliveryTracking key={token} token={token} />
-            ) : (
+            ) : isDelivered ? (
               <>
                 <div className="p-4 sm:p-5 rounded-2xl bg-zinc-900/60 border border-emerald-900/30 text-center flex items-center justify-center gap-2.5 text-xs text-emerald-400 font-semibold">
                   <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                  <span>Rastreamento em tempo real encerrado. Pedido entregue ao destinatário!</span>
+                  <span>{pickup ? 'Retirada confirmada no balcão da loja.' : 'Rastreamento em tempo real encerrado. Pedido entregue ao destinatário!'}</span>
                 </div>
 
                 {/* Opção de Avaliação Imediata ao Cliente */}
@@ -804,7 +808,7 @@ export default function OrderTrackingPage() {
                   }}
                 />
               </>
-            )}
+            ) : null}
 
             {/* Linha do Tempo Passo a Passo */}
             <div className="p-6 sm:p-8 rounded-3xl bg-zinc-900/90 border border-zinc-800/80 shadow-2xl space-y-6">
@@ -918,7 +922,7 @@ export default function OrderTrackingPage() {
                         {st.key === 'concluido' && (isPassed || isDelivered) && (
                           <div className="mt-2.5 p-3 rounded-xl bg-emerald-950/40 border border-emerald-800/30 text-xs text-emerald-400 font-medium flex items-center gap-2">
                             <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                            <span>Pedido entregue com sucesso. Obrigado pela preferência!</span>
+                            <span>{pickup ? 'Pedido retirado com sucesso. Obrigado pela preferência!' : 'Pedido entregue com sucesso. Obrigado pela preferência!'}</span>
                           </div>
                         )}
                       </div>
@@ -962,7 +966,7 @@ export default function OrderTrackingPage() {
                 <span>R$ {Number(order.subtotal || 0).toFixed(2).replace('.', ',')}</span>
               </div>
               <div className="flex justify-between text-zinc-400">
-                <span>Taxa de Entrega:</span>
+                <span>{pickup ? 'Retirada na loja:' : 'Taxa de Entrega:'}</span>
                 <span>R$ {Number(order.deliveryFee || 0).toFixed(2).replace('.', ',')}</span>
               </div>
               <div className="flex justify-between text-base font-black text-white pt-2 border-t border-zinc-800">
@@ -976,10 +980,10 @@ export default function OrderTrackingPage() {
           <div className="p-6 rounded-3xl bg-zinc-900/90 border border-zinc-800/80 shadow-xl space-y-4 text-xs">
             <h3 className="font-extrabold text-white text-base flex items-center gap-2">
               <MapPin className="w-4 h-4 text-pizza-gold" />
-              <span>Destino & Pagamento</span>
+              <span>{pickup ? 'Retirada & Pagamento' : 'Destino & Pagamento'}</span>
             </h3>
 
-            <div className="p-4 rounded-2xl bg-zinc-950 border border-zinc-800/80 flex items-start gap-3">
+            {pickup ? <div className="p-4 rounded-2xl bg-zinc-950 border border-zinc-800/80"><span className="block text-sm font-bold text-white">Retirada no balcão da loja</span><p className="mt-1 text-zinc-300">Apresente o pedido #{order.orderNumber}. Confira o endereço e o horário de retirada diretamente com a loja.</p></div> : <div className="p-4 rounded-2xl bg-zinc-950 border border-zinc-800/80 flex items-start gap-3">
               <MapPin className="w-4 h-4 text-pizza-gold flex-shrink-0 mt-0.5" />
               <div>
                 <span className="font-bold text-white block text-sm">Endereço de Entrega</span>
@@ -990,7 +994,7 @@ export default function OrderTrackingPage() {
                   {order.address.region} - {order.address.city || 'Canoas'} / {order.address.state || 'RS'}
                 </p>
               </div>
-            </div>
+            </div>}
 
             <div className="p-4 rounded-2xl bg-zinc-950 border border-zinc-800/80">
               <span className="font-semibold text-zinc-400 block text-xs">Forma de Pagamento</span>

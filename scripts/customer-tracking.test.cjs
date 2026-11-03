@@ -2,7 +2,7 @@ const test=require('node:test'),assert=require('node:assert/strict'),fs=require(
 const compile=file=>ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText;
 function moduleAt(file,imports={}){const exports={};vm.runInNewContext(compile(file),{exports,require:name=>imports[name]||require(name),Date,JSON,Map,Set,Number,Math,console});return exports;}
 const timeline=moduleAt('src/lib/logistics/order-timeline.ts');
-const policy=moduleAt('src/lib/logistics/customer-tracking-policy.ts',{'./order-timeline':timeline});
+const policy=moduleAt('src/lib/logistics/customer-tracking-policy.ts',{'./order-timeline':timeline,'../order-fulfillment':moduleAt('src/lib/order-fulfillment.ts')});
 const NOW=Date.now(),TOKEN='test-capability-with-strong-entropy',STORE='store-a';
 const copy=value=>JSON.parse(JSON.stringify(value));
 function fixture(){return {settingsByStore:{[STORE]:{storeCity:'Canoas',customerLiveTrackingEnabled:true}},orderProjectionsByStore:{[STORE]:{o1:{id:'o1',storeId:STORE,trackingToken:TOKEN,status:'em_entrega',address:'Own street',city:'Canoas',phone:'OWN-PHONE'}}},assignments:[{id:'a1',orderId:'o1',storeId:STORE,driverId:'d1',status:'picked_up',createdAt:new Date(NOW-60000).toISOString(),pickedUpAt:new Date(NOW-20000).toISOString(),address:'Own street'}],drivers:[{id:'member1',driverId:'d1',storeId:STORE,status:'ativo'}],tracking:{d1:{driverId:'d1',storeId:STORE,latitude:-29.9,longitude:-51.1,accuracy:10,capturedAt:new Date(NOW-1000).toISOString(),updatedAt:new Date(NOW).toISOString()}}};}

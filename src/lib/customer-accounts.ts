@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { isPickupOrder } from '@/lib/order-fulfillment';
 import { NextRequest } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/server';
 import { timelineStoreKey, projectStoreOrders } from '@/lib/logistics/order-timeline';
@@ -86,7 +87,7 @@ export async function ensureCustomerForOrder(req:NextRequest,order:any):Promise<
   else {profile=inserted.data;error=inserted.error;}
   if(error||!profile)throw unavailable();
  }
- const snapshot={id:String(order.id),orderNumber:order.orderNumber,status:order.status,total:order.total,createdAt:order.createdAtISO||new Date().toISOString(),itemsSummary:order.itemsSummary||'',trackingToken:order.trackingToken};
+ const snapshot={id:String(order.id),orderNumber:order.orderNumber,status:order.status,fulfillmentType:isPickupOrder(order)?'pickup':'delivery',collectedAt:order.collectedAt||null,total:order.total,createdAt:order.createdAtISO||new Date().toISOString(),itemsSummary:order.itemsSummary||'',trackingToken:order.trackingToken};
  const relation=await supabaseAdmin.from('nw_customer_orders').upsert({store_id:store,order_id:String(order.id),profile_id:profile.id,tracking_token:order.trackingToken,snapshot},{onConflict:'store_id,order_id',ignoreDuplicates:true});
  if(relation.error)throw unavailable();
  let existing:any=null;try{existing=await customerSession(req);}catch(error){if(!(error instanceof CustomerError)||error.status!==401)throw error;}
@@ -100,7 +101,7 @@ export async function customerHistory(profile:any) {
  // Stored snapshots contain only this profile's confirmed orders; projections update status.
  const projected=projectStoreOrders(links.map(link=>({...link.snapshot,id:link.order_id,storeId:profile.store_id})),state,profile.store_id);
  const map=new Map(projected.map((o:any)=>[String(o.id),o]));
- return links.filter(link=>map.has(link.order_id)).map(link=>{const o:any=map.get(link.order_id);return {id:link.order_id,orderNumber:o.orderNumber,status:o.status,total:o.total,createdAt:o.createdAtISO||link.snapshot.createdAt||link.created_at,trackingToken:link.tracking_token,itemsSummary:o.itemsSummary||link.snapshot.itemsSummary||''};});
+ return links.filter(link=>map.has(link.order_id)).map(link=>{const o:any=map.get(link.order_id);return {id:link.order_id,orderNumber:o.orderNumber,status:o.status,fulfillmentType:isPickupOrder(o)?'pickup':'delivery',collectedAt:o.collectedAt||link.snapshot.collectedAt||null,total:o.total,createdAt:o.createdAtISO||link.snapshot.createdAt||link.created_at,trackingToken:link.tracking_token,itemsSummary:o.itemsSummary||link.snapshot.itemsSummary||''};});
 }
 export function validateAddress(body:any) {
  const data={street:boundedText(body.street,180,true),number:boundedText(body.number,20,true),complement:boundedText(body.complement,120),reference:boundedText(body.reference,180),neighborhood:boundedText(body.neighborhood,100,true),city:boundedText(body.city,100,true),state:boundedText(body.state,2,true).toUpperCase(),cep:boundedText(body.cep,10).replace(/\D/g,'')};

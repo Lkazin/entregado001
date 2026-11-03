@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { Bike, Clock, LockKeyhole, MapPin } from 'lucide-react';
 import { supabaseClient } from '@/lib/supabase/client';
+import { isPickupOrder } from '@/lib/order-fulfillment';
 
 const TrackingMap = dynamic(() => import('@/components/TrackingMap'), {
   ssr: false,
@@ -25,13 +26,15 @@ const unavailable: TrackingSnapshot = {
   driverLocation: null, destination: null, route: null,
 };
 
-export default function CustomerDeliveryTracking({token}: {token: string}) {
+export default function CustomerDeliveryTracking({token,fulfillmentType}: {token: string;fulfillmentType?:string}) {
+  const pickup = isPickupOrder({fulfillmentType});
   const [snapshot, setSnapshot] = useState<TrackingSnapshot | null>(null);
   const [now, setNow] = useState(Date.now);
   const refreshTracking = useRef<() => void>(() => {});
   const topic = snapshot?.realtime?.topic;
 
   useEffect(() => {
+    if (pickup) { setSnapshot(null); return; }
     let disposed = false;
     let request: AbortController | null = null;
     let pending = false;
@@ -79,16 +82,17 @@ export default function CustomerDeliveryTracking({token}: {token: string}) {
       window.removeEventListener('offline', onOffline);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [token]);
+  }, [token, pickup]);
 
   useEffect(() => {
+    if (pickup) return;
     const tick = window.setInterval(() => setNow(Date.now()), 5000);
     return () => window.clearInterval(tick);
-  }, []);
+  }, [pickup]);
 
   useEffect(() => {
     const client = supabaseClient;
-    if (!topic || !client) return;
+    if (pickup || !topic || !client) return;
     let disposed = false;
     let channel: ReturnType<typeof client.channel> | null = null;
     let debounce: ReturnType<typeof setTimeout> | undefined;
@@ -136,7 +140,7 @@ export default function CustomerDeliveryTracking({token}: {token: string}) {
       if (debounce) clearTimeout(debounce);
       if (channel) void client.removeChannel(channel);
     };
-  }, [topic, token]);
+  }, [topic, token, pickup]);
 
   const timestamp = Date.parse(snapshot?.driverLocation?.updatedAt || '');
   const age = Number.isFinite(timestamp) && timestamp <= now + 5000 ? Math.max(0, now-timestamp) : Infinity;
@@ -147,6 +151,7 @@ export default function CustomerDeliveryTracking({token}: {token: string}) {
   const routeFresh = !snapshot?.route?.calculatedAt || (Number.isFinite(routeAge) && now-routeAge <= 120000);
   const route = fresh && routeFresh ? snapshot?.route : null;
 
+  if (pickup) return null;
   return (
     <section className="min-w-0 space-y-3 rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4 sm:p-5" aria-label="Rastreamento da entrega">
       <h2 className="flex items-center gap-2 text-base font-bold text-white"><Bike className="h-5 w-5 text-orange-400" />Acompanhe sua entrega</h2>

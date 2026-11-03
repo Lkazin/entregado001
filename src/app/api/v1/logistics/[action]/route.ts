@@ -17,6 +17,7 @@ import { AccountSessionError, normalizeDriverPhone } from '@/lib/auth/driver-acc
 import { prepareDriverAccount, driverAccountContext, bindAccountMembership } from '@/lib/auth/driver-account-logistics';
 import { notifyDriversOfNewOffer } from '@/lib/push/web-push-server';
 import { activeAssignmentStatuses, waitingPickupStatuses, pickedUpStatuses, recordStage, mergeStageHistory, projectStoreOrders } from '@/lib/logistics/order-timeline';
+import { automaticDispatchEnabled, isCollectionOrder } from '@/lib/logistics/automatic-dispatch';
 
 export const dynamic = 'force-dynamic';
 
@@ -58,6 +59,7 @@ export interface StoreLogisticsSettings {
   storeLatitude?: number;
   storeLongitude?: number;
   distributionMode: 'fixed_driver' | 'broadcast_enabled';
+  automaticDispatchEnabled?: boolean;
   fixedDriverId: string | null;
   maxConcurrentDeliveries: number;
   offerTimeoutSeconds: number;
@@ -131,6 +133,7 @@ function getStoreSettings(storeId: string): StoreLogisticsSettings {
       storeLatitude: STORE_LOCATION.latitude,
       storeLongitude: STORE_LOCATION.longitude,
       distributionMode: 'broadcast_enabled',
+      automaticDispatchEnabled: false,
       fixedDriverId: null,
       maxConcurrentDeliveries: 5,
       offerTimeoutSeconds: 900,
@@ -628,7 +631,7 @@ function sanitizeAssignmentForDriver(a: any, idx: number, fallbackStoreId?: stri
   };
 }
 
-async function requireReadyDispatchOrders(items: any[], storeId: string, currentOfferId?: string): Promise<any[]> {
+async function requireReadyDispatchOrders(items: any[], storeId: string, currentOfferId?: string, automatic = false): Promise<any[]> {
   const all = await loadStoreOrders(storeId);
   const ids = new Set<string>();
   const ready: any[] = [];
@@ -653,6 +656,12 @@ async function requireReadyDispatchOrders(items: any[], storeId: string, current
     }
     if (order.status === 'cancelado') {
       throw new AccountSessionError('Não é possível despachar um pedido cancelado.', 409, 'ORDER_CANCELED');
+    }
+    if (isCollectionOrder(order)) {
+      throw new AccountSessionError('Pedido de retirada na loja não pode ser enviado ao motoboy.', 409, 'PICKUP_ORDER_NOT_DISPATCHABLE');
+    }
+    if (automatic && (order.status !== 'pronto' || isCollectionOrder(order))) {
+      throw new AccountSessionError('O despacho automático exige um pedido de entrega já pronto.', 409, 'ORDER_NOT_READY');
     }
 
     // Se o pedido ainda estava em recebido ou preparando no backend, o lojista está despachando-o agora:
@@ -1519,10 +1528,19 @@ export async function POST(
           const effectiveStoreId = normalizeStoreId(adminCheck.storeId || storeId);
           const current = getStoreSettings(effectiveStoreId);
 
-          const distributionMode =
+          const distributionMode = body.distributionMode === undefined ? current.distributionMode :
             body.distributionMode === 'fixed_driver' ? 'fixed_driver' : 'broadcast_enabled';
           const fixedDriverId =
-            distributionMode === 'fixed_driver' ? body.fixedDriverId || null : body.fixedDriverId ?? current.fixedDriverId;
+            body.fixedDriverId === undefined ? current.fixedDriverId : body.fixedDriverId || null;
+          if (body.automaticDispatchEnabled !== undefined && typeof body.automaticDispatchEnabled !== 'boolean') {
+            return jsonResponse({success:false,error:'Informe se o despacho automático está ativado ou desativado.'},{status:400});
+          }
+          const nextAutomaticDispatchEnabled = body.automaticDispatchEnabled === undefined
+            ? automaticDispatchEnabled(current) : body.automaticDispatchEnabled;
+          if (nextAutomaticDispatchEnabled && (distributionMode !== 'fixed_driver' || !fixedDriverId ||
+            !liveDrivers.some(driver => isSameStore(driver.storeId,effectiveStoreId) && [driver.id,driver.driverId].includes(fixedDriverId)))) {
+            return jsonResponse({success:false,code:'AUTOMATIC_DISPATCH_REQUIRES_FIXED_DRIVER',error:'Selecione um entregador fixo desta loja antes de ativar o despacho automático. Desative o automático antes de trocar para oferta aos disponíveis.'},{status:409});
+          }
           const requestedCapacity = Number(body.maxConcurrentDeliveries);
           const maxConcurrentDeliveries = Number.isSafeInteger(requestedCapacity) && requestedCapacity > 0
             ? requestedCapacity : current.maxConcurrentDeliveries;
@@ -1585,6 +1603,7 @@ export async function POST(
             storeLatitude: nextLat,
             storeLongitude: nextLng,
             distributionMode,
+            automaticDispatchEnabled: nextAutomaticDispatchEnabled,
             fixedDriverId,
             maxConcurrentDeliveries,
             offerTimeoutSeconds,
@@ -2269,6 +2288,10 @@ export async function POST(
 
           const effectiveStoreId = normalizeStoreId(adminCheck.storeId || storeId);
           const settings = getStoreSettings(effectiveStoreId);
+          const automatic = body.automatic === true;
+          if (automatic && (!automaticDispatchEnabled(settings) || settings.distributionMode !== 'fixed_driver' || !settings.fixedDriverId)) {
+            return jsonResponse({success:false,code:'AUTOMATIC_DISPATCH_DISABLED',error:'Despacho automático desativado ou sem entregador fixo configurado.'},{status:409});
+          }
 
           const {
             offerId: customOfferId,
@@ -2306,12 +2329,17 @@ export async function POST(
             );
           }
 
-          const targetOrders = await requireReadyDispatchOrders(requestedOrders, effectiveStoreId);
+          if (automatic && requestedOrders.length !== 1) return jsonResponse({success:false,error:'O despacho automático envia um pedido pronto por vez.'},{status:400});
+          const targetOrders = await requireReadyDispatchOrders(requestedOrders, effectiveStoreId, undefined, automatic);
+          if (automatic && liveOffers.some(offer => isSameStore(offer.storeId,effectiveStoreId) && offer.source === 'automatic_ready' &&
+            (String(offer.orderId) === String(targetOrders[0].id) || (offer.orderIds || []).includes(targetOrders[0].id)))) {
+            return jsonResponse({success:false,code:'AUTOMATIC_DISPATCH_ALREADY_ATTEMPTED',error:'Este pedido já teve uma oferta automática. Use o despacho manual para uma nova tentativa.'},{status:409});
+          }
           const nowMs = Date.now();
 
           // Determina o modo de distribuição
           const effectiveMode: 'fixed_driver' | 'broadcast_enabled' =
-            requestedMode === 'broadcast_enabled'
+            automatic ? 'fixed_driver' : requestedMode === 'broadcast_enabled'
               ? 'broadcast_enabled'
               : requestedMode === 'fixed_driver'
               ? 'fixed_driver'
@@ -2326,7 +2354,7 @@ export async function POST(
           let eligibleDriverIds: string[] = [];
 
           if (effectiveMode === 'fixed_driver') {
-            const targetDrvId = requestedDriverId || settings.fixedDriverId;
+            const targetDrvId = automatic ? settings.fixedDriverId : requestedDriverId || settings.fixedDriverId;
             if (!targetDrvId) {
               return jsonResponse(
                 {
@@ -2409,6 +2437,9 @@ export async function POST(
                 { status: 409 }
               );
             }
+            if (automatic && (drv.presence === 'indisponivel' || drv.shiftStatus === 'plantao_encerrado')) {
+              return jsonResponse({success:false,code:'FIXED_DRIVER_UNAVAILABLE',error:'O entregador fixo está indisponível. O pedido continua pronto para despacho manual.'},{status:409});
+            }
 
             resolvedDriverId = drv.driverId || drv.id;
             resolvedDriverName = drv.driverName || drv.name || 'Entregador';
@@ -2437,7 +2468,11 @@ export async function POST(
           const timeoutSeconds = settings.offerTimeoutSeconds || 900;
           const expiresAt = new Date(Date.now() + timeoutSeconds * 1000).toISOString();
 
-          const feeNum = Number(feeOffered) || 12.0;
+          const automaticFee = targetOrders[0]?.deliveryFee;
+          if (automatic && (typeof automaticFee !== 'number' || !Number.isFinite(automaticFee) || automaticFee < 0)) {
+            return jsonResponse({success:false,code:'AUTOMATIC_DISPATCH_FEE_REQUIRED',error:'Confira o valor da entrega antes de despachar este pedido.'},{status:409});
+          }
+          const feeNum = automatic ? automaticFee : Number(feeOffered) || 12.0;
           const combinedOrderNumbers =
             targetOrders
               .map((o: any) =>
@@ -2461,7 +2496,8 @@ export async function POST(
             id: offerId,
             offerId,
             storeId: effectiveStoreId,
-            storeName: 'Bella Pizza',
+            storeName: settings.storeName || STORE_LOCATION.name,
+            ...(automatic ? {source:'automatic_ready'} : {}),
             distributionMode: effectiveMode,
             orderId: targetOrders[0]?.id || targetOrders[0]?.orderId || orderId,
             orderIds: targetOrders.map((o: any) => o.id || o.orderId),

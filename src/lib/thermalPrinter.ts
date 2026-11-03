@@ -1,7 +1,9 @@
+import { isPickupOrder } from './order-fulfillment';
 // Utilitário de Impressão Térmica de Cupom (80mm e 58mm)
 // Desenvolvido para impressoras térmicas ESC/POS (Epson, Elgin, Daruma, Bematech, etc.)
 
 export interface PrintableOrder {
+  fulfillmentType?: 'delivery' | 'pickup';
   id: string;
   orderNumber: number;
   customerName: string;
@@ -47,6 +49,7 @@ const money = (val?: number | null): string => {
 };
 
 export function buildReceiptHtml(order: PrintableOrder, paperWidth: PaperWidth = '80mm'): string {
+  const pickup = isPickupOrder(order);
   const is58 = paperWidth === '58mm';
   const widthMm = is58 ? '48mm' : '72mm';
   const fontSize = is58 ? '11px' : '12px';
@@ -60,7 +63,7 @@ export function buildReceiptHtml(order: PrintableOrder, paperWidth: PaperWidth =
 
   const paymentLabel =
     order.paymentMethod === 'pix_manual' ? 'PIX' :
-    order.paymentMethod === 'cash_delivery' ? 'DINHEIRO NA ENTREGA' :
+    order.paymentMethod === 'cash_delivery' ? (pickup ? 'DINHEIRO NO BALCAO' : 'DINHEIRO NA ENTREGA') :
     order.paymentMethod === 'card_terminal' ? 'CARTAO / MAQUININHA' :
     String(order.paymentMethod).toUpperCase();
 
@@ -188,9 +191,9 @@ export function buildReceiptHtml(order: PrintableOrder, paperWidth: PaperWidth =
   <div style="margin-bottom: 4px;">
     <div><strong>CLIENTE:</strong> ${order.customerName}</div>
     <div><strong>TEL:</strong> ${order.phone || 'Não informado'}</div>
-    <div><strong>ENDEREÇO:</strong> ${fullAddress}</div>
+    ${pickup ? '<div><strong>RETIRADA NA LOJA — SEM FRETE</strong></div>' : `<div><strong>ENDEREÇO:</strong> ${fullAddress}</div>
     <div><strong>BAIRRO:</strong> ${order.region}</div>
-    ${ad?.reference ? `<div><strong>REF:</strong> ${ad.reference}</div>` : ''}
+    ${ad?.reference ? `<div><strong>REF:</strong> ${ad.reference}</div>` : ''}`}
   </div>
 
   <div class="divider"></div>
@@ -215,7 +218,7 @@ export function buildReceiptHtml(order: PrintableOrder, paperWidth: PaperWidth =
       <span>${money(order.subtotal)}</span>
     </div>
   ` : ''}
-  ${typeof order.deliveryFee === 'number' && order.deliveryFee > 0 ? `
+  ${!pickup && typeof order.deliveryFee === 'number' && order.deliveryFee > 0 ? `
     <div class="row">
       <span>Taxa de Entrega:</span>
       <span>${money(order.deliveryFee)}</span>
@@ -235,13 +238,14 @@ export function buildReceiptHtml(order: PrintableOrder, paperWidth: PaperWidth =
 
   <div class="double-divider"></div>
 
-  <div class="pin-box">
+  ${pickup ? '<div class="bold">Conferir número do pedido no balcão.</div>' : `<div class="pin-box">
     <div style="font-size: 0.8em; font-weight: bold;">PIN DE CONFIRMAÇÃO DE ENTREGA</div>
     <span class="pin-code">[ ${order.deliveryPin || '----'} ]</span>
     <div style="font-size: 0.75em; margin-top: 2px;">(Solicitar este código ao cliente)</div>
   </div>
 
-  ${order.driverName || order.assignedDriverName ? `
+  `}
+  ${!pickup && (order.driverName || order.assignedDriverName) ? `
     <div style="font-size: 0.85em; text-align: center; margin-top: 4px;">
       Motoboy: <strong>${order.assignedDriverName || order.driverName}</strong>
     </div>

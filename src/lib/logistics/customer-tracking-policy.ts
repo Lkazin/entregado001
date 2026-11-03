@@ -1,4 +1,5 @@
 import { timelineStoreKey, projectStoreOrders, pickedUpStatuses } from './order-timeline';
+import { isPickupOrder } from '../order-fulfillment';
 
 export const TRACKING_FEATURE = 'customer_live_tracking';
 const terminal = new Set(['concluido', 'entregue', 'delivered', 'cancelado']);
@@ -28,7 +29,7 @@ export function trackingContext(state: any, token: string, now = Date.now()) {
   const driver = assignment && (state.drivers || []).find((d: any) => timelineStoreKey(d.storeId) === storeId &&
     [d.id, d.driverId].filter(Boolean).includes(assignment.driverId));
   const ended = terminal.has(order.status) || Boolean(assignment && ['delivered', 'entregue', 'canceled_by_store', 'canceled_by_driver', 'withdrawn', 'returned_to_dispatch'].includes(assignment.status));
-  const active = !ended && Boolean(assignment?.id && driver && !blockedDrivers.has(driver.status) && pickedUpStatuses.includes(assignment.status));
+  const active = !ended && !isPickupOrder(order) && Boolean(assignment?.id && driver && !blockedDrivers.has(driver.status) && pickedUpStatuses.includes(assignment.status));
   const candidate = active ? (state.tracking?.[assignment.driverId] || state.tracking?.[driver.id] || state.tracking?.[driver.driverId]) : null;
   const capturedAt = Date.parse(candidate?.capturedAt || candidate?.updatedAt || '');
   const receivedAt = Date.parse(candidate?.updatedAt || '');

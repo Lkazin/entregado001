@@ -3,6 +3,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const ts = require('typescript');
+const fulfillmentContext = { exports: {} };
+vm.runInNewContext(ts.transpileModule(fs.readFileSync('src/lib/order-fulfillment.ts', 'utf8'), {compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText, fulfillmentContext);
+
 
 // Transpilação CommonJS para execução dos módulos
 const pageSource = ts.transpileModule(fs.readFileSync('src/app/pedido/[token]/page.tsx', 'utf8'), {
@@ -139,6 +142,7 @@ function createPageHarness({ initialToken = 'token-123', localStorageData = null
       intervals.delete(id);
     },
     require(id) {
+      if (id === '@/lib/order-fulfillment') return fulfillmentContext.exports;
       if (id === 'react') return hooks;
       if (id === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: 'fragment' };
       if (id === 'next/link') return { __esModule: true, default: LinkComponent };
@@ -961,4 +965,11 @@ test('11. Avaliação Backend: falha real de persistência em error, concorrênc
   assert.equal(resGet.status, 200);
   assert.equal(resGet.body.rated, true);
   assert.equal(resGet.body.rating.stars, 5);
+});
+
+test('retirada pronta e concluída preserva modalidade, não mostra mapa e usa collectedAt', async t => {
+ const h=createPageHarness({initialToken:'pickup-token'});t.after(h.unmount);let status='pronto';const collectedAt=new Date(h.getSimulatedTime()).toISOString();
+ h.setFetchHandler(async()=>({ok:true,json:async()=>({orders:[{trackingToken:'pickup-token',orderNumber:'901',status,fulfillmentType:'pickup',collectedAt:status==='concluido'?collectedAt:null,deliveryFee:8,total:40,driverName:'Motorista antigo',deliveryPin:'1234',estimatedMinutes:20}]})}));
+ h.render();await h.settle();let text=collectText(h.getView());assert.match(text,/Retirada na loja/);assert.match(text,/Pronto para retirar/);assert.match(text,/901/);assert.doesNotMatch(text,/Motorista antigo|1234/);assert.equal(findNodes(h.getView(),n=>n.type===h.TrackingMapComponent).length,0);
+ status='concluido';await h.triggerNextPoll();text=collectText(h.getView());assert.match(text,/Retirado/);assert.doesNotMatch(text,/Pedido Entregue/);h.advanceTime(11000);h.triggerClockTimer();await h.settle();text=collectText(h.getView());assert.match(text,/Pedido retirado!/);assert.doesNotMatch(text,/Pedido entregue!/);
 });

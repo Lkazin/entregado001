@@ -40,7 +40,7 @@ function harness(options={}) {
   function click(label){const button=find(n=>n.type==='button'&&text(n).includes(label));button.props.onClick?.({});render();}
   async function flush(){await new Promise(resolve=>setImmediate(resolve));render();}
   async function submit(){const result=find(n=>n.type==='form').props.onSubmit({preventDefault(){}});render();await result;await flush();}
-  render();return {props,render,nodes,text:()=>text(tree),find,input,click,flush,submit,calls,success,timeouts};
+  render();return {props,render,nodes,text:()=>text(tree),find,input,click,flush,submit,calls,success,timeouts,storage};
 }
 
 function fillDelivery(h){h.input('Nome completo','Cliente de teste');h.input('WhatsApp com DDD','51999990000');h.input('Rua ou avenida','Rua pública');h.input('Número do imóvel','10');}
@@ -72,4 +72,24 @@ test('unchecking save address uses delivery details only in this order',async()=
 
 test('double submit cannot send two order requests while the first confirmation is pending',async()=>{
   let resolve;const pending=new Promise(r=>resolve=r);const h=harness({fetch:()=>pending});await h.flush();fillDelivery(h);h.click('Escolher pagamento');h.click('Revisar pedido');const first=h.find(n=>n.type==='form').props.onSubmit({preventDefault(){}});h.render();await h.find(n=>n.type==='form').props.onSubmit({preventDefault(){}});assert.equal(h.calls.length,1);resolve({ok:true,json:async()=>({success:true,orderId:'one',orderNumber:2222,trackingToken:'one-confirmed-token',deliveryPin:'1234'})});await first;await h.flush();assert.equal(h.success.length,1);
+});
+
+test('pickup submits without address or neighborhood, has zero freight and never saves a blank address',async()=>{
+  const actions=[];const h=harness({customerRequest:async action=>{actions.push(action);if(action==='me')throw Error('no session');return {success:true};}});await h.flush();
+  h.input('Nome completo','Cliente retirada');h.input('WhatsApp com DDD','51999990000');h.click('Retirar na loja');
+  assert.match(h.text(),/Retirada na loja — sem frete/);assert(!h.nodes(h.render()).some(n=>n.type==='input'&&n.props['aria-label']==='Rua ou avenida'));
+  h.click('Escolher pagamento');h.click('Revisar pedido');await h.submit();
+  assert.equal(h.calls.length,1);const body=JSON.parse(h.calls[0].init.body);assert.equal(body.fulfillmentType,'pickup');assert.equal(body.deliveryFee,0);assert.equal(body.total,body.subtotal);assert.deepEqual(body.address,{});assert.equal(body.saveCustomerAddress,false);assert.equal(actions.filter(a=>a==='addresses').length,0);assert.equal(h.success[0].fulfillmentType,'pickup');
+  const cached=JSON.parse(h.storage.get('novaesweb_orders'))[0];assert.equal(cached.fulfillmentType,'pickup');assert.equal(cached.deliveryFee,0);assert.equal(cached.address,'');assert.equal(cached.addressDetail,undefined);assert.equal(h.success[0].profileSaveWarning,'');
+});
+
+test('switching back to delivery preserves typed address and restores delivery validation and fee',async()=>{
+  const h=harness();await h.flush();fillDelivery(h);h.click('Retirar na loja');h.click('Entrega no endereço');
+  assert.equal(h.find(n=>n.type==='input'&&n.props['aria-label']==='Rua ou avenida').props.value,'Rua pública');assert.match(h.text(),/R\$ 6.00/);
+  h.input('Número do imóvel','');h.click('Escolher pagamento');assert.match(h.text(),/Informe a rua e o número/);assert.equal(h.calls.length,0);
+  h.input('Número do imóvel','10');h.click('Escolher pagamento');h.click('Revisar pedido');await h.submit();const body=JSON.parse(h.calls[0].init.body);assert.equal(body.fulfillmentType,'delivery');assert.equal(body.deliveryFee,6);assert.equal(body.address.street,'Rua pública');
+});
+
+test('pickup ignores regional minimum and labels card payment at the counter',async()=>{
+ const h=harness();await h.flush();h.props.items=[{...defaultItems[0],unitPrice:10,totalPrice:10}];h.render();h.input('Nome completo','Cliente retirada');h.input('WhatsApp com DDD','51999990000');h.click('Retirar na loja');h.click('Escolher pagamento');h.click('Cartão');assert.match(h.text(),/pagamento com cartão será feito no balcão/);assert(!h.text().includes('entregador levará'));h.click('Revisar pedido');assert.match(h.text(),/Cartão no balcão/);await h.submit();assert.equal(h.success.length,1);assert.equal(JSON.parse(h.calls[0].init.body).total,10);
 });

@@ -3,6 +3,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const ts = require('typescript');
+const fulfillmentContext = { exports: {} };
+vm.runInNewContext(ts.transpileModule(fs.readFileSync('src/lib/order-fulfillment.ts', 'utf8'), {compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText, fulfillmentContext);
+
 
 const componentSource = ts.transpileModule(fs.readFileSync('src/components/CustomerDeliveryTracking.tsx', 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
@@ -10,7 +13,7 @@ const componentSource = ts.transpileModule(fs.readFileSync('src/components/Custo
 
 function harness() {
   const slots = [], effects = [], intervals = new Map(), events = new Map(), calls = [];
-  let cursor = 0, nextInterval = 0, view, token = 'tracking-link-A';
+  let cursor = 0, nextInterval = 0, view, token = 'tracking-link-A', fulfillmentType = 'delivery';
   const h = { calls, response: snapshot('locked'), fetchHandler: null };
   const listeners = {
     addEventListener(name, fn) { if (!events.has(name)) events.set(name, new Set()); events.get(name).add(fn); },
@@ -34,6 +37,7 @@ function harness() {
   const context = {
     exports: {}, Date, Number, Math, Promise, AbortController, setTimeout, clearTimeout,
     require(id) {
+      if (id === '@/lib/order-fulfillment') return fulfillmentContext.exports;
       if (id === 'react') return hooks;
       if (id === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: 'fragment' };
       if (id === 'next/dynamic') return { default: () => 'TrackingMap' };
@@ -55,9 +59,10 @@ function harness() {
     },
   };
   vm.runInNewContext(componentSource, context);
-  h.render = (nextToken = token) => {
+  h.render = (nextToken = token, nextFulfillment = fulfillmentType) => {
+    fulfillmentType = nextFulfillment;
     token = nextToken; cursor = 0;
-    view = context.exports.default({ token });
+    view = context.exports.default({ token, fulfillmentType });
     while (effects.length) effects.shift()();
     return view;
   };
@@ -130,4 +135,9 @@ test('polling não sobrepõe solicitações pendentes', async t => {
   finish({ ok: true, json: async () => snapshot('active') });
   await h.settle();
   assert.equal(h.calls.length, 2);
+});
+
+test('retirada não solicita rastreamento nem monta mapa, inclusive ao trocar modalidade', async t => {
+ const h=harness();t.after(h.unmount);h.render('pickup-order','pickup');await h.settle();assert.equal(h.calls.length,0);assert.equal(h.map(),undefined);
+ h.response=snapshot('active');h.render('delivery-order','delivery');await h.settle();assert.ok(h.map());const count=h.calls.length;h.render('pickup-order','pickup');await h.settle();assert.equal(h.map(),undefined);assert.equal(h.calls.length,count);
 });

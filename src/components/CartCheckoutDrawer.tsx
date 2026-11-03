@@ -36,6 +36,8 @@ export default function CartCheckoutDrawer({
   onOrderSuccess
 }: CartCheckoutDrawerProps) {
   const [step, setStep] = useState<'delivery' | 'payment' | 'review'>('delivery');
+  const [fulfillmentType, setFulfillmentType] = useState<'delivery' | 'pickup'>('delivery');
+  const isPickup = fulfillmentType === 'pickup';
 
   // Dados do Cliente e Endereço
   const [customerName, setCustomerName] = useState('');
@@ -157,9 +159,9 @@ export default function CartCheckoutDrawer({
   }, [items]);
 
   const deliveryFee = useMemo(() => {
-    if (isOutsideArea || !selectedRegion) return 0;
+    if (isPickup || isOutsideArea || !selectedRegion) return 0;
     return selectedRegion.fee;
-  }, [selectedRegion, isOutsideArea]);
+  }, [selectedRegion, isOutsideArea, isPickup]);
 
   const total = useMemo(() => {
     return subtotal + deliveryFee;
@@ -183,17 +185,17 @@ export default function CartCheckoutDrawer({
       return;
     }
 
-    if (!street.trim() || !number.trim()) {
+    if (!isPickup && (!street.trim() || !number.trim())) {
       setErrorMsg('Por favor, informe a rua e o número para entrega.');
       return;
     }
 
-    if (isOutsideArea || !selectedRegion) {
+    if (!isPickup && (isOutsideArea || !selectedRegion)) {
       setErrorMsg('Desculpe, seu endereço está fora da nossa área atendida.');
       return;
     }
 
-    if (subtotal < selectedRegion.minOrder) {
+    if (!isPickup && selectedRegion && subtotal < selectedRegion.minOrder) {
       setErrorMsg(`O pedido mínimo para o bairro ${selectedRegion.name} é de R$ ${selectedRegion.minOrder.toFixed(2).replace('.', ',')}.`);
       return;
     }
@@ -213,19 +215,20 @@ export default function CartCheckoutDrawer({
     try {
       const trackingToken = '';
       const orderNumber = draftNumber.current || Math.floor(1000 + Math.random() * 9000); draftNumber.current=orderNumber;
-      const effectiveRegion = selectedRegion.name;
+      const effectiveRegion = isPickup ? '' : selectedRegion!.name;
 
       const orderPayload = {
         orderNumber,
         trackingToken,
+        fulfillmentType,
         customer: { name: customerName, phone: customerPhone },
-        address: {
+        address: isPickup ? {} : {
           street,
           number,
           complement,
           reference,
           region: effectiveRegion,
-          neighborhood: selectedRegion.name,
+          neighborhood: selectedRegion!.name,
           city: cepCity || 'Canoas',
           state: cepState || 'RS',
           cep: cep.replace(/\D/g, ''),
@@ -250,7 +253,7 @@ export default function CartCheckoutDrawer({
         const res = await fetch('/api/orders', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...orderPayload, notes, saveCustomerAddress: saveAddress, addressLabel }),
+          body: JSON.stringify({ ...orderPayload, notes, saveCustomerAddress: !isPickup && saveAddress, addressLabel }),
           credentials: 'same-origin'
           ,signal: controller.signal
         });
@@ -262,6 +265,7 @@ export default function CartCheckoutDrawer({
           orderPayload.trackingToken = data.trackingToken;
           orderPayload.orderNumber = data.orderNumber;
           orderPayload.deliveryPin = data.deliveryPin;
+          if (data.fulfillmentType === 'pickup' || data.fulfillmentType === 'delivery') orderPayload.fulfillmentType = data.fulfillmentType;
         } else {
           throw new Error('Não foi possível confirmar o pedido. Tente novamente.');
         }
@@ -277,12 +281,13 @@ export default function CartCheckoutDrawer({
             id: serverOrderId || `ord-${Date.now()}-${orderPayload.orderNumber}`,
             orderNumber: orderPayload.orderNumber,
             customerName: customerName,
+            fulfillmentType: orderPayload.fulfillmentType,
             phone: customerPhone,
-            address: `${street}, ${number} ${complement ? '- ' + complement : ''}`,
+            address: isPickup ? '' : `${street}, ${number} ${complement ? '- ' + complement : ''}`,
             region: effectiveRegion,
-            city: cepCity || 'Canoas',
-            state: cepState || 'RS',
-            cep: cep.replace(/\D/g, ''),
+            city: isPickup ? '' : cepCity || 'Canoas',
+            state: isPickup ? '' : cepState || 'RS',
+            cep: isPickup ? '' : cep.replace(/\D/g, ''),
             itemsSummary: items.map((i: any) => `${i.quantity}x ${i.name || 'Pizza'}`).join(' • '),
             total,
             status: 'recebido' as const,
@@ -296,13 +301,13 @@ export default function CartCheckoutDrawer({
             subtotal,
             deliveryFee,
             changeFor: orderPayload.payment.changeFor,
-            addressDetail: {
+            addressDetail: isPickup ? undefined : {
               street,
               number,
               complement,
               reference,
               region: effectiveRegion,
-              neighborhood: selectedRegion.name,
+              neighborhood: selectedRegion!.name,
               city: cepCity || 'Canoas',
               state: cepState || 'RS',
               cep: cep.replace(/\D/g, '')
@@ -313,8 +318,8 @@ export default function CartCheckoutDrawer({
       }
 
       let profileSaveWarning='';
-      if(saveAddress && customerProfileSaved){try{await customerRequest('addresses',{method:'POST',body:JSON.stringify({id:selectedAddressId || undefined,label:addressLabel || 'Casa',...orderPayload.address,isDefault:savedAddresses.length===0 || savedAddresses.find(a=>a.id===selectedAddressId)?.isDefault === true})});}catch{profileSaveWarning='Pedido confirmado. O endereço não pôde ser salvo no perfil agora.';}}
-      else if(saveAddress && !customerProfileSaved){profileSaveWarning='Pedido confirmado. O perfil não pôde ser salvo agora.';}
+      if(!isPickup && saveAddress && customerProfileSaved){try{await customerRequest('addresses',{method:'POST',body:JSON.stringify({id:selectedAddressId || undefined,label:addressLabel || 'Casa',...orderPayload.address,isDefault:savedAddresses.length===0 || savedAddresses.find(a=>a.id===selectedAddressId)?.isDefault === true})});}catch{profileSaveWarning='Pedido confirmado. O endereço não pôde ser salvo no perfil agora.';}}
+      else if(!isPickup && saveAddress && !customerProfileSaved){profileSaveWarning='Pedido confirmado. O perfil não pôde ser salvo agora.';}
       window.dispatchEvent(new Event('novaesweb:customer-account-changed'));
       onOrderSuccess({...orderPayload,profileSaveWarning});
       draftNumber.current=null; dirty.current=false; setStep('delivery');
@@ -332,10 +337,10 @@ export default function CartCheckoutDrawer({
     if(step==='delivery'){
       const phone=customerPhone.replace(/\D/g,'').replace(/^55(?=\d{10,11}$)/,'');
       if(!customerName.trim() || !/^\d{10,11}$/.test(phone)){setErrorMsg('Informe seu nome e WhatsApp com DDD.');return;}
-      if(!street.trim() || !number.trim()){setErrorMsg('Informe a rua e o número para entrega.');return;}
-      if(isOutsideArea || !selectedRegion){setErrorMsg('Selecione um bairro atendido pela loja.');return;}
-      if(cepCity && (cepCity.trim().toLowerCase()!=='canoas' || (cepState && cepState.toUpperCase()!=='RS'))){setErrorMsg('Este endereço está fora da área atendida.');return;}
-      if(subtotal<selectedRegion.minOrder){setErrorMsg('O valor mínimo para este bairro é '+formatCustomerMoney(selectedRegion.minOrder)+'.');return;}
+      if(!isPickup && (!street.trim() || !number.trim())){setErrorMsg('Informe a rua e o número para entrega.');return;}
+      if(!isPickup && (isOutsideArea || !selectedRegion)){setErrorMsg('Selecione um bairro atendido pela loja.');return;}
+      if(!isPickup && cepCity && (cepCity.trim().toLowerCase()!=='canoas' || (cepState && cepState.toUpperCase()!=='RS'))){setErrorMsg('Este endereço está fora da área atendida.');return;}
+      if(!isPickup && selectedRegion && subtotal<selectedRegion.minOrder){setErrorMsg('O valor mínimo para este bairro é '+formatCustomerMoney(selectedRegion.minOrder)+'.');return;}
       setStep('payment');
     }else{
       if(paymentMethod==='cash_delivery' && needsChange){const change=Number(changeFor.replace(',','.'));if(!Number.isFinite(change)||change<total){setErrorMsg('Informe um troco a partir de '+formatCustomerMoney(total)+'.');return;}}
@@ -346,14 +351,16 @@ export default function CartCheckoutDrawer({
     <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="checkout-heading" className="mx-auto flex h-full w-full max-w-5xl flex-col overflow-hidden bg-zinc-950 text-white shadow-2xl sm:rounded-3xl sm:border sm:border-zinc-700" onKeyDown={e=>{if(e.key==='Escape'&&!isSubmitting){e.preventDefault();onClose();}if(e.key==='Tab'){const list=Array.from(dialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled),a[href],input:not(:disabled),select:not(:disabled),textarea:not(:disabled)') || []).filter(el=>el.getClientRects().length>0);const first=list[0],last=list[list.length-1];if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}}}>
       <header className="flex items-center justify-between gap-3 border-b border-zinc-800 px-4 py-4 sm:px-7"><div><p className="text-xs font-semibold uppercase tracking-widest text-pizza-gold">Bella Pizza</p><h2 id="checkout-heading" className="mt-1 text-xl font-bold">Seu pedido, do seu jeito</h2></div><button ref={closeRef} type="button" disabled={isSubmitting} onClick={onClose} aria-label="Fechar checkout" className="rounded-xl border border-zinc-800 p-3 text-zinc-400 hover:text-white disabled:opacity-50"><X className="h-5 w-5" /></button></header>
       {!items.length?<div className="flex flex-1 flex-col items-center justify-center gap-4 p-6 text-center"><p className="text-lg font-bold">Seu carrinho está vazio.</p><button type="button" onClick={onClose} className="rounded-xl bg-pizza-gold px-4 py-3 font-bold text-pizza-black">Voltar ao cardápio</button></div>:<>
-      <nav aria-label="Etapas do checkout" className="grid grid-cols-3 gap-2 border-b border-zinc-800 px-4 py-3 sm:px-7">{(['delivery','payment','review'] as const).map((id,index)=><div key={id} aria-current={step===id?'step':undefined} className={'rounded-xl px-2 py-3 text-center text-sm '+(step===id?'bg-pizza-gold font-bold text-pizza-black':'text-zinc-500')}>{index+1}. {['Entrega','Pagamento','Revisão'][index]}</div>)}</nav>
+      <nav aria-label="Etapas do checkout" className="grid grid-cols-3 gap-2 border-b border-zinc-800 px-4 py-3 sm:px-7">{(['delivery','payment','review'] as const).map((id,index)=><div key={id} aria-current={step===id?'step':undefined} className={'rounded-xl px-2 py-3 text-center text-sm '+(step===id?'bg-pizza-gold font-bold text-pizza-black':'text-zinc-500')}>{index+1}. {[isPickup?'Retirada':'Entrega','Pagamento','Revisão'][index]}</div>)}</nav>
       <div className="grid min-h-0 flex-1 overflow-y-auto lg:grid-cols-[minmax(0,1fr)_340px]">
         <form id="checkout-form" onSubmit={handleCheckoutSubmit} onChange={()=>{dirty.current=true;}} className="min-w-0 space-y-5 p-4 sm:p-7">
           {errorMsg&&<p role="alert" className="rounded-xl border border-red-900 bg-red-950/30 p-3 text-sm text-red-300">{errorMsg}</p>}
           {step==='delivery'&&<>
-            <div><h3 className="text-xl font-bold">Onde vamos entregar?</h3><p className="mt-2 text-sm text-zinc-400">Seu perfil é criado após a confirmação do primeiro pedido.</p></div>
+            <div><h3 className="text-xl font-bold">Como deseja receber?</h3><p className="mt-2 text-sm text-zinc-400">Seu perfil é criado após a confirmação do primeiro pedido.</p></div>
             <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-zinc-800 bg-zinc-900 p-3 text-sm"><span>{profile?'Perfil de '+profile.name:'Já tem perfil? Entre com seu WhatsApp.'}</span><Link href="/minha-conta" target="_blank" rel="noopener noreferrer" className="text-pizza-gold underline" aria-label="Abrir minha conta em outra aba">Minha conta</Link></div>
-            {savedAddresses.length>0&&<label className="block text-sm text-zinc-300">Endereço salvo<select className="mt-2 w-full rounded-xl border border-zinc-700 bg-zinc-900 p-3 text-base text-white" value={selectedAddressId} onChange={e=>{const a=savedAddresses.find(x=>x.id===e.target.value);if(a)fillAddress(a);else setSelectedAddressId('');}}><option value="">Usar outro endereço neste pedido</option>{savedAddresses.map(a=><option key={a.id} value={a.id}>{a.label} — {a.street}, {a.number}{a.isDefault?' · Principal':''}</option>)}</select></label>}
+            <fieldset className="grid grid-cols-2 gap-3"><legend className="mb-2 text-sm font-semibold text-zinc-300">Recebimento do pedido</legend>{([{id:'delivery',label:'Entrega no endereço'},{id:'pickup',label:'Retirar na loja'}] as const).map(option=><button key={option.id} type="button" aria-pressed={fulfillmentType===option.id} onClick={()=>{dirty.current=true;setFulfillmentType(option.id);setErrorMsg(null);if(option.id==='pickup'){cepSequence.current++;cepRequest.current?.abort();setIsCepLoading(false);}}} className={"min-h-12 rounded-xl border p-3 text-sm font-bold "+(fulfillmentType===option.id?'border-pizza-gold bg-pizza-gold/10 text-pizza-gold':'border-zinc-700 bg-zinc-900 text-zinc-300')}>{option.label}</button>)}</fieldset>
+            {isPickup&&<div className="rounded-xl border border-pizza-gold/30 bg-pizza-gold/5 p-4 text-sm text-zinc-300"><strong className="text-pizza-gold">Retirada na loja — sem frete</strong><p className="mt-2">Aguarde a confirmação de que está pronto para retirar. Apresente o número do pedido no balcão.</p></div>}
+            {!isPickup && savedAddresses.length>0&&<label className="block text-sm text-zinc-300">Endereço salvo<select className="mt-2 w-full rounded-xl border border-zinc-700 bg-zinc-900 p-3 text-base text-white" value={selectedAddressId} onChange={e=>{const a=savedAddresses.find(x=>x.id===e.target.value);if(a)fillAddress(a);else setSelectedAddressId('');}}><option value="">Usar outro endereço neste pedido</option>{savedAddresses.map(a=><option key={a.id} value={a.id}>{a.label} — {a.street}, {a.number}{a.isDefault?' · Principal':''}</option>)}</select></label>}
                 {/* Dados Pessoais */}
                 <div className="space-y-3">
                   <h3 className="font-bold text-zinc-200 text-sm flex items-center gap-2">
@@ -385,6 +392,7 @@ export default function CartCheckoutDrawer({
                 </div>
 
                 {/* Endereço de Entrega */}
+                {!isPickup && <>
                 <div className="space-y-3 pt-3 border-t border-zinc-800">
                   <h3 className="font-bold text-zinc-200 text-sm flex items-center gap-2">
                     <span className="w-5 h-5 rounded-full bg-pizza-gold text-pizza-black flex items-center justify-center text-xs">2</span>
@@ -507,6 +515,7 @@ export default function CartCheckoutDrawer({
 
 
             <div className="space-y-3 rounded-xl border border-zinc-800 p-4"><label className="flex min-h-11 items-center gap-3 text-sm text-zinc-300"><input type="checkbox" checked={saveAddress} onChange={e=>setSaveAddress(e.target.checked)} />Salvar este endereço no meu perfil</label>{saveAddress?<label className="block text-sm text-zinc-400">Apelido<input className="mt-2 w-full rounded-xl border border-zinc-700 bg-zinc-950 p-3 text-base text-white" value={addressLabel} onChange={e=>setAddressLabel(e.target.value)} maxLength={40} placeholder="Casa ou trabalho" /></label>:<p className="text-xs text-zinc-500">Este endereço será usado somente neste pedido.</p>}</div>
+                </>}
           </>}
           {step==='payment'&&<><h3 className="text-xl font-bold">Como prefere pagar?</h3><p className="text-sm text-zinc-400">Nenhum pagamento será realizado automaticamente.</p>
                 {/* Forma de Pagamento */}
@@ -583,7 +592,7 @@ export default function CartCheckoutDrawer({
 
                   {paymentMethod === 'card_terminal' && (
                     <div className="p-3 bg-zinc-900 rounded-xl border border-zinc-800 text-[11px] text-zinc-300">
-                      O entregador levará a maquininha (Débito, Crédito ou Refeição) até a sua porta.
+                      {isPickup ? 'O pagamento com cartão será feito no balcão da loja.' : 'O entregador levará a maquininha (Débito, Crédito ou Refeição) até a sua porta.'}
                     </div>
                   )}
 
@@ -602,8 +611,8 @@ export default function CartCheckoutDrawer({
           </>}
           {step==='review'&&<>
             <h3 className="text-xl font-bold">Revise antes de confirmar</h3>
-            <section className="rounded-2xl border border-zinc-800 p-4"><div className="flex items-center justify-between gap-3"><h4 className="font-semibold">Entrega</h4><button type="button" onClick={()=>setStep('delivery')} className="min-h-11 text-sm text-pizza-gold underline">Editar</button></div><p className="text-sm text-zinc-200">{customerName} · {customerPhone}</p><p className="mt-2 break-words text-sm text-zinc-300">{street}, {number}{complement?' · '+complement:''}</p><p className="mt-1 text-sm text-zinc-500">{selectedRegion?.name} · {cepCity || 'Canoas'}/{cepState || 'RS'}</p>{reference&&<p className="mt-2 text-xs text-zinc-400">Referência: {reference}</p>}</section>
-            <section className="rounded-2xl border border-zinc-800 p-4"><div className="flex items-center justify-between gap-3"><h4 className="font-semibold">Pagamento</h4><button type="button" onClick={()=>setStep('payment')} className="min-h-11 text-sm text-pizza-gold underline">Editar</button></div><p className="text-sm text-zinc-300">{paymentMethod==='pix_manual'?'Pix com conferência da loja':paymentMethod==='card_terminal'?'Cartão na entrega':'Dinheiro na entrega'}</p>{paymentMethod==='cash_delivery'&&needsChange&&<p className="mt-2 text-sm text-zinc-400">Troco para {changeFor}</p>}{notes&&<p className="mt-3 break-words text-sm text-zinc-400">Observações: {notes}</p>}</section>
+            <section className="rounded-2xl border border-zinc-800 p-4"><div className="flex items-center justify-between gap-3"><h4 className="font-semibold">{isPickup?'Retirada na loja — sem frete':'Entrega'}</h4><button type="button" onClick={()=>setStep('delivery')} className="min-h-11 text-sm text-pizza-gold underline">Editar</button></div><p className="text-sm text-zinc-200">{customerName} · {customerPhone}</p>{isPickup?<p className="mt-2 text-sm text-zinc-300">Aguarde a confirmação de que está pronto para retirar e apresente o número do pedido no balcão.</p>:<><p className="mt-2 break-words text-sm text-zinc-300">{street}, {number}{complement?' · '+complement:''}</p><p className="mt-1 text-sm text-zinc-500">{selectedRegion?.name} · {cepCity || 'Canoas'}/{cepState || 'RS'}</p>{reference&&<p className="mt-2 text-xs text-zinc-400">Referência: {reference}</p>}</>}</section>
+            <section className="rounded-2xl border border-zinc-800 p-4"><div className="flex items-center justify-between gap-3"><h4 className="font-semibold">Pagamento</h4><button type="button" onClick={()=>setStep('payment')} className="min-h-11 text-sm text-pizza-gold underline">Editar</button></div><p className="text-sm text-zinc-300">{paymentMethod==='pix_manual'?'Pix com conferência da loja':paymentMethod==='card_terminal'?(isPickup?'Cartão no balcão':'Cartão na entrega'):(isPickup?'Dinheiro no balcão':'Dinheiro na entrega')}</p>{paymentMethod==='cash_delivery'&&needsChange&&<p className="mt-2 text-sm text-zinc-400">Troco para {changeFor}</p>}{notes&&<p className="mt-3 break-words text-sm text-zinc-400">Observações: {notes}</p>}</section>
             <p className="text-sm text-zinc-400">O pedido será enviado somente ao tocar em confirmar.</p>
           </>}
         </form>
@@ -669,7 +678,7 @@ export default function CartCheckoutDrawer({
                   ))}
                 </div>
               )}
-          <dl className="space-y-2 border-t border-zinc-800 pt-4 text-sm"><div className="flex justify-between gap-2 text-zinc-400"><dt>Produtos</dt><dd>{formatCustomerMoney(subtotal)}</dd></div><div className="flex justify-between gap-2 text-zinc-400"><dt>Entrega</dt><dd>{selectedRegion?formatCustomerMoney(deliveryFee):'Selecione o bairro'}</dd></div><div className="flex justify-between gap-2 pt-2 text-lg font-bold"><dt>Total</dt><dd className="text-pizza-gold">{formatCustomerMoney(total)}</dd></div></dl>
+          <dl className="space-y-2 border-t border-zinc-800 pt-4 text-sm"><div className="flex justify-between gap-2 text-zinc-400"><dt>Produtos</dt><dd>{formatCustomerMoney(subtotal)}</dd></div><div className="flex justify-between gap-2 text-zinc-400"><dt>{isPickup?'Retirada na loja':'Entrega'}</dt><dd>{isPickup?'Sem frete':selectedRegion?formatCustomerMoney(deliveryFee):'Selecione o bairro'}</dd></div><div className="flex justify-between gap-2 pt-2 text-lg font-bold"><dt>Total</dt><dd className="text-pizza-gold">{formatCustomerMoney(total)}</dd></div></dl>
         </aside>
       </div>
       <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-800 bg-zinc-950 px-4 py-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:px-7"><div><p className="text-xs text-zinc-500">Total do pedido</p><p className="text-lg font-bold">{formatCustomerMoney(total)}</p></div><div className="flex gap-2">{step!=='delivery'&&<button type="button" disabled={isSubmitting} onClick={()=>{setErrorMsg(null);setStep(step==='review'?'payment':'delivery');}} className="min-h-12 rounded-xl border border-zinc-700 px-3 text-sm text-zinc-300 disabled:opacity-50">Voltar</button>}{step==='review'?<button type="submit" form="checkout-form" disabled={isSubmitting} className="min-h-12 rounded-xl bg-pizza-gold px-4 text-sm font-bold text-pizza-black disabled:opacity-50">{isSubmitting?'Confirmando…':'Confirmar pedido'}</button>:<button type="button" onClick={advanceStep} className="flex min-h-12 items-center gap-2 rounded-xl bg-pizza-gold px-4 text-sm font-bold text-pizza-black">{step==='delivery'?'Escolher pagamento':'Revisar pedido'}<ArrowRight className="h-4 w-4" /></button>}</div></footer>

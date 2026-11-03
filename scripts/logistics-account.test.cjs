@@ -38,6 +38,7 @@ function fixture(options = {}) {
         if(table==='driver_logistics_state') {backing.reads++; if(backing.failRead)return {data:null,error:{message:'isolated read outage'}};return {data:{state:clone(backing.state),revision:backing.revision},error:null};}
         const rows=table==='driver_accounts'?backing.accounts:table==='driver_account_memberships'?backing.memberships:[];
         if(action==='insert') {
+          (backing.inserts ||= []).push({table,values:clone(values)});
           if(rows.some(r=>r.membership_id===values.membership_id))return {data:null,error:{code:'23505'}};
           rows.push(clone(values));return {data:single?clone(values):[clone(values)],error:null};
         }
@@ -61,14 +62,17 @@ function fixture(options = {}) {
     storage:{from:()=>({download:async()=>({data:{text:async()=>JSON.stringify([])},error:null}),upload:async()=>{backing.storageWrites++;return {error:null};}})},
   };
   const modules=new Map();
-  const response={json:(body,init={})=>({body:clone(body),status:init.status || 200,headers:init.headers})};
+  const response={json:(body,init={})=>({body:clone(body),status:init.status || 200,ok:(init.status || 200)<400,headers:init.headers,json:async()=>clone(body)})};
+  class IsolatedNextRequest {
+    constructor(url,options={}){this.url=String(url);this.nextUrl=new URL(this.url);this.headers=new Headers(options.headers);this.cookies={get:()=>null};this.json=async()=>JSON.parse(options.body || '{}');}
+  }
   const env={ADMIN_SESSION_SECRET:'isolated-logistics-test-secret-with-at-least-32-characters',ADMIN_ACCESS_PIN:'isolated-admin-pin'};
   const contexts=new Map();
   function load(file) {
     const filename=path.join(root,file);if(modules.has(filename))return modules.get(filename);
     const module={exports:{}};modules.set(filename,module.exports);
-    const context={exports:module.exports,module,console,Buffer,Date,JSON,Math,URL,process:{env},require:name=>{
-      if(name==='next/server')return {NextResponse:response};
+    const context={exports:module.exports,module,console,Buffer,Date,JSON,Math,URL,Headers,process:{env},require:name=>{
+      if(name==='next/server')return {NextResponse:response,NextRequest:IsolatedNextRequest,after:()=>{}};
       if(name==='@/lib/supabase/server')return {supabaseAdmin:db};
       if(name.startsWith('@/'))return load('src/'+name.slice(2)+'.ts');
       if(name.startsWith('.'))return load(path.relative(root,path.resolve(path.dirname(filename),name+'.ts')));
@@ -85,7 +89,7 @@ function fixture(options = {}) {
     const defaults=actor==='admin'?{'x-admin-token':adminToken}:actor==='b'?{'x-account-session':TOKEN_B}:actor==='a'?{'x-account-session':TOKEN_A}:{};
     const all={...defaults,...headers};return {headers:{get:name=>all[name.toLowerCase()] || null},cookies:{get:()=>null},nextUrl:new URL('https://isolated.test/api/v1/logistics/'+action),json:async()=>clone(body)};
   }
-  return {backing,api,tokens,context:contexts.get(path.join(root,'src/app/api/v1/logistics/[action]/route.ts')),
+  return {backing,api,tokens,load,Request:IsolatedNextRequest,context:contexts.get(path.join(root,'src/app/api/v1/logistics/[action]/route.ts')),
     stored:()=>clone(backing.state),downloads:()=>backing.reads,
     post:(action,body={},actor=options.defaultActor || 'a',headers={})=>api.POST(request(action,body,actor,headers),{params:Promise.resolve({action})}),
     get:(action,actor='a',headers={})=>api.GET(request(action,{},actor,headers),{params:Promise.resolve({action})}),

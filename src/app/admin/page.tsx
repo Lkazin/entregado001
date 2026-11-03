@@ -20,6 +20,9 @@ import AdminNavigationDrawer from '@/components/AdminNavigationDrawer';
 import AdminModalLayer from '@/components/AdminModalLayer';
 import CustomerRatingsAdminPanel from '@/components/CustomerRatingsAdminPanel';
 import CustomerTrackingSettings from '@/components/CustomerTrackingSettings';
+import StorePickupOrders from '@/components/StorePickupOrders';
+import { isPickupOrder } from '@/lib/order-fulfillment';
+import PremiumKitPanel from '@/components/PremiumKitPanel';
 import OrderStageTiming from '@/components/OrderStageTiming';
 import OrderDelayAlerts, { OrderDelayBadge, useOrderAlarmSettings } from '@/components/OrderDelayAlerts';
 import { orderDelay } from '@/lib/order-delay-alerts';
@@ -59,6 +62,7 @@ interface DriverOrderItem {
 interface StoreDispatchSettings {
   storeId: string;
   distributionMode: 'fixed_driver' | 'broadcast_enabled';
+  automaticDispatchEnabled?: boolean;
   fixedDriverId: string | null;
   maxConcurrentDeliveries: number;
   offerTimeoutSeconds: number;
@@ -71,6 +75,8 @@ interface StoreDispatchSettings {
 }
 
 interface AdminOrder {
+  fulfillmentType?: 'delivery' | 'pickup';
+  collectedAt?: string;
   id: string;
   orderNumber: number;
   customerName: string;
@@ -154,7 +160,17 @@ const STATUS_HIERARCHY: Record<string, number> = {
 
 export default function AdminDashboardPage() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
-  const [activeTab, setActiveTabState] = useState<'overview' | 'kanban' | 'menu' | 'logistics' | 'settings' | 'canceled' | 'first_access' | 'customers' | 'ratings'>('kanban');
+  const [activeTab, setActiveTabState] = useState<'overview' | 'kanban' | 'menu' | 'logistics' | 'settings' | 'canceled' | 'first_access' | 'customers' | 'ratings' | 'premium_kit' | 'store_pickup'>('kanban');
+  const [kitLab, setKitLab] = useState<{ storeId: string } | null>(null);
+  useEffect(() => {
+    if (!isAuthenticated) { setKitLab(null); return; }
+    const controller = new AbortController();
+    void fetch('/api/admin/kit-lab', { headers: getAdminHeaders(), cache: 'no-store', signal: controller.signal })
+      .then(async response => response.ok ? response.json() : null)
+      .then(data => { if (!controller.signal.aborted) setKitLab(data?.enabled === true && data.mode === 'planning' && typeof data.storeId === 'string' ? { storeId: data.storeId } : null); })
+      .catch(() => { if (!controller.signal.aborted) setKitLab(null); });
+    return () => controller.abort();
+  }, [isAuthenticated]);
   const [navigationOpen, setNavigationOpen] = useState(false);
   const navigationButtonRef = React.useRef<HTMLButtonElement>(null);
   const tvRequestedRef = React.useRef(false);
@@ -168,7 +184,7 @@ export default function AdminDashboardPage() {
   useEffect(() => {
     const restore = () => {
       const tab = new URL(window.location.href).searchParams.get('section');
-      const valid = ['overview', 'kanban', 'menu', 'logistics', 'settings', 'canceled', 'first_access', 'customers', 'ratings'];
+      const valid = ['overview', 'kanban', 'menu', 'logistics', 'settings', 'canceled', 'first_access', 'customers', 'ratings', 'premium_kit', 'store_pickup'];
       setActiveTabState(valid.includes(tab || '') ? tab as typeof activeTab : 'kanban');
       tvRequestedRef.current = false;
       setIsHeaderCollapsed(false); setNavigationOpen(false);
@@ -218,6 +234,7 @@ export default function AdminDashboardPage() {
   const [storeSettings, setStoreSettings] = useState<StoreDispatchSettings>({
     storeId: 'store_bella_pizza',
     distributionMode: 'broadcast_enabled',
+    automaticDispatchEnabled: false,
     fixedDriverId: null,
     maxConcurrentDeliveries: 5,
     offerTimeoutSeconds: 900,
@@ -227,11 +244,12 @@ export default function AdminDashboardPage() {
     storeState: 'RS',
   });
   const [orderAlarmSettings] = useOrderAlarmSettings(storeSettings.storeId);
-  const delayedOrderCount = orders.filter(order => orderDelay(order, stageNow, orderAlarmSettings) !== null).length;
+  const delayedOrderCount = orders.filter(order => !isPickupOrder(order) && orderDelay(order, stageNow, orderAlarmSettings) !== null).length;
   // Enquanto o lojista edita configurações, o polling não pode sobrescrever a escolha (causa do "entregador fixo trocar sozinho")
   const settingsDirtyRef = React.useRef(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [settingsSavedMsg, setSettingsSavedMsg] = useState<string | null>(null);
+  const [settingsSaveError, setSettingsSaveError] = useState<string | null>(null);
   const [completedPeriodFilter, setCompletedPeriodFilter] = useState<'today' | '7d' | '30d' | 'all'>('all');
   const [focusedRouteDriverId, setFocusedRouteDriverId] = useState<string | null>(null);
   const [newDriverName, setNewDriverName] = useState('');
@@ -529,46 +547,25 @@ export default function AdminDashboardPage() {
     return () => clearInterval(interval);
   }, [isAuthenticated]);
 
-  // Transições do Kanban Conectadas à API
+  // Aguarda confirmação real; a automação é executada pelo servidor, uma vez.
+  const advancingOrderIds = React.useRef(new Set<string>());
   const handleAdvanceStatus = async (orderId: string, currentStatus: AdminOrder['status']) => {
     const sequence: AdminOrder['status'][] = ['recebido', 'preparando', 'pronto', 'em_entrega', 'concluido'];
-    const currentIdx = sequence.indexOf(currentStatus);
-    if (currentIdx < sequence.length - 1) {
-      const nextStatus = sequence[currentIdx + 1];
-      
-      // Atualização imediata otimista no estado e no cache local
-      applyLocalOrders(prev => {
-        const updated = prev.map(o => o.id === orderId ? { ...o, status: nextStatus } : o);
-        if (typeof window !== 'undefined') {
-          localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
-        }
-        return updated;
-      });
-
-      try {
-        const patchRes = await fetch('/api/orders', {
-          method: 'PATCH',
-          headers: getAdminHeaders(),
-          body: JSON.stringify({ orderId, status: nextStatus })
-        });
-        if (patchRes.ok) {
-          // Atualiza cache local com sucesso garantido
-          if (typeof window !== 'undefined') {
-            const currentCached = localStorage.getItem('novaesweb_orders');
-            if (currentCached) {
-              try {
-                const list = JSON.parse(currentCached);
-                const updated = list.map((o: any) => o.id === orderId ? { ...o, status: nextStatus } : o);
-                localStorage.setItem('novaesweb_orders', JSON.stringify(updated));
-              } catch {}
-            }
-          }
-        }
-      } catch (err) {
-        console.error('Erro ao comunicar com o servidor:', err);
-      }
-
-      setTimeout(() => fetchData(true), 400);
+    const index = sequence.indexOf(currentStatus);
+    if (index < 0 || index >= sequence.length - 1 || advancingOrderIds.current.has(orderId)) return;
+    const nextStatus = sequence[index + 1];
+    advancingOrderIds.current.add(orderId);
+    try {
+      const response = await fetch('/api/orders', {method:'PATCH',headers:getAdminHeaders(),body:JSON.stringify({orderId,status:nextStatus})});
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.success !== true) throw new Error(data.error || 'Não foi possível confirmar a alteração do pedido.');
+      applyLocalOrders(previous => previous.map(order => order.id === orderId && order.status === currentStatus ? {...order,status:nextStatus} : order));
+      if (data.automaticDispatch && data.automaticDispatch.status !== 'disabled') setDispatchAlert(data.automaticDispatch.message);
+    } catch (error) {
+      setDispatchAlert(error instanceof Error ? error.message : 'Não foi possível atualizar. Confira a conexão e consulte o pedido antes de tentar novamente.');
+    } finally {
+      advancingOrderIds.current.delete(orderId);
+      void fetchData(true);
     }
   };
 
@@ -726,7 +723,7 @@ export default function AdminDashboardPage() {
   };
 
   const readyOrders = orders.filter(o => 
-    o.status === 'pronto' && 
+    !isPickupOrder(o) && o.status === 'pronto' &&
     o.dispatchStatus !== 'aguardando_aceite' && 
     o.dispatchStatus !== 'aceito_aguardando_retirada'
   );
@@ -966,8 +963,10 @@ export default function AdminDashboardPage() {
 
   // Salvar Configurações de Distribuição e Despacho da Loja
   const handleSaveLogisticsSettings = async (customSettings?: Partial<StoreDispatchSettings>) => {
+    if (isSavingSettings) return;
     setIsSavingSettings(true);
     setSettingsSavedMsg(null);
+    setSettingsSaveError(null);
     const nextSettings = {
       ...storeSettings,
       ...(customSettings || {}),
@@ -988,9 +987,11 @@ export default function AdminDashboardPage() {
         setSettingsSavedMsg('Configurações salvas com sucesso!');
         setTimeout(() => setSettingsSavedMsg(null), 3500);
         fetchData(true);
-      }
+      } else throw new Error(data.error || 'Não foi possível salvar as configurações.');
     } catch (e) {
-      console.error('Erro ao salvar configurações:', e);
+      settingsDirtyRef.current = false;
+      setSettingsSaveError(e instanceof Error ? e.message : 'Não foi possível salvar.');
+      void fetchData(true);
     } finally {
       setIsSavingSettings(false);
     }
@@ -998,6 +999,7 @@ export default function AdminDashboardPage() {
 
   // Altera configuração e já salva no servidor (evita que o polling reverta a escolha)
   const updateAndSaveSettings = (patch: Partial<StoreDispatchSettings>) => {
+    if (isSavingSettings) return;
     settingsDirtyRef.current = true;
     setStoreSettings((prev) => ({ ...prev, ...patch }));
     handleSaveLogisticsSettings(patch);
@@ -1410,26 +1412,32 @@ export default function AdminDashboardPage() {
             <XCircle className="w-4 h-4 text-red-400" />
             <span>Pedidos Cancelados ({orders.filter(o => o.status === 'cancelado').length})</span>
           </button>
+          <button type="button" aria-current={activeTab === 'store_pickup' ? 'page' : undefined} onClick={() => setActiveTab('store_pickup')} className="rounded-xl px-4 py-2 text-cyan-200 hover:bg-zinc-800">Retirada na loja ({orders.filter(o => isPickupOrder(o) && !['concluido','cancelado'].includes(o.status)).length})</button>
+          {kitLab && <button type="button" aria-current={activeTab === 'premium_kit' ? 'page' : undefined} onClick={() => setActiveTab('premium_kit')} className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${activeTab === 'premium_kit' ? 'bg-fuchsia-700 text-white' : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60'}`}>
+            <Package className="h-4 w-4" /><span>Kit Premium · Implantação</span>
+          </button>}
         </nav>
         </AdminNavigationDrawer>
         <div className="mt-3 border-t border-zinc-800 pt-3 text-sm font-bold text-zinc-200">
-          {{ kanban: 'Pedidos', logistics: 'Logística e entregadores', overview: 'Visão geral e relatórios', menu: 'Cardápio e preços', settings: 'Configurações', customers: 'Clientes e endereços', ratings: 'Avaliações dos clientes', canceled: 'Pedidos cancelados', first_access: 'Cadastrar entregador' }[activeTab]}
+          {{ store_pickup: 'Pedidos para retirar na loja', kanban: 'Pedidos', logistics: 'Logística e entregadores', overview: 'Visão geral e relatórios', menu: 'Cardápio e preços', settings: 'Configurações', customers: 'Clientes e endereços', ratings: 'Avaliações dos clientes', canceled: 'Pedidos cancelados', first_access: 'Cadastrar entregador', premium_kit: 'Kit NovaesWeb Entregador · Implantação' }[activeTab]}
         </div>
       </header>
 
       {/* Alerta de Despacho */}
       {dispatchAlert && (
-        <div className="bg-emerald-950/80 border-b border-emerald-800 p-3 text-center text-xs font-bold text-emerald-300 flex items-center justify-center gap-2 animate-pulse">
-          <CheckCircle2 className="w-4 h-4" />
+        <div role="status" className="bg-zinc-950/90 border-b border-zinc-700 p-3 text-center text-xs font-bold text-zinc-200 flex items-center justify-center gap-2">
+          <Bell className="w-4 h-4" />
           <span>{dispatchAlert}</span>
         </div>
       )}
 
       {/* Conteúdo Dinâmico por Aba */}
       <main className={`flex-1 p-3 sm:p-5 lg:p-6 w-full max-w-none mx-auto ${isHeaderCollapsed ? 'pt-16 sm:pt-16' : ''}`}>
-        <div className="mb-4"><OrderDelayAlerts orders={orders} now={stageNow} storeId={storeSettings.storeId} onOpenOrder={setDetailOrderId} muted={isMuted}/></div>
+        <div className="mb-4"><OrderDelayAlerts orders={orders.filter(order => !isPickupOrder(order))} now={stageNow} storeId={storeSettings.storeId} onOpenOrder={setDetailOrderId} muted={isMuted}/></div>
         
         {/* ABA 1: KANBAN DE PEDIDOS */}
+        {activeTab === 'store_pickup' && <StorePickupOrders orders={orders.filter(isPickupOrder)} now={stageNow} onDetails={setDetailOrderId} onCancel={id => {const order = orders.find(o => o.id === id); if (order) handleOpenCancelModal(order);}} onStatus={async (orderId, status) => { const response = await fetch('/api/orders', {method:'PATCH', headers:getAdminHeaders(), body:JSON.stringify({orderId,status})}); const data = await response.json().catch(() => ({})); if (!response.ok || data.success !== true) throw new Error(data.error || 'Não foi possível confirmar a retirada.'); await fetchData(true); }} />}
+        {activeTab === 'premium_kit' && (kitLab ? <PremiumKitPanel storeId={kitLab.storeId} /> : <section className="rounded-2xl border border-zinc-800 bg-zinc-900 p-6 text-zinc-300"><h2 className="font-bold text-white">Área de implantação NovaesWeb</h2><p className="mt-2 text-sm">Disponível somente no laboratório autorizado. Esta área não ativa o Kit nem modifica lojas.</p></section>)}
         {activeTab === 'customers' && <CustomerAdminPanel getHeaders={getAdminHeaders} />}
         {activeTab === 'ratings' && <CustomerRatingsAdminPanel getHeaders={getAdminHeaders} />}
         {activeTab === 'kanban' && (
@@ -1538,7 +1546,7 @@ export default function AdminDashboardPage() {
                 const q = ordersSearch.toLowerCase();
                 const colOrders = orders.filter(
                   (o) =>
-                    (o.status === 'pronto' && o.dispatchStatus === 'aceito_aguardando_retirada' ? 'retirada' : o.status) === col.key &&
+                    !isPickupOrder(o) && (o.status === 'pronto' && o.dispatchStatus === 'aceito_aguardando_retirada' ? 'retirada' : o.status) === col.key &&
                     [
                       String(o.orderNumber),
                       o.customerName,
@@ -2537,7 +2545,8 @@ export default function AdminDashboardPage() {
                 >
                   Usar Centro de Canoas
                 </button>
-                {settingsSavedMsg && <span className="text-emerald-400 font-bold">{settingsSavedMsg}</span>}
+                {settingsSavedMsg && <span className="text-emerald-400 font-bold" role="status">{settingsSavedMsg}</span>}
+                {settingsSaveError && <span className="text-amber-300 font-bold" role="alert">{settingsSaveError}</span>}
               </div>
             </div>
 
@@ -2553,6 +2562,16 @@ export default function AdminDashboardPage() {
                     Define quem recebe a oferta quando você clicar em <strong>"Despachar"</strong> em pedidos prontos. Pedidos recém-recebidos ou em preparo nunca são despachados automaticamente.
                   </p>
                 </div>
+              </div>
+
+              <div className="rounded-2xl border border-fuchsia-800/70 bg-fuchsia-950/20 p-4 space-y-2">
+                <label className="flex items-center justify-between gap-4 font-bold text-white">
+                  <span>Despacho automático para o motoboy fixo</span>
+                  <input type="checkbox" checked={storeSettings.automaticDispatchEnabled === true} disabled={isSavingSettings || storeSettings.distributionMode !== 'fixed_driver' || !storeSettings.fixedDriverId} onChange={event => updateAndSaveSettings({ automaticDispatchEnabled: event.target.checked })} className="h-5 w-5 accent-fuchsia-500" />
+                </label>
+                <p className="text-xs leading-relaxed text-zinc-300">Ao marcar um pedido de entrega como pronto, envia uma oferta somente ao motoboy fixo. Ele ainda precisa aceitar e confirmar a retirada. O despacho manual continua disponível.</p>
+                <p className="text-xs text-zinc-400">Desligado por padrão. Selecione o modo Entregador Fixo e configure o responsável para ativar. Sem entregador disponível ou valor registrado, o pedido permanece pronto para despacho manual. Ofertas expiradas não são reenviadas automaticamente.</p>
+                <span className="inline-flex rounded-full bg-zinc-900 px-3 py-1 text-xs font-semibold text-fuchsia-200">{storeSettings.automaticDispatchEnabled === true ? 'Automático ativado' : 'Despacho manual'}</span>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -2584,7 +2603,7 @@ export default function AdminDashboardPage() {
                       </label>
                       <select
                         value={storeSettings.fixedDriverId || ''}
-                        onChange={(e) => updateAndSaveSettings({ distributionMode: 'fixed_driver', fixedDriverId: e.target.value || null })}
+                        onChange={(e) => updateAndSaveSettings({ distributionMode: 'fixed_driver', fixedDriverId: e.target.value || null, ...(!e.target.value ? { automaticDispatchEnabled: false } : {}) })}
                         className="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-2.5 text-white font-semibold"
                       >
                         <option value="">-- Selecione um entregador vinculado --</option>
@@ -2602,7 +2621,7 @@ export default function AdminDashboardPage() {
 
                 {/* Modo B: Oferta para os entregadores habilitados */}
                 <div
-                  onClick={() => updateAndSaveSettings({ distributionMode: 'broadcast_enabled' })}
+                  onClick={() => updateAndSaveSettings({ distributionMode: 'broadcast_enabled', automaticDispatchEnabled: false })}
                   className={`p-4 rounded-2xl border cursor-pointer transition space-y-2 ${
                     storeSettings.distributionMode === 'broadcast_enabled'
                       ? 'bg-red-950/30 border-red-500 shadow-lg shadow-red-600/10'
@@ -3478,7 +3497,7 @@ export default function AdminDashboardPage() {
         const topOrder = pendingNewOrders[0];
         const topPhoneDigits = String(topOrder.phone || '').replace(/\D/g, '');
         const topAd = topOrder.addressDetail;
-        const topFullAddress = topAd && (topAd.street || topAd.number)
+        const topFullAddress = isPickupOrder(topOrder) ? 'RETIRADA NA LOJA · sem frete' : topAd && (topAd.street || topAd.number)
           ? `${topAd.street || ''}, ${topAd.number || ''}${topAd.complement ? ' - ' + topAd.complement : ''}`
           : topOrder.address;
         const topItemLines = Array.isArray(topOrder.items) && topOrder.items.length > 0
@@ -3494,6 +3513,7 @@ export default function AdminDashboardPage() {
           setPendingNewOrders(prev => prev.filter(o => o.id !== topOrder.id));
           // Avanca status para 'preparando'
           await handleAdvanceStatus(topOrder.id, 'recebido');
+          if (isPickupOrder(topOrder)) setActiveTab('store_pickup');
         };
 
         const handleRejectTopOrder = async () => {
@@ -3656,6 +3676,7 @@ export default function AdminDashboardPage() {
       {(() => {
         const detail = detailOrderId ? orders.find(o => o.id === detailOrderId) : null;
         if (!detail) return null;
+        const pickup = isPickupOrder(detail);
 
         const money = (n?: number | null) => `R$ ${Number(n || 0).toFixed(2).replace('.', ',')}`;
         const phoneDigits = String(detail.phone || '').replace(/\D/g, '');
@@ -3668,11 +3689,11 @@ export default function AdminDashboardPage() {
           : null;
         const paymentLabel =
           detail.paymentMethod === 'pix_manual' ? 'Pix' :
-          detail.paymentMethod === 'cash_delivery' ? 'Dinheiro na entrega' :
+          detail.paymentMethod === 'cash_delivery' ? (pickup ? 'Dinheiro no balcão' : 'Dinheiro na entrega') :
           detail.paymentMethod === 'card_terminal' ? 'Maquininha' : detail.paymentMethod;
         const statusLabels: Record<string, string> = {
-          recebido: 'Recebido', preparando: 'Preparando', pronto: 'Pronto / Despacho',
-          em_entrega: 'Em entrega', concluido: 'Concluído', cancelado: 'Cancelado'
+          recebido: 'Recebido', preparando: 'Preparando', pronto: pickup ? 'Pronto para retirar' : 'Pronto / Despacho',
+          em_entrega: 'Em entrega', concluido: pickup ? 'Retirado' : 'Concluído', cancelado: 'Cancelado'
         };
         const dispatchLabels: Record<string, string> = {
           disponivel: 'Disponível', aguardando_aceite: 'Aguardando aceite do motoboy',
@@ -3686,7 +3707,7 @@ export default function AdminDashboardPage() {
             `Pedido #${detail.orderNumber}`,
             `Cliente: ${detail.customerName}`,
             `Telefone: ${detail.phone}`,
-            `Endereço: ${fullAddress}${ad?.reference ? ` (Ref.: ${ad.reference})` : ''} - ${detail.region}`,
+            pickup ? 'Modalidade: Retirada na loja' : `Endereço: ${fullAddress}${ad?.reference ? ` (Ref.: ${ad.reference})` : ''} - ${detail.region}`,
             `Itens: ${itemLines ? itemLines.map(i => `${i.quantity}x ${i.name}${i.size ? ' ' + i.size : ''}${i.flavors && i.flavors.length ? ' (' + i.flavors.join(' + ') + ')' : ''}`).join(' | ') : detail.itemsSummary}`,
             detail.notes ? `Obs.: ${detail.notes}` : null,
             `Pagamento: ${paymentLabel}${detail.changeFor ? ` (troco para ${money(detail.changeFor)})` : ''}`,
@@ -3746,7 +3767,7 @@ export default function AdminDashboardPage() {
                         >
                           WhatsApp
                         </a>
-                        {detail.trackingToken && (
+                        {!pickup && detail.trackingToken && (
                           <a
                             href={`https://wa.me/55${phoneDigits}?text=${encodeURIComponent(
                               `🍕 *Bella Pizza:* Olá ${detail.customerName || 'Cliente'}! Acompanhe a entrega do seu pedido #${detail.orderNumber} em tempo real pelo mapa:\n${typeof window !== 'undefined' ? window.location.origin : ''}/pedido/${detail.trackingToken}`
@@ -3766,7 +3787,7 @@ export default function AdminDashboardPage() {
                 </section>
 
                 {/* Endereço */}
-                <section className="space-y-1">
+                {pickup ? <section className="rounded-xl bg-cyan-950/30 p-3 text-cyan-200">Retirada na loja · sem frete. {detail.collectedAt ? `Retirado em ${fmtDate(detail.collectedAt)}` : 'Confira o número do pedido no balcão.'}</section> : <section className="space-y-1">
                   <h4 className="text-[10px] font-black uppercase tracking-wider text-zinc-500 flex items-center gap-1">
                     <MapPin className="w-3 h-3" /> Endereço de entrega
                   </h4>
@@ -3775,6 +3796,7 @@ export default function AdminDashboardPage() {
                   {ad?.reference && <p className="text-zinc-400 text-xs">Referência: {ad.reference}</p>}
                 </section>
 
+                }
                 {/* Itens */}
                 <section className="space-y-2">
                   <h4 className="text-[10px] font-black uppercase tracking-wider text-zinc-500 flex items-center gap-1">
@@ -3848,7 +3870,7 @@ export default function AdminDashboardPage() {
                 </section>
 
                 {/* Entrega / Despacho */}
-                <section className="space-y-1.5">
+                {!pickup && <section className="space-y-1.5">
                   <h4 className="text-[10px] font-black uppercase tracking-wider text-zinc-500 flex items-center gap-1">
                     <Bike className="w-3 h-3" /> Entrega
                   </h4>
@@ -3880,7 +3902,7 @@ export default function AdminDashboardPage() {
                         </p>
                       </div>
                     )}
-                </section>
+                </section>}
               </div>
 
               <div className="p-4 border-t border-zinc-800 flex gap-2 justify-end sticky bottom-0 bg-zinc-900">
