@@ -1,6 +1,7 @@
 import webpush from 'web-push';
 import { supabaseAdmin } from '@/lib/supabase/server';
 import { readLogisticsState, writeLogisticsState } from '@/lib/logistics/state-store';
+import { sendFcmNotification } from './firebase-admin-server';
 
 export interface PushSubscriptionKeys {
   p256dh: string;
@@ -10,6 +11,7 @@ export interface PushSubscriptionKeys {
 export interface PushSubscriptionData {
   endpoint: string;
   keys: PushSubscriptionKeys;
+  fcmToken?: string;
   userAgent?: string;
   deviceType?: string;
   accountId?: string;
@@ -74,16 +76,17 @@ export function isWebPushEnabled(): boolean {
  */
 export async function saveDriverSubscription(
   accountId: string,
-  sub: { endpoint: string; keys: { p256dh: string; auth: string } },
+  sub: { endpoint: string; keys?: { p256dh?: string; auth?: string }; fcmToken?: string },
   deviceInfo?: { userAgent?: string; deviceType?: string }
 ): Promise<boolean> {
-  if (!accountId || !sub?.endpoint || !sub?.keys?.p256dh || !sub?.keys?.auth) {
+  if (!accountId || !sub?.endpoint) {
     return false;
   }
 
   const endpoint = sub.endpoint.trim();
-  const p256dh = sub.keys.p256dh.trim();
-  const auth = sub.keys.auth.trim();
+  const p256dh = sub.keys?.p256dh?.trim() || 'fcm';
+  const auth = sub.keys?.auth?.trim() || 'fcm';
+  const fcmToken = sub.fcmToken || (endpoint.startsWith('fcm:') ? endpoint.replace(/^fcm:/, '') : undefined);
   const userAgent = deviceInfo?.userAgent || '';
   const deviceType = deviceInfo?.deviceType || 'unknown';
   const now = new Date().toISOString();
@@ -123,6 +126,7 @@ export async function saveDriverSubscription(
       accountId,
       endpoint,
       keys: { p256dh, auth },
+      fcmToken,
       userAgent,
       deviceType,
       updatedAt: now,
@@ -216,6 +220,27 @@ export async function sendWebPush(
   subscription: PushSubscriptionData,
   payload: PushNotificationPayload
 ): Promise<{ success: boolean; expired?: boolean; statusCode?: number; error?: string }> {
+  // Disparo nativo via Firebase Cloud Messaging para Android
+  if (subscription.endpoint.startsWith('fcm:') || (subscription as any).fcmToken) {
+    const token = (subscription as any).fcmToken || subscription.endpoint.replace(/^fcm:/, '');
+    const fcmRes = await sendFcmNotification(token, {
+      title: payload.title,
+      body: payload.body,
+      url: payload.url,
+      data: payload.data,
+    });
+    if (fcmRes.expired && subscription.accountId) {
+      console.warn('[FirebaseAdmin] Token FCM expirado. Removendo endpoint ' + subscription.endpoint.slice(0, 30) + '...');
+      void removeDriverSubscription(subscription.accountId, subscription.endpoint);
+    }
+    return {
+      success: fcmRes.success,
+      expired: fcmRes.expired,
+      statusCode: fcmRes.success ? 200 : 500,
+      error: fcmRes.error,
+    };
+  }
+
   if (!ensureVapidConfig()) {
     return { success: false, error: 'VAPID não configurado no servidor.' };
   }

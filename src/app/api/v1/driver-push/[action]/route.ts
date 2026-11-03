@@ -78,6 +78,30 @@ export async function POST(
     }
 
     if (action === 'subscribe') {
+      const fcmToken = body?.fcmToken || body?.token;
+      if (fcmToken && typeof fcmToken === 'string') {
+        const endpoint = 'fcm:' + fcmToken.trim();
+        const userAgent = req.headers.get('user-agent') || body?.userAgent || '';
+        const saved = await saveDriverSubscription(
+          account.id,
+          {
+            endpoint,
+            keys: { p256dh: 'fcm', auth: 'fcm' },
+            fcmToken: fcmToken.trim(),
+          },
+          {
+            userAgent,
+            deviceType: 'android',
+          }
+        );
+        return json({
+          success: saved,
+          registered: saved,
+          accountId: account.id,
+          platform: 'fcm',
+        });
+      }
+
       const subscription = body?.subscription;
       if (!subscription?.endpoint || !subscription?.keys?.p256dh || !subscription?.keys?.auth) {
         return json(

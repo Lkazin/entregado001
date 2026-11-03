@@ -16,3 +16,6 @@ yarn-error.log*
 *.sln
 *.sw?
 *.tsbuildinfo
+credentials/
+*.json.key
+firebase-admin*.json
