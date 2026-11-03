@@ -1,5 +1,23 @@
 # Master 2 — Central de Integração NovaesWeb
 
+## Referência verificada para o Kit
+
+| Peça | Referência na Bella Pizza | Adaptação da nova loja |
+| --- | --- | --- |
+| Pedido e estados | `src/app/api/orders/route.ts` cria, lista e atualiza pedidos. A implementação usa Storage e a projeção logística; as gravações relacionais são condicionais. | Manter checkout, persistência, clientes, pagamento e histórico existentes. Enviar apenas pedidos elegíveis ao despacho. |
+| Estado central | `src/lib/logistics/state-store.ts` lê `driver_logistics_state` e usa `driver_logistics_commit` com revisão para evitar sobrescrita concorrente. | Não clonar o estado central em cada loja. Validar a rota autenticada entre projetos antes de qualquer liberação. |
+| Vínculo e sessão | `driver_accounts`, `driver_account_memberships`, `driver_first_access_invites`, `invite-issue`, `invite-activate`, `account-bootstrap`. | Relacionar UUID comercial ao identificador operacional autorizado. Preservar múltiplos vínculos e revogação. |
+| Operação | `offer-create`, `offers`, `offer-respond`, `assignments`, `pickup-confirm`, `delivery-confirm`, `history`. | Reutilizar o contrato da API, preservando identidade, escopo, idempotência e o formato confirmado na versão do aplicativo. |
+| Push, rota e GPS | `/api/v1/driver-push/[action]`, `/api/v1/driver-route/optimize`, `route-current`, `tracking-location-push`. | Verificar capacidades efetivas e testar notificações no aparelho. Aplicar as autorizações do servidor. |
+
+O checkout e a interface do lojista pertencem à loja. A URL configurada em `src/services/logisticsConfig.ts` e o cliente em `src/services/api.ts` do painel-moto apontam para a API do Entregador. A loja não deve trocar a URL de todo o app, emitir tokens de outra instalação ou copiar contas centrais. Para projetos distintos, o Kit exige um encaminhamento autenticado e homologado de projeções e eventos, sempre identificado pelo UUID oficial da loja. Não há comprovação de conexão ativa com outra loja pelo simples cadastro no assistente.
+
+A leitura do Supabase do modelo confirmou as tabelas centrais e RLS habilitada. A consulta de metadados do Master 1 foi recusada pelo conector. A validação do contrato comercial, das políticas efetivas entre projetos e de push/GPS no aparelho faz parte da homologação de cada instalação.
+
+## Demonstração
+
+Em Visão geral, selecione **Testar hamburgueria fictícia**. O rascunho Horizonte mantém pedidos e checkout como existentes e marca despacho e vínculo como ausentes. Use **Gerar prompts da loja**, copie Auditoria e confira, em Diagnóstico, as lacunas antes de avançar. Na etapa de logística, o Codex da loja preserva seus pedidos e adapta `offer-create` e a projeção; na etapa de vínculo, usa convites e contas centrais. Os resultados de homologação são anotados por etapa. O UUID fictício e os projetos pendentes não podem ser usados para uma instalação real.
+
 O assistente atual gera oito prompts no servidor em `POST /api/master2/prompts`, usando a sessão do Master 2 e referências públicas validadas. O progresso, o checklist e o histórico de etapas são locais ao navegador. As edições nos textos duram enquanto a tela está aberta.
 
 O receptor de demonstração em `POST /api/master2/integrations/events` exige a habilitação do laboratório, um segredo separado `MASTER2_DEMO_EVENT_SECRET` de pelo menos 32 caracteres e execução fora da produção Vercel. A assinatura hexadecimal HMAC-SHA256 cobre o prefixo `master1:master2-demo:`, o timestamp em milissegundos, dois-pontos e o corpo exato. Envie timestamp e assinatura em `x-master1-timestamp` e `x-master1-signature`. O evento usa `schemaVersion: 1`, `eventType: "kit.authorized"`, `storeStatus: "active"` e `kitAuthorized: true`, além das referências da loja. Repetir o mesmo corpo devolve o mesmo recibo sem gerar cadastro ou efeito. A deduplicação persistente e a devolução de status oficial pertencem ao contrato futuro.

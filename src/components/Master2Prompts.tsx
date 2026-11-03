@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { installationSteps } from '@/lib/master2-prompts';
 
-type Store = { id: string; name: string; plan: string; group: string; staging: string; production: string; completed: number[] };
+type Store = { id: string; name: string; plan: string; group: string; staging: string; production: string; completed: number[]; findings: Record<string, string> };
 type Prompt = { title: string; text: string };
 
 export default function Master2Prompts({ store, library, onComplete }: {
@@ -22,11 +22,11 @@ export default function Master2Prompts({ store, library, onComplete }: {
     setBusy(true);
     setMessage('');
     try {
-      const { id, name, plan, group, staging, production } = store;
+      const { id, name, plan, group, staging, production, findings } = store;
       const response = await fetch('/api/master2/prompts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, name, plan, group, staging, production }),
+        body: JSON.stringify({ id, name, plan, group, staging, production, findings }),
         signal: AbortSignal.timeout(10000),
       });
       const result = await response.json();
