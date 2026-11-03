@@ -12,7 +12,7 @@
 
 O checkout e a interface do lojista pertencem à loja. A URL configurada em `src/services/logisticsConfig.ts` e o cliente em `src/services/api.ts` do painel-moto apontam para a API do Entregador. A loja não deve trocar a URL de todo o app, emitir tokens de outra instalação ou copiar contas centrais. Para projetos distintos, o Kit exige um encaminhamento autenticado e homologado de projeções e eventos, sempre identificado pelo UUID oficial da loja. Não há comprovação de conexão ativa com outra loja pelo simples cadastro no assistente.
 
-A leitura do Supabase do modelo confirmou as tabelas centrais e RLS habilitada. A consulta de metadados do Master 1 foi recusada pelo conector. A validação do contrato comercial, das políticas efetivas entre projetos e de push/GPS no aparelho faz parte da homologação de cada instalação.
+A leitura do Supabase do modelo confirmou as tabelas centrais e RLS habilitada. A consulta a pg_policies não retornou políticas explícitas para as cinco tabelas centrais mapeadas. O fluxo de referência passa pela API e pela autorização no servidor; valide também grants e RPCs no projeto de destino antes de homologar. A consulta de metadados do Master 1 foi recusada pelo conector. A validação do contrato comercial, das políticas efetivas entre projetos e de push/GPS no aparelho faz parte da homologação de cada instalação.
 
 ## Demonstração
 
