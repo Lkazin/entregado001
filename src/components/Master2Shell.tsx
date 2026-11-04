@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
-  BookOpen, ChevronLeft, ChevronRight, ClipboardCheck, FileClock, Layers3,
+  BookOpen, ChevronRight, ClipboardCheck, FileClock, Layers3,
   LayoutDashboard, Link2, LogOut, Menu, PanelLeftClose, PanelLeftOpen,
   Search, ShieldCheck, Store, Workflow, X, KeyRound, ArrowRight,
 } from 'lucide-react';
@@ -74,44 +74,47 @@ export default function Master2Shell({
     });
   }
 
-  const sidebar = <div className="flex h-full flex-col">
-    <div className={'flex items-center border-b border-fuchsia-900/30 p-3 ' + (compact ? 'justify-center' : 'justify-between gap-3')}>
+  function renderSidebar(isMobile = false) {
+    const collapsed = compact && !isMobile;
+    return <div className="flex h-full flex-col">
+    <div className={'flex items-center border-b border-fuchsia-900/30 p-3 ' + (collapsed ? 'justify-center' : 'justify-between gap-3')}>
       <button type="button" onClick={() => navigate('overview')} title="Início do Master 2" className="flex min-w-0 items-center gap-3 text-left">
         <span className="grid h-11 w-11 shrink-0 place-items-center overflow-hidden rounded-xl border border-fuchsia-700/40 bg-white">
           {!logoFailed ? <img src={logo} alt="Logo oficial NovaesWeb" className="h-full w-full object-contain" onError={() => setLogoFailed(true)} /> : <span className="text-2xl font-black text-purple-700">N</span>}
         </span>
-        {!compact && <span className="min-w-0"><span className="block truncate font-black tracking-tight text-white">NovaesWeb</span><span className="block text-[11px] font-semibold uppercase tracking-wider text-fuchsia-300">Painel Master 2</span></span>}
+        {!collapsed && <span className="min-w-0"><span className="block truncate font-black tracking-tight text-white">NovaesWeb</span><span className="block text-[11px] font-semibold uppercase tracking-wider text-fuchsia-300">Painel Master 2</span></span>}
       </button>
-      {!compact && <button type="button" aria-label="Recolher menu" title="Recolher menu" onClick={toggleCompact} className="hidden min-h-11 min-w-11 place-items-center rounded-xl text-zinc-400 hover:bg-fuchsia-900/30 hover:text-white lg:grid"><PanelLeftClose size={19}/></button>}
+      {!collapsed && <button type="button" aria-label="Recolher menu" title="Recolher menu" onClick={toggleCompact} className="hidden min-h-11 min-w-11 place-items-center rounded-xl text-zinc-400 hover:bg-fuchsia-900/30 hover:text-white lg:grid"><PanelLeftClose size={19}/></button>}
     </div>
-    {compact && <button type="button" aria-label="Expandir menu" title="Expandir menu" onClick={toggleCompact} className="mx-auto my-2 hidden min-h-11 min-w-11 place-items-center rounded-xl text-fuchsia-300 hover:bg-fuchsia-900/30 lg:grid"><PanelLeftOpen size={20}/></button>}
+    {collapsed && <button type="button" aria-label="Expandir menu" title="Expandir menu" onClick={toggleCompact} className="mx-auto my-2 hidden min-h-11 min-w-11 place-items-center rounded-xl text-fuchsia-300 hover:bg-fuchsia-900/30 lg:grid"><PanelLeftOpen size={20}/></button>}
     <nav aria-label="Navegação principal do Master 2" className="flex-1 space-y-1 overflow-y-auto px-3 py-3">
       {menu.map((item, index) => {
         const Icon = item.icon;
         const showGroup = index === 0 || menu[index - 1].group !== item.group;
         return <div key={item.id}>
-          {showGroup && !compact && <p className="px-3 pb-2 pt-4 text-[10px] font-black uppercase tracking-[.19em] text-zinc-500">{item.group}</p>}
-          {showGroup && compact && index !== 0 && <div className="my-3 border-t border-fuchsia-900/30"/>}
+          {showGroup && !collapsed && <p className="px-3 pb-2 pt-4 text-[10px] font-black uppercase tracking-[.19em] text-zinc-500">{item.group}</p>}
+          {showGroup && collapsed && index !== 0 && <div className="my-3 border-t border-fuchsia-900/30"/>}
           <button type="button" title={item.text} aria-label={item.text} aria-current={section === item.id ? 'page' : undefined}
             onClick={() => navigate(item.id)} className={'flex min-h-11 w-full items-center rounded-xl text-sm font-semibold transition-colors ' +
-              (compact ? 'justify-center px-2' : 'gap-3 px-3') + ' ' +
+              (collapsed ? 'justify-center px-2' : 'gap-3 px-3') + ' ' +
               (section === item.id ? 'bg-gradient-to-r from-fuchsia-700 to-purple-800 text-white shadow-lg shadow-fuchsia-950/30' : 'text-zinc-300 hover:bg-fuchsia-950/50 hover:text-white')}>
-            <Icon size={19} className="shrink-0" aria-hidden="true"/>{!compact && <span className="flex-1 text-left">{item.text}</span>}
-            {!compact && item.id === 'diagnostic' && pending > 0 && <span className="rounded-full bg-amber-900/60 px-2 py-0.5 text-xs text-amber-100">{pending}</span>}
+            <Icon size={19} className="shrink-0" aria-hidden="true"/>{!collapsed && <span className="flex-1 text-left">{item.text}</span>}
+            {!collapsed && item.id === 'diagnostic' && pending > 0 && <span className="rounded-full bg-amber-900/60 px-2 py-0.5 text-xs text-amber-100">{pending}</span>}
           </button>
         </div>;
+  }
       })}
     </nav>
-    {!compact && <div className="mx-3 mb-3 rounded-xl border border-fuchsia-800/30 bg-fuchsia-950/20 p-3">
+    {!collapsed && <div className="mx-3 mb-3 rounded-xl border border-fuchsia-800/30 bg-fuchsia-950/20 p-3">
       <p className="flex items-center gap-2 text-xs font-bold text-fuchsia-200"><ShieldCheck size={15}/> Central técnica</p>
       <p className="mt-2 text-xs leading-relaxed text-zinc-400">Master 1 autoriza. Master 2 acompanha a integração e a homologação.</p>
     </div>}
-    <button type="button" title="Sair do Master 2" onClick={onLogout} className={'m-3 flex min-h-11 items-center rounded-xl border border-rose-900/30 px-3 text-sm font-semibold text-rose-200 hover:bg-rose-900/20 ' + (compact ? 'justify-center' : 'gap-3')}><LogOut size={18}/>{!compact && 'Sair com segurança'}</button>
+    <button type="button" title="Sair do Master 2" onClick={onLogout} className={'m-3 flex min-h-11 items-center rounded-xl border border-rose-900/30 px-3 text-sm font-semibold text-rose-200 hover:bg-rose-900/20 ' + (collapsed ? 'justify-center' : 'gap-3')}><LogOut size={18}/>{!collapsed && 'Sair com segurança'}</button>
   </div>;
 
   return <main className="min-h-screen bg-[#0b0614] text-white">
     <div className={'mx-auto min-h-screen max-w-[1920px] lg:grid ' + (compact ? 'lg:grid-cols-[76px_minmax(0,1fr)]' : 'lg:grid-cols-[270px_minmax(0,1fr)]')}>
-      <aside className="hidden h-screen border-r border-fuchsia-900/30 bg-[#140d21] lg:sticky lg:top-0 lg:block">{sidebar}</aside>
+      <aside className="hidden h-screen border-r border-fuchsia-900/30 bg-[#140d21] lg:sticky lg:top-0 lg:block">{renderSidebar()}</aside>
       <div className="min-w-0">
         <header className="sticky top-0 z-30 border-b border-fuchsia-900/30 bg-[#140c21]/95 px-4 py-3 backdrop-blur-xl sm:px-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -143,7 +146,7 @@ export default function Master2Shell({
       <button type="button" aria-label="Fechar menu" onClick={() => setMobileOpen(false)} className="absolute inset-0 bg-black/75"/>
       <aside className="absolute inset-y-0 left-0 w-[min(310px,88vw)] overflow-y-auto border-r border-fuchsia-900/40 bg-[#140d21] shadow-2xl">
         <button type="button" onClick={() => setMobileOpen(false)} aria-label="Fechar menu lateral" className="absolute right-2 top-3 z-10 grid min-h-11 min-w-11 place-items-center rounded-xl bg-zinc-900"><X size={20}/></button>
-        <div className="h-full">{sidebar}</div>
+        <div className="h-full">{renderSidebar(true)}</div>
       </aside>
     </div>}
 
