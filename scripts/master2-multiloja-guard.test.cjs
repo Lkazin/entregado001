@@ -1,0 +1,10 @@
+const assert=require('node:assert/strict');const fs=require('node:fs');
+const s=fs.readFileSync('src/app/api/v1/logistics/[action]/route.ts','utf8');
+assert.match(s,/async function requireOfficialKitAuthorization/);
+assert.match(s,/data\.profile\?\.kitAuthorized !== true/);
+assert.match(s,/data\.profile\?\.commercialStatus !== 'active'/);
+assert.ok((s.match(/await requireOfficialKitAuthorization\(effectiveStoreId\)/g)||[]).length>=2);
+const g=fs.readFileSync('src/lib/master2-prompts.ts','utf8');
+assert.match(g,/SUPABASE COMPARTILHADO/);
+assert.match(g,/IMPLEMENTE o adaptador/);
+console.log('Kit authorization gate and shared Supabase prompt checks OK');

@@ -42,6 +42,22 @@ function isSameStore(a?: string | null, b?: string | null): boolean {
   return normalizeStoreId(a) === normalizeStoreId(b);
 }
 
+// A identidade comercial e a autorização do Kit não vêm do navegador.
+// O estabelecimento modelo legado conserva o fluxo existente; novas lojas
+// só podem operar quando o Master 1 confirmou autorização ATIVA ao Master 2.
+async function requireOfficialKitAuthorization(storeId: string): Promise<void> {
+  if (storeId === DEFAULT_STORE_ID) return;
+  if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(storeId)) {
+    throw new AccountSessionError('Identidade oficial da loja inválida.', 403, 'STORE_FORBIDDEN');
+  }
+  const { data, error } = await supabaseAdmin.from('master2_received_stores')
+    .select('status,profile').eq('id',storeId.toLowerCase()).maybeSingle();
+  if (error) throw new AccountSessionError('Não foi possível verificar a autorização atual do Kit.',503,'KIT_AUTH_UNAVAILABLE');
+  if (!data || data.status === 'suspended' || data.profile?.kitAuthorized !== true || data.profile?.commercialStatus !== 'active') {
+    throw new AccountSessionError('Kit Entregador não autorizado para esta loja.',403,'KIT_NOT_AUTHORIZED');
+  }
+}
+
 function toValidUuid(val?: string | null): string {
   if (!val) return crypto.randomUUID();
   const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -968,6 +984,7 @@ export async function GET(
             storeId
         );
 
+        await requireOfficialKitAuthorization(effectiveStoreId);
         const settings = getStoreSettings(effectiveStoreId);
         const storeDrivers = liveDrivers.filter((d) => isSameStore(d.storeId, effectiveStoreId));
         const storeOffers = liveOffers.filter((o) => isSameStore(o.storeId, effectiveStoreId));
@@ -2287,6 +2304,7 @@ export async function POST(
           await loadLogisticsState();
 
           const effectiveStoreId = normalizeStoreId(adminCheck.storeId || storeId);
+          await requireOfficialKitAuthorization(effectiveStoreId);
           const settings = getStoreSettings(effectiveStoreId);
           const automatic = body.automatic === true;
           if (automatic && (!automaticDispatchEnabled(settings) || settings.distributionMode !== 'fixed_driver' || !settings.fixedDriverId)) {

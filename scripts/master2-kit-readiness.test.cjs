@@ -20,10 +20,14 @@ const record = { id, revision: 2, status: 'pending_diagnosis', profile: {
 }};
 let resultRow = record;
 const db = { from(table) {
-  assert.equal(table, 'master2_received_stores');
+  assert.ok(['master2_received_stores','master2_store_technical_profiles'].includes(table));
   return { select: () => ({ eq: (_column, value) => {
     assert.equal(value, id);
-    return { maybeSingle: async () => ({ data: resultRow, error: null }) };
+    return { maybeSingle: async () => ({ data: table === 'master2_received_stores' ? resultRow : {
+      repository_url: 'https://github.com/Novaesweb/burge-house.git',
+      staging_project_ref: '',
+      production_project_ref: 'mabkzkawziqlmgfikwmh'
+    }, error: null }) };
   } }) };
 }};
 const route = load('src/app/api/master2/prompts/route.ts', {
