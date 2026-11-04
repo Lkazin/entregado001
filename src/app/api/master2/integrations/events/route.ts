@@ -25,7 +25,7 @@ export async function POST(request: NextRequest) {
   function replySignatureError() { return NextResponse.json({ error: 'Assinatura inválida.' }, { status: 401, headers }); }
   try {
     const event = JSON.parse(body);
-    if (event.schemaVersion !== 1 || event.eventType !== 'kit.authorized' || event.storeStatus !== 'active' || event.kitAuthorized !== true || typeof event.eventId !== 'string' || !/^[\w-]{1,100}$/.test(event.eventId)) {
+    if (event.schemaVersion !== 1 || !['kit.authorized','kit.revoked'].includes(String(event.eventType)) || (event.eventType === 'kit.authorized' && (event.storeStatus !== 'active' || event.kitAuthorized !== true)) || (event.eventType === 'kit.revoked' && event.kitAuthorized !== false) || typeof event.eventId !== 'string' || !/^[\w-]{1,100}$/.test(event.eventId)) {
       return reply({ error: 'Evento incompatível ou loja sem autorização.' }, 422);
     }
     generateInstallationPrompts({
@@ -61,7 +61,9 @@ async function receiveOfficial(request: NextRequest) {
     }
     const allowed = ['schemaVersion','eventType','eventId','officialStoreId','name','domain','domainCandidate','domainVerificationStatus','basePlan','storeStatus','kitAuthorized','supabaseGroupId','revision'];
     if (Object.keys(event).some(key => !allowed.includes(key)) || event.eventType !== 'kit.authorized' || event.storeStatus !== 'active' || event.kitAuthorized !== true ||
-      !['business','premium'].includes(String(event.basePlan)) || typeof event.eventId !== 'string' || !/^[\w-]{1,100}$/.test(event.eventId) ||
+      (event.eventType === 'kit.authorized' && !['business','premium'].includes(String(event.basePlan))) ||
+      (event.eventType === 'kit.revoked' && event.basePlan != null && !['business','premium'].includes(String(event.basePlan))) ||
+      typeof event.name !== 'string' || !event.name.trim() || event.name.length > 150 || typeof event.eventId !== 'string' || !/^[\w-]{1,100}$/.test(event.eventId) ||
       typeof event.revision !== 'number' || !Number.isSafeInteger(event.revision) || event.revision < 1 ||
       (event.domain != null && (typeof event.domain !== 'string' || event.domain.length > 253 || !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}$/i.test(event.domain))) ||
       (event.domainCandidate != null && (typeof event.domainCandidate !== 'string' || event.domainCandidate.length > 253 || !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}$/i.test(event.domainCandidate))) ||
@@ -79,15 +81,19 @@ async function receiveOfficial(request: NextRequest) {
     const domain = typeof event.domain === 'string' ? event.domain.toLowerCase() : '';
     const domainCandidate = typeof event.domainCandidate === 'string' ? event.domainCandidate.toLowerCase() : '';
     const domainVerificationStatus = domain ? 'verified' : domainCandidate ? 'pending' : 'none';
-    const profile = { name: event.name, domain, domainCandidate, domainVerificationStatus, plan: event.basePlan, group: groupId || '', staging: group?.staging || '', production: group?.production || '' };
-    try { generateInstallationPrompts({ id: event.officialStoreId, ...profile }); }
-    catch { return reply({ error: 'Dados da loja inválidos.' }, 422); }
+    const authorized = event.eventType === 'kit.authorized';
+    const profile = { name: event.name, domain, domainCandidate, domainVerificationStatus, plan: event.basePlan || '', group: groupId || '', staging: group?.staging || '', production: group?.production || '', kitAuthorized: authorized, commercialStatus: String(event.storeStatus || '') };
+    if (authorized) {
+      try { generateInstallationPrompts({ id: event.officialStoreId, ...profile }); }
+      catch { return reply({ error: 'Dados da loja inválidos.' }, 422); }
+    }
     const fingerprint = createHash('sha256').update(JSON.stringify([event.officialStoreId.toLowerCase(), event.revision, event.eventType, profile])).digest('hex');
     const { data, error } = await supabaseAdmin.rpc('master2_receive_store', {
       p_event: event.eventId, p_id: event.officialStoreId, p_revision: event.revision, p_profile: profile, p_fingerprint: fingerprint,
+      p_status: authorized ? 'pending_diagnosis' : 'suspended',
     });
     if (error) throw error;
     if (data !== 'received') return reply({ error: data }, 409);
-    return reply({ received: true, eventId: event.eventId, officialStoreId: event.officialStoreId, revision: event.revision });
+    return reply({ received: true, eventId: event.eventId, officialStoreId: event.officialStoreId, revision: event.revision, authorization: authorized ? 'active' : 'suspended' });
   } catch { return reply({ error: 'Não foi possível consultar ou registrar a conexão.' }, 503); }
 }
