@@ -38,7 +38,12 @@ function safeDraft(value: unknown): StoreDraft | null {
   if (source.stepEvidence && typeof source.stepEvidence === 'object' && !Array.isArray(source.stepEvidence)) {
     draft.stepEvidence = Object.fromEntries(Object.entries(source.stepEvidence).filter(([key, value]) => /^[0-7]$/.test(key) && typeof value === 'string' && value.length <= 1500 && !/sb_secret_|service_role|eyJ[A-Za-z0-9_-]{12,}|password\s*=/i.test(value)));
   }
-  draft.completed = draft.completed.filter(step => typeof draft.stepEvidence[String(step)] === 'string' && draft.stepEvidence[String(step)].trim().length >= 20 && (step === 0 || draft.completed.includes(step - 1)));
+  const declaredCompleted = draft.completed;
+  draft.completed = [];
+  for (let step = 0; step < 8; step++) {
+    if (!declaredCompleted.includes(step) || !draft.stepEvidence[String(step)]?.trim() || draft.stepEvidence[String(step)].trim().length < 20) break;
+    draft.completed.push(step);
+  }
   draft.history = Array.isArray(source.history) ? source.history.slice(0, 100).filter(entry => entry && typeof entry.at === 'string' && typeof entry.action === 'string' && typeof entry.version === 'string') : [];
   if (/sb_secret_|service_role|eyJ[A-Za-z0-9_-]{12,}/i.test(JSON.stringify(draft))) return null;
   return draft;
