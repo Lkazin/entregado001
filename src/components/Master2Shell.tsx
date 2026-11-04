@@ -9,7 +9,7 @@ import {
 
 export type Master2Section = 'overview' | 'plans' | 'integrate' | 'stores' | 'tests' | 'contract' | 'library' | 'diagnostic' | 'history';
 type StoreLink = { id: string; name: string; stage: string; completed: number[] };
-const logo = 'https://raw.githubusercontent.com/Novaesweb/painel-novaes-27/main/public/images/novaesweb-logo.jpeg';
+const logo = '/images/novaesweb-logo.jpeg';
 const menu = [
   { id: 'overview', text: 'Visão geral', icon: LayoutDashboard, group: 'Operação' },
   { id: 'stores', text: 'Lojas recebidas', icon: Store, group: 'Operação' },
