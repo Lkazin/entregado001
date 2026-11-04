@@ -39,9 +39,16 @@ export async function POST(request: NextRequest) {
     if (!['business', 'premium'].includes(String(profile.plan))) {
       return reply({ error: 'Plano oficial não elegível ao Kit Entregador.' }, 403);
     }
+    const {data: tech, error: techError} = await supabaseAdmin.from('master2_store_technical_profiles')
+      .select('repository_url,staging_project_ref,production_project_ref').eq('store_id', data.id).maybeSingle();
+    if (techError) return reply({error:'Ficha técnica indisponível. Aplique a migration de cadastro por loja.'},503);
     const prompts = generateInstallationPrompts({
       id: data.id, name: profile.name, plan: profile.plan,
-      group: profile.group, staging: profile.staging, production: profile.production,
+      group: profile.group,
+      staging: tech?.staging_project_ref || profile.staging,
+      production: tech?.production_project_ref || profile.production,
+      repository: tech?.repository_url || '',
+      centralApi: process.env.MASTER2_DRIVER_API_BASE_URL || request.nextUrl.origin + '/api/v1/logistics',
       findings: source.findings,
     });
     return reply({ prompts, verifiedReceipt: true, officialRevision: data.revision });

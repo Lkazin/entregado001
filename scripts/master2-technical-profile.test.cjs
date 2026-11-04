@@ -1,0 +1,16 @@
+const fs=require('fs');const assert=require('node:assert/strict');
+const base=process.argv[2]||'.';
+const r=(name)=>fs.readFileSync(base+'/'+name,'utf8');
+const sql=r('supabase/migrations/20261104090000_master2_store_technical_profiles.sql');
+assert.match(sql,/primary key references public\.master2_received_stores/);
+assert.match(sql,/enable row level security/);
+assert.match(sql,/revoke all .* anon, authenticated/);
+const gen=r('src/lib/master2-prompts.ts');
+assert.match(gen,/MULTILOJA_RULES/);
+assert.match(gen,/NÃO IDENTIFICADO/);
+assert.match(gen,/TESTES OBRIGATÓRIOS/);
+const api=r('src/app/api/master2/stores/technical/route.ts');
+assert.match(api,/verifyMaster2Session/);assert.match(api,/master2_received_stores/);
+assert.match(api,/sameOrigin|req\.headers\.get\('origin'\)/);
+const route=r('src/app/api/master2/prompts/route.ts');assert.match(route,/tech\?\.repository_url/);
+console.log('6 checks OK');

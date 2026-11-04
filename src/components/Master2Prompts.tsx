@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { installationSteps } from '@/lib/master2-prompts';
 
 type Store = { id: string; name: string; plan: string; group: string; staging: string; production: string; completed: number[]; stepEvidence?: Record<string, string>; findings: Record<string, string> };
@@ -17,6 +17,29 @@ export default function Master2Prompts({ store, library, onComplete }: {
   const [busy, setBusy] = useState(false);
   const [stepEvidence, setStepEvidence] = useState<Record<string, string>>(store?.stepEvidence || {});
   const prompt = prompts[index];
+  const [technical, setTechnical] = useState({repositoryUrl:'',stagingProjectRef:'',productionProjectRef:''});
+  const [technicalStatus,setTechnicalStatus] = useState('Referências ainda não verificadas.');
+  const [technicalLoading,setTechnicalLoading] = useState(false);
+  useEffect(() => {
+    if(!store?.id)return;
+    const controller=new AbortController();
+    setTechnical({repositoryUrl:'',stagingProjectRef:'',productionProjectRef:''});
+    fetch('/api/master2/stores/technical?storeId='+encodeURIComponent(store.id), {cache:'no-store',signal:controller.signal})
+      .then(async r=>{const d=await r.json();if(!r.ok)throw Error(d.error||'Falha ao consultar ficha técnica.');
+        if(!controller.signal.aborted){setTechnical({repositoryUrl:d.profile.repository_url||'',stagingProjectRef:d.profile.staging_project_ref||'',productionProjectRef:d.profile.production_project_ref||''});setTechnicalStatus('Ficha técnica carregada. Referências cadastradas não constituem conexão testada.');}})
+      .catch(e=>{if(!controller.signal.aborted)setTechnicalStatus(e instanceof Error?e.message:'Ficha técnica indisponível.');});
+    return ()=>controller.abort();
+  },[store?.id]);
+  async function saveTechnical() {
+    if(!store)return; setTechnicalLoading(true);
+    try {
+      const res=await fetch('/api/master2/stores/technical',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({storeId:store.id,...technical})});
+      const d=await res.json(); if(!res.ok)throw Error(d.error||'Falha ao salvar.');
+      setTechnicalStatus('Ficha técnica salva para esta loja. Conexão e identidade dos bancos ainda exigem verificação.');
+      setPrompts([]);
+    } catch(e){setTechnicalStatus(e instanceof Error?e.message:'Erro ao salvar.');}
+    finally {setTechnicalLoading(false);}
+  }
 
   async function generate() {
     if (!store) return;
@@ -54,6 +77,17 @@ export default function Master2Prompts({ store, library, onComplete }: {
   return <section className="space-y-4">
     <h2 className="text-2xl font-black">{library ? 'Biblioteca de prompts' : 'Integrar Nova Loja'}</h2>
     <p className="text-sm text-zinc-300">Gere as oito etapas somente para lojas oficialmente recebidas do Master 1. Os dados oficiais serão conferidos novamente no servidor; o progresso é manual e local, sem homologação automática.</p>
+    {store && <section className="rounded-xl border border-fuchsia-900/50 bg-zinc-900 p-4 space-y-3">
+      <h3 className="font-bold text-fuchsia-200">Ficha técnica oficial — {store.name}</h3>
+      <p className="break-all text-xs text-zinc-400">UUID Master 1 (não editável): {store.id}</p>
+      <p className="text-xs text-zinc-400">Cadastre somente referências públicas verificadas. Nunca informe service_role, senha ou chave secreta.</p>
+      {([['repositoryUrl','GitHub da loja (https://github.com/organização/repositório)'],['stagingProjectRef','Supabase HOMOLOGAÇÃO — ref de 20 caracteres'],['productionProjectRef','Supabase PRODUÇÃO — ref de 20 caracteres']] as const).map(([key,label])=>
+        <label key={key} className="block text-sm font-medium">{label}
+          <input className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 p-3" maxLength={200} value={technical[key]} onChange={e=>setTechnical(p=>({...p,[key]:e.target.value}))}/>
+        </label>)}
+      <button type="button" disabled={technicalLoading} onClick={()=>void saveTechnical()} className="rounded-lg bg-fuchsia-700 px-4 py-3 disabled:opacity-50">Salvar ficha técnica desta loja</button>
+      <p role="status" className="text-xs text-amber-200">{technicalStatus}</p>
+    </section>}
     <ol className="grid gap-2 sm:grid-cols-2">
       {installationSteps.map(([title], step) => <li key={title}>
         <button type="button" aria-pressed={index === step} className="min-h-11 w-full rounded-xl border border-zinc-700 px-3 py-2 text-left text-sm aria-pressed:border-fuchsia-400" onClick={() => setIndex(step)}>
