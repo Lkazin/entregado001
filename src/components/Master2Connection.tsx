@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 
 export type ReceivedStore = {
   id: string;
-  profile: { name: string; domain: string; plan: string; group: string; staging: string; production: string };
+  profile: { name: string; domain: string; domainCandidate?: string; domainVerificationStatus?: string; plan: string; group: string; staging: string; production: string };
   revision: number;
   updated_at: string;
   status: string;
@@ -93,7 +93,8 @@ export default function Master2Connection({ onSelect }: { onSelect: (store: Rece
     <h3 className="font-bold">Lojas recebidas oficialmente</h3>
     {stores.length ? <ul className="space-y-2">{stores.map(store => <li key={store.id} className="rounded-xl border border-zinc-700 p-3 break-words">
       <p>{store.profile.name} · {store.id}</p>
-      <p className="text-sm text-zinc-300">{store.profile.domain} · {store.profile.plan === 'premium' ? 'Premium' : 'Business'} · Kit autorizado</p>
+      <p className="text-sm text-zinc-300">{store.profile.domain || store.profile.domainCandidate || 'Sem domínio'} · {store.profile.plan === 'premium' ? 'Premium' : 'Business'} · Kit autorizado</p>
+      <p className="text-sm text-zinc-400">Domínio: {store.profile.domain ? 'verificado' : store.profile.domainCandidate ? 'cadastrado, aguardando verificação' : 'não cadastrado'}</p>
       <p className="text-sm text-zinc-400">Grupo {store.profile.group || 'pendente'} · Último recebimento {new Date(store.updated_at).toLocaleString('pt-BR')}</p>
       <p className="text-sm text-zinc-400">Revisão {store.revision} · {store.status === 'pending_diagnosis' ? 'Pendente de diagnóstico' : store.status}</p>
       <button className="mt-2 rounded-lg bg-zinc-800 px-3 py-2" onClick={() => onSelect(store)}>Integrar Kit NovaesWeb Entregador</button>
