@@ -1295,15 +1295,27 @@ export default function AdminDashboardPage() {
             </button>
 
             <button
-              onClick={() => {
+              onClick={async () => {
+                // Não basta bloquear a interface: revogue os dois cookies de sessão.
+                // Remova também o token antigo salvo no navegador antes de qualquer navegação.
                 sessionStorage.removeItem('novaesweb_admin_auth');
+                sessionStorage.removeItem('novaesweb_admin_token');
                 setIsAuthenticated(false);
+                const results = await Promise.allSettled([
+                  fetch('/api/admin/auth', { method: 'DELETE', cache: 'no-store' }),
+                  fetch('/api/master2/session', { method: 'DELETE', cache: 'no-store' }),
+                ]);
+                const failed = results.some(result => result.status === 'rejected' || !result.value.ok);
+                if (failed) {
+                  window.alert('Não foi possível confirmar a saída no servidor. Confira a conexão antes de acessar novamente.');
+                }
+                window.location.replace('/admin');
               }}
               className="px-3 py-1.5 rounded-lg bg-red-950/60 hover:bg-red-900 border border-red-800 text-xs font-semibold text-red-300 transition flex items-center gap-1.5"
-              title="Bloquear Painel"
+              title="Encerrar as sessões e exigir novo login"
             >
               <Lock className="w-3 h-3" />
-              <span>Bloquear</span>
+              <span>Sair</span>
             </button>
           </div>
 
