@@ -33,6 +33,9 @@ export async function POST(request: NextRequest) {
       return reply({ error: 'Loja não recebida oficialmente. Envie pelo Master 1 antes de gerar prompts.' }, 403);
     }
     const profile = data.profile as Record<string, unknown>;
+    if (data.status === 'suspended' || profile.kitAuthorized === false || (profile.commercialStatus && profile.commercialStatus !== 'active')) {
+      return reply({ error: 'Kit suspenso ou loja inativa no Master 1. Novos prompts bloqueados.' }, 403);
+    }
     if (!['business', 'premium'].includes(String(profile.plan))) {
       return reply({ error: 'Plano oficial não elegível ao Kit Entregador.' }, 403);
     }
