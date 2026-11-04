@@ -55,21 +55,31 @@ async function receiveOfficial(request: NextRequest) {
   try {
     if (event.eventType === 'kit.status') {
       if (Object.keys(event).some(key => !['schemaVersion', 'eventType', 'officialStoreId'].includes(key))) return reply({ error: 'Campos inesperados.' }, 422);
-      const { data, error } = await supabaseAdmin.from('master2_received_stores').select('id,status,revision,updated_at').eq('id', event.officialStoreId).maybeSingle();
+      const { data, error } = await supabaseAdmin.from('master2_received_stores').select('id,status,revision,updated_at,profile').eq('id', event.officialStoreId).maybeSingle();
       if (error) throw error;
       return data ? reply({ store: data }) : reply({ error: 'Loja não recebida.' }, 404);
     }
-    const allowed = ['schemaVersion','eventType','eventId','officialStoreId','name','domain','basePlan','storeStatus','kitAuthorized','supabaseGroupId','revision'];
+    const allowed = ['schemaVersion','eventType','eventId','officialStoreId','name','domain','domainCandidate','domainVerificationStatus','basePlan','storeStatus','kitAuthorized','supabaseGroupId','revision'];
     if (Object.keys(event).some(key => !allowed.includes(key)) || event.eventType !== 'kit.authorized' || event.storeStatus !== 'active' || event.kitAuthorized !== true ||
       !['business','premium'].includes(String(event.basePlan)) || typeof event.eventId !== 'string' || !/^[\w-]{1,100}$/.test(event.eventId) ||
       typeof event.revision !== 'number' || !Number.isSafeInteger(event.revision) || event.revision < 1 ||
-      typeof event.domain !== 'string' || event.domain.length > 253 || !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}$/i.test(event.domain) ||
+      (event.domain != null && (typeof event.domain !== 'string' || event.domain.length > 253 || !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}$/i.test(event.domain))) ||
+      (event.domainCandidate != null && (typeof event.domainCandidate !== 'string' || event.domainCandidate.length > 253 || !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}$/i.test(event.domainCandidate))) ||
+      (event.domainVerificationStatus != null && !['none', 'pending', 'verified'].includes(String(event.domainVerificationStatus))) ||
+      (event.domainVerificationStatus === 'verified' && typeof event.domain !== 'string') ||
+      (event.domainVerificationStatus === 'pending' && typeof event.domainCandidate !== 'string') ||
+      (event.domainVerificationStatus === 'none' && (event.domain != null || event.domainCandidate != null)) ||
+      (event.domain != null && event.domainCandidate != null) ||
       (event.supabaseGroupId != null && (typeof event.supabaseGroupId !== 'string' || !/^[\w-]{1,80}$/.test(event.supabaseGroupId)))) return reply({ error: 'Evento inválido ou loja sem autorização.' }, 422);
     const groups = JSON.parse(process.env.MASTER2_SUPABASE_GROUPS || '{}');
     const groupId = typeof event.supabaseGroupId === 'string' ? event.supabaseGroupId : null;
     const group = groupId && Object.hasOwn(groups, groupId) ? groups[groupId] : null;
     if (groupId && (!group || !/^[a-z0-9]{20}$/.test(group.production) || (group.staging && (!/^[a-z0-9]{20}$/.test(group.staging) || group.staging === group.production)))) return reply({ error: 'Grupo Supabase não autorizado.' }, 422);
-    const profile = { name: event.name, domain: event.domain.toLowerCase(), plan: event.basePlan, group: groupId || '', staging: group?.staging || '', production: group?.production || '' };
+    // A loja pode ser cadastrada antes de ter um domínio verificado; não gerar domínio fictício.
+    const domain = typeof event.domain === 'string' ? event.domain.toLowerCase() : '';
+    const domainCandidate = typeof event.domainCandidate === 'string' ? event.domainCandidate.toLowerCase() : '';
+    const domainVerificationStatus = domain ? 'verified' : domainCandidate ? 'pending' : 'none';
+    const profile = { name: event.name, domain, domainCandidate, domainVerificationStatus, plan: event.basePlan, group: groupId || '', staging: group?.staging || '', production: group?.production || '' };
     try { generateInstallationPrompts({ id: event.officialStoreId, ...profile }); }
     catch { return reply({ error: 'Dados da loja inválidos.' }, 422); }
     const fingerprint = createHash('sha256').update(JSON.stringify([event.officialStoreId.toLowerCase(), event.revision, event.eventType, profile])).digest('hex');
