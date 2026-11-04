@@ -800,7 +800,7 @@ const DRIVER_ACTIONS = new Set([
   'account-bootstrap', 'account-claim', 'invite-activate', 'session-validate', 'offers', 'assignments',
   'route-current', 'history', 'ratings', 'driver-presence', 'shift-end', 'shift-close', 'offer-respond',
   'pickup-confirm', 'route-reorder', 'assignment-withdraw', 'delivery-complete', 'delivery-confirm',
-  'delivery-complete-with-pin', 'tracking-location-push', 'tracking-session-start', 'tracking-session-end',
+  'delivery-complete-with-pin', 'tracking-location-push', 'tracking-session-start', 'tracking-session-end', 'gate-wait-start',
 ]);
 
 async function authorizeAccountAction(req: NextRequest, action: string) {
@@ -825,7 +825,7 @@ function ownsAssignment(auth: ReturnType<typeof verifyDriverRequest>, assignment
 }
 
 function assertOwnedTargets(req: NextRequest, action: string, body: any) {
-  if (!['pickup-confirm','route-reorder','assignment-withdraw','delivery-complete','delivery-confirm','delivery-complete-with-pin','tracking-location-push','tracking-session-start'].includes(action)) return;
+  if (!['pickup-confirm','route-reorder','assignment-withdraw','delivery-complete','delivery-confirm','delivery-complete-with-pin','tracking-location-push','tracking-session-start','gate-wait-start'].includes(action)) return;
   const auth = verifyDriverRequest(req,liveDrivers,body);
   if (!auth.valid) throw new AccountSessionError(auth.error || 'Acesso negado.',auth.status || 401,'DRIVER_SESSION_INVALID');
   const keys: any[] = action === 'pickup-confirm' ? [...(body.assignmentIds || body.orderIds || [body.assignmentId || body.orderId]).filter(Boolean), ...(Array.isArray(body.pickupScopeIds) ? body.pickupScopeIds : [])] :
@@ -3125,6 +3125,46 @@ export async function POST(
         }
 
         // 12. Desistência de Entrega pelo Motoboy (assignment.withdraw)
+        // 11.B. Início de Espera no Portão pelo Motoboy
+        case 'gate-wait-start': {
+          const auth = verifyDriverRequest(req, liveDrivers, body);
+          if (!auth.valid) return jsonResponse({ success: false, error: auth.error || 'Acesso negado.' }, { status: auth.status || 401 });
+          const asgId = String(body.assignmentId || body.id || '');
+          const asg = liveAssignments.find(a => (String(a.id) === asgId || String(a.assignmentId) === asgId) && ownsAssignment(auth, a));
+          if (!asg) return jsonResponse({ success: false, error: 'Entrega não encontrada.' }, { status: 404 });
+          asg.waitingGateStartedAt = body.waitingGateStartedAt || new Date().toISOString();
+          if (body.waitingGateLimitMinutes && Number.isFinite(Number(body.waitingGateLimitMinutes))) {
+            asg.waitingGateLimitMinutes = Number(body.waitingGateLimitMinutes);
+          }
+          await persistLogisticsState();
+          return jsonResponse({ success: true, message: 'Espera no portão iniciada.', assignment: asg });
+        }
+
+        // 11.C. Acréscimo de Tempo de Espera no Portão pelo Lojista
+        case 'gate-wait-extend': {
+          const admin = verifyAdminRequest(req);
+          if (!admin.valid) return jsonResponse({ success: false, error: 'Acesso restrito ao lojista.' }, { status: 401 });
+          const asgId = String(body.assignmentId || body.id || '').replace(/^asg_/, '');
+          const ordNum = String(body.orderNumber || body.orderId || '').replace(/^#/, '');
+          const addMin = Number(body.addMinutes) || 5;
+          const asg = liveAssignments.find(a =>
+            isSameStore(a.storeId, admin.storeId) &&
+            ((asgId && (String(a.id).replace(/^asg_/, '') === asgId || String(a.assignmentId).replace(/^asg_/, '') === asgId)) ||
+             (ordNum && (String(a.orderNumber).replace(/^#/, '') === ordNum || String(a.orderId).replace(/^#/, '') === ordNum)))
+          );
+          if (!asg) return jsonResponse({ success: false, error: 'Entrega em rota não encontrada para este código.' }, { status: 404 });
+          asg.gateWaitExtendedMinutes = (asg.gateWaitExtendedMinutes || 0) + addMin;
+          if (!asg.waitingGateStartedAt) {
+            asg.waitingGateStartedAt = new Date().toISOString();
+          }
+          await persistLogisticsState();
+          return jsonResponse({
+            success: true,
+            message: `Acrescentado +${addMin} minutos de espera para o pedido #${asg.orderNumber}.`,
+            assignment: asg
+          });
+        }
+
         case 'assignment-withdraw': {
           const auth = verifyDriverRequest(req, liveDrivers, body);
           if (!auth.valid) {

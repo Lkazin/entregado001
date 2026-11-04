@@ -50,6 +50,31 @@ export default function DriverInTransitList({ focusedDriverId, onOpenOrderDetail
   const [selectedDriverId, setSelectedDriverId] = useState<string | null>(null);
   const [selectedDriverRoute, setSelectedDriverRoute] = useState<[number, number][]>([]);
   const [now, setNow] = useState(Date.now);
+  const [extendingNotice, setExtendingNotice] = useState<string>('');
+
+  const handleExtendGateWait = async (asgId: string, orderNumber: any, addMinutes: number) => {
+    try {
+      const adminToken = typeof window !== 'undefined' ? sessionStorage.getItem('novaesweb_admin_token') : null;
+      const res = await fetch('/api/v1/logistics/gate-wait-extend', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(adminToken ? { 'x-admin-token': adminToken } : {}),
+        },
+        body: JSON.stringify({ assignmentId: asgId, orderNumber, addMinutes }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.success) {
+        setExtendingNotice(`✓ +${addMinutes} min concedidos ao pedido #${orderNumber}!`);
+        setTimeout(() => setExtendingNotice(''), 4000);
+        fetchTracking();
+      } else {
+        alert(data?.error || 'Não foi possível acrescentar tempo.');
+      }
+    } catch {
+      alert('Falha de conexão com o servidor.');
+    }
+  };
   const trackingRequest = useRef<AbortController | null>(null);
   const routeRequest = useRef<AbortController | null>(null);
   const routeKey = useRef('');
@@ -168,6 +193,13 @@ export default function DriverInTransitList({ focusedDriverId, onOpenOrderDetail
       </div>
 
       {/* Grid: Mapa Amplo e Lista de Entregadores */}
+      {extendingNotice && (
+        <div className="px-3.5 py-2.5 rounded-xl bg-emerald-950 border border-emerald-600/70 text-emerald-300 text-xs font-bold flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+          <span>{extendingNotice}</span>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         
         {/* Coluna 1 e 2: Mapa MapLibre GL Interativo */}
@@ -259,10 +291,39 @@ export default function DriverInTransitList({ focusedDriverId, onOpenOrderDetail
                     {drv.assignments && drv.assignments.length > 0 && (
                       <div className="mt-2.5 pt-2 border-t border-zinc-800/80 space-y-1">
                         {drv.assignments.map(asg => (
-                          <div key={asg.id} className="flex items-center gap-1.5 text-[11px] text-zinc-300 truncate">
-                            <span className="font-bold text-amber-400 font-mono">#{asg.orderNumber}</span>
-                            <span className="text-zinc-600">•</span>
-                            <span className="truncate text-zinc-400">{asg.address}</span>
+                          <div key={asg.id} className="p-2 rounded-lg bg-zinc-950/70 border border-zinc-800/80 space-y-1.5 mb-1">
+                            <div className="flex items-center gap-1.5 text-[11px] text-zinc-300 truncate">
+                              <span className="font-bold text-amber-400 font-mono">#{asg.orderNumber}</span>
+                              <span className="text-zinc-600">•</span>
+                              <span className="truncate text-zinc-400">{asg.address}</span>
+                            </div>
+                            <div className="flex items-center justify-between text-[10px] pt-1 border-t border-zinc-800/60">
+                              <span className="text-zinc-500 font-bold">⏱️ Espera no Portão:</span>
+                              <div className="flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={e => {
+                                    e.stopPropagation();
+                                    handleExtendGateWait(asg.id, asg.orderNumber, 3);
+                                  }}
+                                  className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-orange-600 hover:text-white border border-zinc-700 text-zinc-300 font-bold transition"
+                                  title="Dar +3 minutos de espera no portão"
+                                >
+                                  +3 min
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={e => {
+                                    e.stopPropagation();
+                                    handleExtendGateWait(asg.id, asg.orderNumber, 5);
+                                  }}
+                                  className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-orange-600 hover:text-white border border-zinc-700 text-zinc-300 font-bold transition"
+                                  title="Dar +5 minutos de espera no portão"
+                                >
+                                  +5 min
+                                </button>
+                              </div>
+                            </div>
                           </div>
                         ))}
                       </div>
