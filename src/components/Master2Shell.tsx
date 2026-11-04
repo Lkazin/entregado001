@@ -104,6 +104,19 @@ export default function Master2Shell({
         </div>;
       })}
     </nav>
+    {!collapsed && selected && <div className="mx-3 mb-3 rounded-xl border border-fuchsia-700/40 bg-[#241334] p-3">
+      <p className="text-[10px] font-black uppercase tracking-widest text-fuchsia-300">Loja em análise · rascunho local</p>
+      <p className="mt-2 truncate text-sm font-bold" title={selected.name}>{selected.name}</p>
+      <p className="mt-1 truncate text-xs text-zinc-400">{selected.stage}</p>
+      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-zinc-800" role="progressbar" aria-valuenow={selected.completed.length} aria-valuemin={0} aria-valuemax={8} aria-label="Etapas de instalação concluídas">
+        <div className="h-full rounded-full bg-fuchsia-500" style={{ width: Math.min(100, selected.completed.length / 8 * 100) + '%' }}/>
+      </div>
+      <div className="mt-2 flex justify-between text-xs text-zinc-400"><span>Etapas manuais</span><strong className="text-fuchsia-200">{selected.completed.length}/8</strong></div>
+      <div className="mt-3 flex gap-2">
+        <button type="button" onClick={() => navigate('integrate')} className="flex-1 rounded-lg bg-fuchsia-700/70 px-2 py-2 text-xs font-bold hover:bg-fuchsia-600">Prompts</button>
+        <button type="button" onClick={() => navigate('tests')} className="flex-1 rounded-lg border border-fuchsia-700/50 px-2 py-2 text-xs font-bold hover:bg-fuchsia-950/40">Testes</button>
+      </div>
+    </div>}
     {!collapsed && <div className="mx-3 mb-3 rounded-xl border border-fuchsia-800/30 bg-fuchsia-950/20 p-3">
       <p className="flex items-center gap-2 text-xs font-bold text-fuchsia-200"><ShieldCheck size={15}/> Central técnica</p>
       <p className="mt-2 text-xs leading-relaxed text-zinc-400">Master 1 autoriza. Master 2 acompanha a integração e a homologação.</p>
