@@ -10,7 +10,7 @@ type Section = 'overview' | 'plans' | 'integrate' | 'stores' | 'tests' | 'contra
 type Stage = 'Não iniciado' | 'Preparação' | 'Aguardando implementação' | 'Testes' | 'Homologação' | 'Erro/Pendência';
 type Check = { checked: boolean; evidence: string };
 type HistoryEntry = { at: string; action: string; version: string };
-type StoreDraft = { findings: Record<string, string>; history: HistoryEntry[]; completed: number[]; id: string; name: string; plan: string; group: string; staging: string; production: string; version: string; stage: Stage; pending: string; checks: Check[] };
+type StoreDraft = { findings: Record<string, string>; stepEvidence: Record<string, string>; history: HistoryEntry[]; completed: number[]; id: string; name: string; plan: string; group: string; staging: string; production: string; version: string; stage: Stage; pending: string; checks: Check[] };
 const diagnosticItems = ['Projeto Supabase e ambiente', 'Tabelas e funções', 'Permissões e RLS', 'API e eventos', 'Pedidos e checkout', 'Despacho e vínculo de motoboys', 'Aplicativo universal e notificações'];
 const diagnosticStatuses = ['Não verificado', 'Existente e funcional', 'Existente e incompleto', 'Ausente', 'Incompatível'];
 const storageKey = 'nw:master2:manual-installations:v1';
@@ -19,7 +19,7 @@ const checks = ['Loja identificada corretamente', 'Entregador vinculado à loja 
 const nav: [Section, string, typeof LayoutDashboard][] = [['overview', 'Dashboard', LayoutDashboard], ['stores', 'Lojas recebidas', Store], ['integrate', 'Integração por loja', Workflow], ['plans', 'Planos e recursos', Layers3], ['library', 'Biblioteca de prompts', BookOpen], ['diagnostic', 'Diagnóstico técnico', Search], ['tests', 'Testes / Homologação', ClipboardCheck], ['history', 'Histórico e auditoria', FileClock], ['contract', 'Conectar Master 1', Link2]];
 const input = 'mt-1 min-h-11 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-base text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-fuchsia-400';
 const button = 'min-h-11 rounded-xl bg-fuchsia-700 px-4 py-2 text-sm font-bold text-white disabled:opacity-50';
-function emptyStore(): StoreDraft { return { findings: {}, history: [], completed: [], id: '', name: '', plan: 'business', group: '', staging: '', production: '', version: '', stage: 'Não iniciado', pending: 'Aguardando validação oficial do Master 1 e diagnóstico do site.', checks: checks.map(() => ({ checked: false, evidence: '' })) }; }
+function emptyStore(): StoreDraft { return { findings: {}, stepEvidence: {}, history: [], completed: [], id: '', name: '', plan: 'business', group: '', staging: '', production: '', version: '', stage: 'Não iniciado', pending: 'Aguardando validação oficial do Master 1 e diagnóstico do site.', checks: checks.map(() => ({ checked: false, evidence: '' })) }; }
 function safeDraft(value: unknown): StoreDraft | null {
   if (!value || typeof value !== 'object') return null;
   const source = value as Partial<StoreDraft>;
@@ -35,6 +35,10 @@ function safeDraft(value: unknown): StoreDraft | null {
     return diagnosticStatuses.includes(status ?? '') ? [[item, status]] : [];
   })) as Record<string, string>;
   draft.completed = Array.isArray(source.completed) ? [...new Set(source.completed.filter(n => Number.isInteger(n) && n >= 0 && n < 8))] : [];
+  if (source.stepEvidence && typeof source.stepEvidence === 'object' && !Array.isArray(source.stepEvidence)) {
+    draft.stepEvidence = Object.fromEntries(Object.entries(source.stepEvidence).filter(([key, value]) => /^[0-7]$/.test(key) && typeof value === 'string' && value.length <= 1500 && !/sb_secret_|service_role|eyJ[A-Za-z0-9_-]{12,}|password\s*=/i.test(value)));
+  }
+  draft.completed = draft.completed.filter(step => typeof draft.stepEvidence[String(step)] === 'string' && draft.stepEvidence[String(step)].trim().length >= 20 && (step === 0 || draft.completed.includes(step - 1)));
   draft.history = Array.isArray(source.history) ? source.history.slice(0, 100).filter(entry => entry && typeof entry.at === 'string' && typeof entry.action === 'string' && typeof entry.version === 'string') : [];
   if (/sb_secret_|service_role|eyJ[A-Za-z0-9_-]{12,}/i.test(JSON.stringify(draft))) return null;
   return draft;
@@ -202,7 +206,7 @@ export default function Master2Workspace() {
       <label className="block text-sm font-semibold">Loja de referência<select className={input} value={selectedId} onChange={event => setSelectedId(event.target.value)}><option value="">Selecione uma loja</option>{stores.map(store => <option key={store.id} value={store.id}>{store.name} · {store.id}</option>)}</select></label>
       {!selected && <button className={button} onClick={() => setSection('stores')}>Cadastrar referência de loja</button>}
     </>}
-    {(section === 'integrate' || section === 'library') && <Master2Prompts key={selectedId + section} store={selected} library={section === 'library'} onComplete={completed => updateSelected({ completed })} />}
+    {(section === 'integrate' || section === 'library') && <Master2Prompts key={selectedId + section} store={selected} library={section === 'library'} onComplete={(completed, stepEvidence) => updateSelected({ completed, stepEvidence })} />}
     {section === 'diagnostic' && <section className="space-y-4">
       <h2 className="text-2xl font-black">Diagnóstico técnico</h2>
       <p className="text-zinc-300">Modelo consultado em modo somente leitura. O Supabase do modelo possui tabelas com RLS habilitada para contas e vínculos de entregadores, convites, estado logístico e permissões da loja. Isso confirma a estrutura, sem comprovar o comportamento das políticas.</p>
