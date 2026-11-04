@@ -60,7 +60,7 @@ async function receiveOfficial(request: NextRequest) {
       return data ? reply({ store: data }) : reply({ error: 'Loja não recebida.' }, 404);
     }
     const allowed = ['schemaVersion','eventType','eventId','officialStoreId','name','domain','domainCandidate','domainVerificationStatus','basePlan','storeStatus','kitAuthorized','supabaseGroupId','revision'];
-    if (Object.keys(event).some(key => !allowed.includes(key)) || event.eventType !== 'kit.authorized' || event.storeStatus !== 'active' || event.kitAuthorized !== true ||
+    if (Object.keys(event).some(key => !allowed.includes(key)) || !['kit.authorized','kit.revoked'].includes(String(event.eventType)) || (event.eventType === 'kit.authorized' && (event.storeStatus !== 'active' || event.kitAuthorized !== true)) || (event.eventType === 'kit.revoked' && event.kitAuthorized !== false) ||
       (event.eventType === 'kit.authorized' && !['business','premium'].includes(String(event.basePlan))) ||
       (event.eventType === 'kit.revoked' && event.basePlan != null && !['business','premium'].includes(String(event.basePlan))) ||
       typeof event.name !== 'string' || !event.name.trim() || event.name.length > 150 || typeof event.eventId !== 'string' || !/^[\w-]{1,100}$/.test(event.eventId) ||
