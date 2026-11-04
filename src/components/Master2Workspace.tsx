@@ -207,6 +207,7 @@ export default function Master2Workspace() {
     stores={stores}
     selectedId={selectedId}
     onSelectStore={setSelectedId}
+    onOpenOfficialStore={openReceivedStore}
     onChangePin={() => { setChangePin(!changePin); setPinMessage(''); setPassword(''); setNewPin(''); }}
     onLogout={() => void logout()}
   >{pinMessage && <p role="status">{pinMessage}</p>}{changePin && <form onSubmit={updatePin} className="space-y-3 rounded-xl border border-zinc-700 p-4">
