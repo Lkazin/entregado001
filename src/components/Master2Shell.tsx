@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, type ReactNode } from 'react';
+import type { ReceivedStore } from '@/components/Master2Connection';
 import {
   BookOpen, ChevronRight, ClipboardCheck, FileClock, Layers3,
   LayoutDashboard, Link2, LogOut, Menu, PanelLeftClose, PanelLeftOpen,
@@ -23,13 +24,14 @@ const menu = [
 ] as const;
 
 export default function Master2Shell({
-  section, onNavigate, stores, selectedId, onSelectStore, onChangePin, onLogout, children,
+  section, onNavigate, stores, selectedId, onSelectStore, onOpenOfficialStore, onChangePin, onLogout, children,
 }: {
   section: Master2Section;
   onNavigate: (section: Master2Section) => void;
   stores: StoreLink[];
   selectedId: string;
   onSelectStore: (id: string) => void;
+  onOpenOfficialStore: (store: ReceivedStore) => void;
   onChangePin: () => void;
   onLogout: () => void;
   children: ReactNode;
@@ -41,6 +43,8 @@ export default function Master2Shell({
   const searchRef = useRef<HTMLInputElement>(null);
   const [logoFailed, setLogoFailed] = useState(false);
   const [filter, setFilter] = useState<'all' | 'pending'>('all');
+  const [officialStores, setOfficialStores] = useState<ReceivedStore[]>([]);
+  const [officialLoading, setOfficialLoading] = useState(false);
 
   useEffect(() => {
     try { setCompact(localStorage.getItem('nw:master2:sidebar-compact') === 'true'); } catch {}
@@ -57,11 +61,29 @@ export default function Master2Shell({
     return () => window.removeEventListener('keydown', handleKey);
   }, []);
 
+  useEffect(() => {
+    if (!searchOpen) return;
+    const controller = new AbortController();
+    setOfficialLoading(true);
+    fetch('/api/master2/integrations/connection', { cache: 'no-store', signal: controller.signal })
+      .then(async response => {
+        if (!response.ok) throw new Error('Consulta indisponível');
+        return response.json();
+      }).then(data => {
+        if (!controller.signal.aborted) setOfficialStores(Array.isArray(data.stores) ? data.stores : []);
+      }).catch(() => { if (!controller.signal.aborted) setOfficialStores([]); })
+      .finally(() => { if (!controller.signal.aborted) setOfficialLoading(false); });
+    return () => controller.abort();
+  }, [searchOpen]);
   const selected = stores.find(store => store.id === selectedId);
   const pending = stores.filter(store => store.stage === 'Erro/Pendência' || store.stage === 'Não iniciado').length;
   const matching = stores.filter(store =>
     (filter === 'all' || ['Erro/Pendência', 'Não iniciado'].includes(store.stage)) &&
     (store.name.toLocaleLowerCase('pt-BR').includes(search.trim().toLocaleLowerCase('pt-BR')) || store.id.toLowerCase().includes(search.trim().toLowerCase()))
+  );
+  const matchingOfficial = officialStores.filter(store =>
+    (filter === 'all' || store.status !== 'integrated') &&
+    (store.profile.name.toLocaleLowerCase('pt-BR').includes(search.trim().toLocaleLowerCase('pt-BR')) || store.id.toLowerCase().includes(search.trim().toLowerCase()))
   );
   const currentTitle = menu.find(item => item.id === section)?.text || 'Visão geral';
   function navigate(next: Master2Section) {
@@ -175,6 +197,12 @@ export default function Master2Shell({
           <button type="button" aria-pressed={filter === 'pending'} onClick={() => setFilter('pending')} className={'rounded-full px-3 py-2 ' + (filter === 'pending' ? 'bg-fuchsia-700 text-white' : 'bg-zinc-800 text-zinc-300')}>Pendentes ({pending})</button>
         </div>
         <div className="max-h-[55vh] overflow-y-auto p-2">
+          <p className="px-3 pb-2 pt-2 text-[11px] font-black uppercase tracking-widest text-fuchsia-300">Lojas oficiais recebidas {officialLoading ? '· consultando…' : '(' + matchingOfficial.length + ')'}</p>
+          {matchingOfficial.map(store => <button key={store.id} type="button" onClick={() => { onOpenOfficialStore(store); navigate('integrate'); }} className="flex min-h-16 w-full items-center gap-3 rounded-xl px-3 text-left hover:bg-fuchsia-950/50">
+            <span className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-fuchsia-900/40 text-fuchsia-200"><ShieldCheck size={19}/></span>
+            <span className="min-w-0 flex-1"><span className="block truncate font-bold">{store.profile.name}</span><span className="block truncate text-xs text-zinc-400">{store.profile.plan || 'Plano não informado'} · {store.status === 'suspended' ? 'Kit suspenso' : 'Recebida'} · {store.id}</span></span><ChevronRight className="shrink-0 text-fuchsia-300" size={18}/>
+          </button>)}
+          <p className="px-3 pb-2 pt-4 text-[11px] font-black uppercase tracking-widest text-fuchsia-300">Rascunhos neste navegador ({matching.length})</p>
           {matching.length ? matching.map(store => <button key={store.id} type="button" onClick={() => { onSelectStore(store.id); navigate('integrate'); }} className="flex min-h-16 w-full items-center gap-3 rounded-xl px-3 text-left hover:bg-fuchsia-950/50">
             <span className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-purple-900/50 text-fuchsia-200"><Store size={19}/></span>
             <span className="min-w-0 flex-1"><span className="block truncate font-bold">{store.name}</span><span className="block truncate text-xs text-zinc-400">{store.stage} · {store.completed.length}/8 etapas · {store.id}</span></span>
