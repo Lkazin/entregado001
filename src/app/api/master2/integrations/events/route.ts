@@ -90,7 +90,6 @@ async function receiveOfficial(request: NextRequest) {
     const fingerprint = createHash('sha256').update(JSON.stringify([event.officialStoreId.toLowerCase(), event.revision, event.eventType, profile])).digest('hex');
     const { data, error } = await supabaseAdmin.rpc('master2_receive_store', {
       p_event: event.eventId, p_id: event.officialStoreId, p_revision: event.revision, p_profile: profile, p_fingerprint: fingerprint,
-      p_status: authorized ? 'pending_diagnosis' : 'suspended',
     });
     if (error) throw error;
     if (data !== 'received') return reply({ error: data }, 409);
