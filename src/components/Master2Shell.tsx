@@ -102,7 +102,6 @@ export default function Master2Shell({
             {!collapsed && item.id === 'diagnostic' && pending > 0 && <span className="rounded-full bg-amber-900/60 px-2 py-0.5 text-xs text-amber-100">{pending}</span>}
           </button>
         </div>;
-  }
       })}
     </nav>
     {!collapsed && <div className="mx-3 mb-3 rounded-xl border border-fuchsia-800/30 bg-fuchsia-950/20 p-3">
@@ -111,6 +110,7 @@ export default function Master2Shell({
     </div>}
     <button type="button" title="Sair do Master 2" onClick={onLogout} className={'m-3 flex min-h-11 items-center rounded-xl border border-rose-900/30 px-3 text-sm font-semibold text-rose-200 hover:bg-rose-900/20 ' + (collapsed ? 'justify-center' : 'gap-3')}><LogOut size={18}/>{!collapsed && 'Sair com segurança'}</button>
   </div>;
+  }
 
   return <main className="min-h-screen bg-[#0b0614] text-white">
     <div className={'mx-auto min-h-screen max-w-[1920px] lg:grid ' + (compact ? 'lg:grid-cols-[76px_minmax(0,1fr)]' : 'lg:grid-cols-[270px_minmax(0,1fr)]')}>
