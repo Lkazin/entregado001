@@ -110,11 +110,23 @@ export default function Master2Workspace() {
   }
 
   async function logout() {
-    sessionRequest.current?.abort(); setAuth('login'); setPassword(''); setError(''); setSection('overview');
+    sessionRequest.current?.abort();
+    setAuth('login'); setPassword(''); setError(''); setSection('overview');
+    // O login do Master 2 e o do painel modelo compartilham o mesmo navegador.
+    // Sair de qualquer um deles encerra ambas as sessões locais e de servidor.
+    sessionStorage.removeItem('novaesweb_admin_auth');
+    sessionStorage.removeItem('novaesweb_admin_token');
     const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 10000);
-    try { const response = await fetch('/api/master2/session', { method: 'DELETE', signal: controller.signal }); if (!response.ok) throw new Error(); }
-    catch { if (alive.current) setError('A sessão foi ocultada neste dispositivo, mas não foi possível confirmar a saída no servidor. Tente sair novamente ao recuperar a conexão.'); }
-    finally { clearTimeout(timeout); }
+    try {
+      const responses = await Promise.all([
+        fetch('/api/master2/session', { method: 'DELETE', cache: 'no-store', signal: controller.signal }),
+        fetch('/api/admin/auth', { method: 'DELETE', cache: 'no-store', signal: controller.signal }),
+      ]);
+      if (responses.some(response => !response.ok)) throw new Error('Falha ao encerrar sessão.');
+      window.location.replace('/master2');
+    } catch {
+      if (alive.current) setError('Não foi possível confirmar a saída no servidor. Verifique a conexão e saia novamente.');
+    } finally { clearTimeout(timeout); }
   }
   function persist(next: StoreDraft[]) {
     if (next.some(store => !safeDraft(store))) { setSaved(false); setError('Não salve credenciais ou dados inválidos no rascunho.'); return false; }
