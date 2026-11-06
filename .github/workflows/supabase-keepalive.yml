@@ -1,0 +1,49 @@
+name: Supabase keepalive (Entregador / Bella Pizza)
+
+on:
+  schedule:
+    - cron: "17 10,22 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supabase-keepalive-entregador
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Validar configuração
+        env:
+          SUPABASE_PUBLISHABLE_KEY: sb_publishable_Ai-alg5ctv-JXKylcok-JQ_fO5-C2EV
+        run: |
+          if [ -z "$SUPABASE_PUBLISHABLE_KEY" ]; then
+            echo "::error::Chave publishable ausente."
+            exit 1
+          fi
+
+      - name: Consulta mínima de leitura no banco
+        env:
+          SUPABASE_PUBLISHABLE_KEY: sb_publishable_Ai-alg5ctv-JXKylcok-JQ_fO5-C2EV
+        run: |
+          set -euo pipefail
+          url="https://ngrkqutqmlhdenrxyaos.supabase.co/rest/v1/order_delivery_ratings?select=id&limit=1"
+          # O endpoint consulta uma tabela existente, sem registrar a resposta (descartada no GitHub Actions).
+          # Usa somente chave publica publishable (segura para clientes com RLS); NUNCA use service_role.
+          for attempt in 1 2 3; do
+            status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 15 \
+              --header "apikey: $SUPABASE_PUBLISHABLE_KEY" \
+              "$url") || status="000"
+            if [ "$status" = "200" ] || [ "$status" = "206" ]; then
+              echo "Consulta Supabase concluída (HTTP $status)."
+              exit 0
+            fi
+            echo "Tentativa $attempt: HTTP $status."
+            sleep 5
+          done
+          echo "::error::Não foi possível realizar a consulta ao Supabase."
+          exit 1
