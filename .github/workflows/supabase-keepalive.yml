@@ -31,8 +31,8 @@ jobs:
           SUPABASE_PUBLISHABLE_KEY: ${{ secrets.ENTREGADOR_SUPABASE_PUBLISHABLE_KEY }}
         run: |
           set -euo pipefail
-          url="https://ngrkqutqmlhdenrxyaos.supabase.co/rest/v1/order_delivery_ratings?select=id&limit=0"
-          # O endpoint consulta uma tabela existente, sem retornar dados pessoais.
+          url="https://ngrkqutqmlhdenrxyaos.supabase.co/rest/v1/order_delivery_ratings?select=id&limit=1"
+          # O endpoint consulta uma tabela existente, sem registrar a resposta (descartada no GitHub Actions).
           # Usa somente chave publishable/anon; NUNCA use service_role.
           for attempt in 1 2 3; do
             status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 15 \
