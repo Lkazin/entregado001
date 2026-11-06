@@ -9,7 +9,7 @@ Executar 1 consulta de leitura por dia pela API REST do Supabase, para gerar ati
 ## Segurança
 - Não usa senha de banco nem chave `service_role`.
 - Requer apenas a chave pública publishable/anon configurada como **GitHub Actions secret** `ENTREGADOR_SUPABASE_PUBLISHABLE_KEY`.
-- Não lê nem altera pedidos, entregas, usuários ou qualquer dado de negócio. A consulta usa `limit=0`.
+- Não altera pedidos, entregas, usuários ou qualquer dado de negócio. Consulta no máximo um identificador de avaliação (`limit=1`), descarta a resposta sem registrar o conteúdo e preserva a RLS.
 - O endpoint consultado já existe e tem permissão SELECT para `anon`; RLS permanece habilitado.
 - Falhas ficam visíveis no histórico de execução do GitHub Actions.
 
