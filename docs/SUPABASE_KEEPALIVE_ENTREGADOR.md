@@ -4,7 +4,7 @@ Projeto Supabase identificado: `ngrkqutqmlhdenrxyaos` (entregador).
 O painel da Bella Pizza e o entregador compartilham esse projeto, conforme confirmado pelo proprietário.
 
 ## Objetivo
-Executar 2 consultas de leitura por semana (segundas e quintas) pela API REST do Supabase, para gerar atividade de banco. **Não há garantia de impedir a pausa:** segundo o Supabase, projetos gratuitos com pouca atividade ao longo de 7 dias ainda podem ser pausados.
+Executar 2 consultas de leitura por dia pela API REST do Supabase, para gerar atividade de banco. **Não há garantia de impedir a pausa:** segundo o Supabase, projetos gratuitos com pouca atividade ao longo de 7 dias ainda podem ser pausados.
 
 ## Segurança
 - Não usa senha de banco nem chave `service_role`.
@@ -21,4 +21,4 @@ Executar 2 consultas de leitura por semana (segundas e quintas) pela API REST do
 5. Em **Actions**, executar manualmente `Supabase keepalive (Entregador / Bella Pizza)` e verificar resultado HTTP 200. Monitorar também execuções agendadas.
 
 ## Observações
-O cron roda segundas e quintas às 10:17 UTC (07:17 em Brasília, UTC-3) e pode atrasar por agendamento da plataforma. Se o repositório ficar inativo por muito tempo, o GitHub pode desativar workflows agendados. O plano Pro do Supabase é a forma suportada para evitar suspensão por inatividade sem depender do keepalive.
+O cron roda todos os dias às 10:17 e 22:17 UTC (07:17 e 19:17 em Brasília, UTC-3) e pode atrasar por agendamento da plataforma. Se o repositório ficar inativo por muito tempo, o GitHub pode desativar workflows agendados. O plano Pro do Supabase é a forma suportada para evitar suspensão por inatividade sem depender do keepalive.
