@@ -1425,6 +1425,7 @@ export default function AdminDashboardPage() {
             <span>Pedidos Cancelados ({orders.filter(o => o.status === 'cancelado').length})</span>
           </button>
           <button type="button" aria-current={activeTab === 'store_pickup' ? 'page' : undefined} onClick={() => setActiveTab('store_pickup')} className="rounded-xl px-4 py-2 text-cyan-200 hover:bg-zinc-800">Retirada na loja ({orders.filter(o => isPickupOrder(o) && !['concluido','cancelado'].includes(o.status)).length})</button>
+          {storeSettings.storeId === 'store_bella_pizza' && <Link href="/admin/laboratorio" className="rounded-xl px-4 py-2 text-fuchsia-200 hover:bg-zinc-800">Laboratório Bela Pizza</Link>}
           {kitLab && <button type="button" aria-current={activeTab === 'premium_kit' ? 'page' : undefined} onClick={() => setActiveTab('premium_kit')} className={`px-4 py-2 rounded-xl flex items-center gap-2 transition ${activeTab === 'premium_kit' ? 'bg-fuchsia-700 text-white' : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60'}`}>
             <Package className="h-4 w-4" /><span>Kit Premium · Implantação</span>
           </button>}
